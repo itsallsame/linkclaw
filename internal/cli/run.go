@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
+	"github.com/xiewanpeng/claw-identity/internal/publish"
 )
 
 type initOutput struct {
@@ -18,6 +19,13 @@ type initOutput struct {
 	Command string          `json:"command"`
 	Result  initflow.Result `json:"result,omitempty"`
 	Error   string          `json:"error,omitempty"`
+}
+
+type publishOutput struct {
+	OK      bool           `json:"ok"`
+	Command string         `json:"command"`
+	Result  publish.Result `json:"result,omitempty"`
+	Error   string         `json:"error,omitempty"`
 }
 
 func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
@@ -32,6 +40,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return 0
 	case "init":
 		return runInit(ctx, args[1:], in, out, errOut)
+	case "publish":
+		return runPublish(ctx, args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		printUsage(errOut)
@@ -107,6 +117,55 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	return 0
 }
 
+func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
+	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+
+	home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+	origin := fs.String("origin", "", "public home origin (for example https://agent.example)")
+	outputDir := fs.String("output", "", "bundle output directory (defaults to <home>/publish)")
+	tier := fs.String("tier", publish.TierRecommended, "publish tier: minimum|recommended|full")
+	jsonOutput := fs.Bool("json", false, "emit JSON result")
+	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if len(fs.Args()) > 0 {
+		fmt.Fprintf(errOut, "unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 1
+	}
+
+	service := publish.NewService()
+	result, err := service.Publish(ctx, publish.Options{
+		Home:   *home,
+		Origin: *origin,
+		Output: *outputDir,
+		Tier:   *tier,
+	})
+	if err != nil {
+		return writePublishError(errOut, out, *jsonOutput, err)
+	}
+
+	if *jsonOutput {
+		enc := json.NewEncoder(out)
+		if err := enc.Encode(publishOutput{OK: true, Command: "publish", Result: result}); err != nil {
+			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintln(out, "linkclaw publish completed")
+	fmt.Fprintf(out, "home: %s\n", result.Home)
+	fmt.Fprintf(out, "output: %s\n", result.OutputDir)
+	fmt.Fprintf(out, "tier: %s\n", result.Tier)
+	fmt.Fprintf(out, "origin: %s\n", result.HomeOrigin)
+	fmt.Fprintf(out, "manifest: %s\n", result.ManifestPath)
+	fmt.Fprintf(out, "artifacts: %d\n", len(result.Artifacts))
+	return 0
+}
+
 func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
 		enc := json.NewEncoder(out)
@@ -117,6 +176,19 @@ func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 		return 1
 	}
 	fmt.Fprintf(errOut, "init failed: %v\n", err)
+	return 1
+}
+
+func writePublishError(errOut, out io.Writer, jsonOutput bool, err error) int {
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		if encodeErr := enc.Encode(publishOutput{OK: false, Command: "publish", Error: err.Error()}); encodeErr != nil {
+			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
+			return 1
+		}
+		return 1
+	}
+	fmt.Fprintf(errOut, "publish failed: %v\n", err)
 	return 1
 }
 
@@ -140,4 +212,5 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintln(out, "  init    Initialize LinkClaw local home and state")
+	fmt.Fprintln(out, "  publish Compile and bundle publishable identity artifacts")
 }

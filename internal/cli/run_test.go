@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,6 +132,58 @@ func TestRunInitNonInteractiveRequiresCanonicalID(t *testing.T) {
 	}
 	if !strings.Contains(out.Error, "canonical id") {
 		t.Fatalf("expected canonical id error, got %q", out.Error)
+	}
+}
+
+func TestRunPublishJSON(t *testing.T) {
+	t.Parallel()
+
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	initArgs := []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:web:agent.example",
+		"--display-name", "Agent Example",
+		"--non-interactive",
+		"--json",
+	}
+	initCode, _, initErr := runForTest(t, initArgs, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	outputDir := filepath.Join(t.TempDir(), "bundle")
+	args := []string{
+		"publish",
+		"--home", home,
+		"--origin", "https://agent.example",
+		"--output", outputDir,
+		"--tier", "full",
+		"--json",
+	}
+	code, stdout, stderr := runForTest(t, args, "")
+	if code != 0 {
+		t.Fatalf("publish exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out publishOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Tier != "full" {
+		t.Fatalf("tier = %q", out.Result.Tier)
+	}
+	if out.Result.HomeOrigin != "https://agent.example" {
+		t.Fatalf("home origin = %q", out.Result.HomeOrigin)
+	}
+	if len(out.Result.Artifacts) != 4 {
+		t.Fatalf("artifact count = %d, want 4", len(out.Result.Artifacts))
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "manifest.json")); err != nil {
+		t.Fatalf("manifest missing: %v", err)
 	}
 }
 
