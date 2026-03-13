@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,23 +19,34 @@ import (
 )
 
 type Options struct {
-	Home            string
-	Input           string
-	AllowDiscovered bool
-	AllowMismatch   bool
+	Home                string
+	Input               string
+	AllowDiscovered     bool
+	AllowMismatch       bool
+	Action              string
+	TargetContactID     string
+	ExpectedCanonicalID string
 }
 
 type Result struct {
 	Home          string          `json:"home"`
 	DBPath        string          `json:"db_path"`
+	Action        string          `json:"action"`
 	ContactID     string          `json:"contact_id"`
 	TrustID       string          `json:"trust_id"`
 	EventID       string          `json:"event_id"`
 	Created       bool            `json:"created"`
+	HandleCount   int             `json:"handle_count"`
 	SnapshotCount int             `json:"snapshot_count"`
 	ProofCount    int             `json:"proof_count"`
 	Inspection    resolver.Result `json:"inspection"`
 	ImportedAt    string          `json:"imported_at"`
+}
+
+type handleCandidate struct {
+	Type    string
+	Value   string
+	Primary bool
 }
 
 type Service struct {
@@ -58,15 +70,20 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 		nowFn = time.Now
 	}
 	now := nowFn().UTC()
+	action, err := normalizeAction(opts.Action)
+	if err != nil {
+		return Result{}, err
+	}
 
 	inspection, err := s.Resolver.Inspect(ctx, opts.Input)
 	if err != nil {
 		return Result{}, err
 	}
+	alignInspectionWithKnownContact(&inspection, opts.ExpectedCanonicalID)
 	if err := ensureImportable(inspection.Status, opts); err != nil {
 		return Result{}, err
 	}
-	if strings.TrimSpace(inspection.CanonicalID) == "" {
+	if strings.TrimSpace(inspection.CanonicalID) == "" && strings.TrimSpace(opts.TargetContactID) == "" {
 		return Result{}, errors.New("resolved identity is missing canonical_id")
 	}
 
@@ -100,11 +117,15 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 	}
 	defer tx.Rollback()
 
-	contactID, created, err := upsertContact(ctx, tx, inspection, now)
+	contactID, created, err := upsertContact(ctx, tx, inspection, now, opts)
 	if err != nil {
 		return Result{}, err
 	}
-	trustID, err := upsertTrustRecord(ctx, tx, contactID, inspection, now)
+	trustID, err := upsertTrustRecord(ctx, tx, contactID, inspection, now, action)
+	if err != nil {
+		return Result{}, err
+	}
+	handleCount, err := upsertHandles(ctx, tx, contactID, inspection, now)
 	if err != nil {
 		return Result{}, err
 	}
@@ -116,7 +137,7 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	eventID, err := insertImportEvent(ctx, tx, contactID, inspection, now)
+	eventID, err := insertActionEvent(ctx, tx, contactID, inspection, now, action)
 	if err != nil {
 		return Result{}, err
 	}
@@ -128,10 +149,12 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 	return Result{
 		Home:          home,
 		DBPath:        paths.DB,
+		Action:        action,
 		ContactID:     contactID,
 		TrustID:       trustID,
 		EventID:       eventID,
 		Created:       created,
+		HandleCount:   handleCount,
 		SnapshotCount: snapshotCount,
 		ProofCount:    proofCount,
 		Inspection:    inspection,
@@ -158,7 +181,49 @@ func ensureImportable(status string, opts Options) error {
 	}
 }
 
-func upsertContact(ctx context.Context, tx *sql.Tx, inspection resolver.Result, now time.Time) (string, bool, error) {
+func upsertContact(ctx context.Context, tx *sql.Tx, inspection resolver.Result, now time.Time, opts Options) (string, bool, error) {
+	if targetContactID := strings.TrimSpace(opts.TargetContactID); targetContactID != "" {
+		var contactID string
+		var canonicalID string
+		err := tx.QueryRowContext(
+			ctx,
+			`SELECT contact_id, canonical_id
+			 FROM contacts
+			 WHERE contact_id = ?
+			 LIMIT 1`,
+			targetContactID,
+		).Scan(&contactID, &canonicalID)
+		switch {
+		case err == nil:
+			if expected := strings.TrimSpace(opts.ExpectedCanonicalID); expected != "" && canonicalID != expected {
+				return "", false, fmt.Errorf("target contact %q canonical_id %q does not match expected %q", contactID, canonicalID, expected)
+			}
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE contacts
+				 SET display_name = CASE WHEN ? <> '' THEN ? ELSE display_name END,
+				     home_origin = CASE WHEN ? <> '' THEN ? ELSE home_origin END,
+				     profile_url = CASE WHEN ? <> '' THEN ? ELSE profile_url END,
+				     status = ?,
+				     last_seen_at = ?
+				 WHERE contact_id = ?`,
+				inspection.DisplayName, inspection.DisplayName,
+				inspection.NormalizedOrigin, inspection.NormalizedOrigin,
+				inspection.ProfileURL, inspection.ProfileURL,
+				inspection.Status,
+				now.Format(time.RFC3339Nano),
+				contactID,
+			); err != nil {
+				return "", false, fmt.Errorf("update known contact: %w", err)
+			}
+			return contactID, false, nil
+		case errors.Is(err, sql.ErrNoRows):
+			return "", false, fmt.Errorf("target contact %q not found", targetContactID)
+		default:
+			return "", false, fmt.Errorf("query target contact: %w", err)
+		}
+	}
+
 	const selectSQL = `
 		SELECT contact_id
 		FROM contacts
@@ -222,7 +287,7 @@ func upsertContact(ctx context.Context, tx *sql.Tx, inspection resolver.Result, 
 	return contactID, true, nil
 }
 
-func upsertTrustRecord(ctx context.Context, tx *sql.Tx, contactID string, inspection resolver.Result, now time.Time) (string, error) {
+func upsertTrustRecord(ctx context.Context, tx *sql.Tx, contactID string, inspection resolver.Result, now time.Time, action string) (string, error) {
 	const selectSQL = `
 		SELECT trust_id, trust_level, risk_flags
 		FROM trust_records
@@ -248,7 +313,7 @@ func upsertTrustRecord(ctx context.Context, tx *sql.Tx, contactID string, inspec
 			 SET verification_state = ?, decision_reason = ?, updated_at = ?
 			 WHERE trust_id = ?`,
 			inspection.Status,
-			importDecisionReason(inspection),
+			actionDecisionReason(action, inspection),
 			now.Format(time.RFC3339Nano),
 			trustID,
 		); err != nil {
@@ -272,13 +337,63 @@ func upsertTrustRecord(ctx context.Context, tx *sql.Tx, contactID string, inspec
 		trustID,
 		contactID,
 		inspection.Status,
-		importDecisionReason(inspection),
+		actionDecisionReason(action, inspection),
 		stamp,
 		stamp,
 	); err != nil {
 		return "", fmt.Errorf("insert trust record: %w", err)
 	}
 	return trustID, nil
+}
+
+func upsertHandles(ctx context.Context, tx *sql.Tx, contactID string, inspection resolver.Result, now time.Time) (int, error) {
+	candidates := deriveHandles(inspection)
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	stamp := now.Format(time.RFC3339Nano)
+	resetTypes := make(map[string]struct{})
+	for _, candidate := range candidates {
+		if candidate.Primary {
+			if _, seen := resetTypes[candidate.Type]; !seen {
+				if _, err := tx.ExecContext(
+					ctx,
+					`UPDATE handles
+					 SET is_primary = 0
+					 WHERE owner_type = 'contact' AND owner_id = ? AND handle_type = ?`,
+					contactID,
+					candidate.Type,
+				); err != nil {
+					return 0, fmt.Errorf("reset primary handles: %w", err)
+				}
+				resetTypes[candidate.Type] = struct{}{}
+			}
+		}
+
+		handleID, err := ids.New("handle")
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO handles (
+				handle_id, owner_type, owner_id, handle_type, value, is_primary, created_at
+			) VALUES (?, 'contact', ?, ?, ?, ?, ?)
+			ON CONFLICT(owner_type, owner_id, handle_type, value)
+			DO UPDATE SET is_primary = excluded.is_primary`,
+			handleID,
+			contactID,
+			candidate.Type,
+			candidate.Value,
+			boolToInt(candidate.Primary),
+			stamp,
+		); err != nil {
+			return 0, fmt.Errorf("upsert handle: %w", err)
+		}
+	}
+
+	return len(candidates), nil
 }
 
 func insertArtifactSnapshots(ctx context.Context, tx *sql.Tx, contactID string, artifacts []resolver.Artifact, now time.Time) (int, error) {
@@ -347,20 +462,25 @@ func insertProofs(ctx context.Context, tx *sql.Tx, contactID string, proofs []re
 	return count, nil
 }
 
-func insertImportEvent(ctx context.Context, tx *sql.Tx, contactID string, inspection resolver.Result, now time.Time) (string, error) {
+func insertActionEvent(ctx context.Context, tx *sql.Tx, contactID string, inspection resolver.Result, now time.Time, action string) (string, error) {
 	eventID, err := ids.New("event")
 	if err != nil {
 		return "", err
 	}
 	stamp := now.Format(time.RFC3339Nano)
-	summary := fmt.Sprintf("imported %s with status=%s from %s", inspection.CanonicalID, inspection.Status, inspection.Input)
+	subject := strings.TrimSpace(inspection.CanonicalID)
+	if subject == "" {
+		subject = strings.TrimSpace(inspection.Input)
+	}
+	summary := fmt.Sprintf("%s %s with status=%s from %s", actionPastTense(action), subject, inspection.Status, inspection.Input)
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO interaction_events (
 			event_id, contact_id, channel, event_type, summary, event_at, created_at
-		) VALUES (?, ?, 'linkclaw', 'import', ?, ?, ?)`,
+		) VALUES (?, ?, 'linkclaw', ?, ?, ?, ?)`,
 		eventID,
 		contactID,
+		action,
 		summary,
 		stamp,
 		stamp,
@@ -370,6 +490,109 @@ func insertImportEvent(ctx context.Context, tx *sql.Tx, contactID string, inspec
 	return eventID, nil
 }
 
-func importDecisionReason(inspection resolver.Result) string {
-	return fmt.Sprintf("imported via public artifacts with verification_state=%s", inspection.Status)
+func actionDecisionReason(action string, inspection resolver.Result) string {
+	return fmt.Sprintf("%s via public artifacts with verification_state=%s", actionPastTense(action), inspection.Status)
+}
+
+func normalizeAction(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "import", nil
+	}
+	switch value {
+	case "import", "refresh":
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported importer action %q", value)
+	}
+}
+
+func actionPastTense(action string) string {
+	switch action {
+	case "refresh":
+		return "refreshed"
+	default:
+		return "imported"
+	}
+}
+
+func alignInspectionWithKnownContact(inspection *resolver.Result, expectedCanonicalID string) {
+	if inspection == nil {
+		return
+	}
+	expected := strings.TrimSpace(expectedCanonicalID)
+	if expected == "" {
+		return
+	}
+	actual := strings.TrimSpace(inspection.CanonicalID)
+	if actual == "" || actual == expected {
+		return
+	}
+	inspection.Status = resolver.StatusMismatch
+	inspection.Mismatches = appendUniqueString(
+		inspection.Mismatches,
+		fmt.Sprintf("resolved canonical_id %q does not match known contact %q", actual, expected),
+	)
+}
+
+func deriveHandles(inspection resolver.Result) []handleCandidate {
+	seen := make(map[string]handleCandidate)
+	add := func(handleType, value string, primary bool) {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return
+		}
+		key := handleType + "|" + trimmed
+		if existing, ok := seen[key]; ok {
+			existing.Primary = existing.Primary || primary
+			seen[key] = existing
+			return
+		}
+		seen[key] = handleCandidate{
+			Type:    handleType,
+			Value:   trimmed,
+			Primary: primary,
+		}
+	}
+
+	add("origin", inspection.NormalizedOrigin, true)
+	add("profile", inspection.ProfileURL, true)
+	for _, proof := range inspection.Proofs {
+		switch proof.Type {
+		case "also_known_as", "webfinger_alias":
+			add(proof.Type, proof.ObservedValue, false)
+		}
+	}
+
+	handles := make([]handleCandidate, 0, len(seen))
+	for _, candidate := range seen {
+		handles = append(handles, candidate)
+	}
+	sort.Slice(handles, func(i, j int) bool {
+		if handles[i].Type == handles[j].Type {
+			return handles[i].Value < handles[j].Value
+		}
+		return handles[i].Type < handles[j].Type
+	})
+	return handles
+}
+
+func appendUniqueString(values []string, value string) []string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.TrimSpace(existing) == trimmed {
+			return values
+		}
+	}
+	return append(values, trimmed)
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

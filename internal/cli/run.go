@@ -12,6 +12,7 @@ import (
 
 	"github.com/xiewanpeng/claw-identity/internal/importer"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
+	"github.com/xiewanpeng/claw-identity/internal/known"
 	"github.com/xiewanpeng/claw-identity/internal/publish"
 	"github.com/xiewanpeng/claw-identity/internal/resolver"
 )
@@ -44,6 +45,14 @@ type importOutput struct {
 	Error   string          `json:"error,omitempty"`
 }
 
+type knownOutput[T any] struct {
+	OK         bool   `json:"ok"`
+	Command    string `json:"command"`
+	Subcommand string `json:"subcommand"`
+	Result     T      `json:"result,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		printUsage(out)
@@ -62,6 +71,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return runInspect(ctx, args[1:], out, errOut)
 	case "import":
 		return runImport(ctx, args[1:], out, errOut)
+	case "known":
+		return runKnown(ctx, args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		printUsage(errOut)
@@ -275,6 +286,232 @@ func runImport(ctx context.Context, args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
+	if len(args) == 0 {
+		printKnownUsage(out)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		printKnownUsage(out)
+		return 0
+	case "ls":
+		fs := flag.NewFlagSet("known ls", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			fmt.Fprintf(errOut, "known ls does not accept positional arguments: %s\n", strings.Join(fs.Args(), " "))
+			return 1
+		}
+		service := known.NewService()
+		result, err := service.List(ctx, known.ListOptions{Home: *home})
+		if err != nil {
+			return writeKnownError[known.ListResult](errOut, out, *jsonOutput, "ls", err)
+		}
+		if *jsonOutput {
+			return writeKnownJSON(errOut, out, "ls", result)
+		}
+		if len(result.Contacts) == 0 {
+			fmt.Fprintln(out, "linkclaw known ls")
+			fmt.Fprintln(out, "contacts: 0")
+			return 0
+		}
+		fmt.Fprintln(out, "linkclaw known ls")
+		fmt.Fprintf(out, "contacts: %d\n", len(result.Contacts))
+		for _, contact := range result.Contacts {
+			fmt.Fprintf(
+				out,
+				"- %s | %s | trust=%s verification=%s | notes=%d\n",
+				contact.DisplayName,
+				contact.CanonicalID,
+				contact.Trust.TrustLevel,
+				contact.Trust.VerificationState,
+				contact.NoteCount,
+			)
+		}
+		return 0
+	case "show":
+		fs := flag.NewFlagSet("known show", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			fmt.Fprintln(errOut, "known show requires exactly one contact reference")
+			return 1
+		}
+		service := known.NewService()
+		result, err := service.Show(ctx, known.LookupOptions{Home: *home, Identifier: fs.Args()[0]})
+		if err != nil {
+			return writeKnownError[known.ShowResult](errOut, out, *jsonOutput, "show", err)
+		}
+		if *jsonOutput {
+			return writeKnownJSON(errOut, out, "show", result)
+		}
+		printKnownContactSummary(out, result.Contact.ContactSummary)
+		fmt.Fprintf(out, "handles: %d\n", len(result.Contact.Handles))
+		for _, handle := range result.Contact.Handles {
+			marker := " "
+			if handle.IsPrimary {
+				marker = "*"
+			}
+			fmt.Fprintf(out, "  %s %s=%s\n", marker, handle.HandleType, handle.Value)
+		}
+		fmt.Fprintf(out, "artifacts: %d\n", len(result.Contact.Artifacts))
+		fmt.Fprintf(out, "proofs: %d\n", len(result.Contact.Proofs))
+		fmt.Fprintf(out, "notes: %d\n", len(result.Contact.Notes))
+		for _, note := range result.Contact.Notes {
+			fmt.Fprintf(out, "  - %s (%s)\n", note.Body, note.CreatedAt)
+		}
+		fmt.Fprintf(out, "events: %d\n", len(result.Contact.Events))
+		for _, event := range result.Contact.Events {
+			fmt.Fprintf(out, "  - [%s] %s\n", event.EventType, event.Summary)
+		}
+		return 0
+	case "trust":
+		fs := flag.NewFlagSet("known trust", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		level := fs.String("level", "", "set trust level: unknown|seen|verified|trusted|pinned")
+		risk := fs.String("risk", "", "comma-separated risk flags; pass empty string to clear")
+		reason := fs.String("reason", "", "optional note for the trust update")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			fmt.Fprintln(errOut, "known trust requires exactly one contact reference")
+			return 1
+		}
+		service := known.NewService()
+		result, err := service.Trust(ctx, known.TrustOptions{
+			Home:         *home,
+			Identifier:   fs.Args()[0],
+			Level:        *level,
+			RiskFlags:    splitCSV(*risk),
+			HasRiskFlags: flagProvided(fs, "risk"),
+			Reason:       *reason,
+		})
+		if err != nil {
+			return writeKnownError[known.TrustResult](errOut, out, *jsonOutput, "trust", err)
+		}
+		if *jsonOutput {
+			return writeKnownJSON(errOut, out, "trust", result)
+		}
+		fmt.Fprintln(out, "linkclaw known trust updated")
+		printKnownContactSummary(out, result.Contact)
+		return 0
+	case "note":
+		fs := flag.NewFlagSet("known note", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		body := fs.String("body", "", "note body")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			fmt.Fprintln(errOut, "known note requires exactly one contact reference")
+			return 1
+		}
+		service := known.NewService()
+		result, err := service.Note(ctx, known.NoteOptions{
+			Home:       *home,
+			Identifier: fs.Args()[0],
+			Body:       *body,
+		})
+		if err != nil {
+			return writeKnownError[known.NoteResult](errOut, out, *jsonOutput, "note", err)
+		}
+		if *jsonOutput {
+			return writeKnownJSON(errOut, out, "note", result)
+		}
+		fmt.Fprintln(out, "linkclaw known note added")
+		printKnownContactSummary(out, result.Contact)
+		fmt.Fprintf(out, "note: %s\n", result.Note.Body)
+		return 0
+	case "refresh":
+		fs := flag.NewFlagSet("known refresh", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			fmt.Fprintln(errOut, "known refresh requires exactly one contact reference")
+			return 1
+		}
+		service := known.NewService()
+		result, err := service.Refresh(ctx, known.RefreshOptions{
+			Home:       *home,
+			Identifier: fs.Args()[0],
+		})
+		if err != nil {
+			return writeKnownError[known.RefreshResult](errOut, out, *jsonOutput, "refresh", err)
+		}
+		if *jsonOutput {
+			return writeKnownJSON(errOut, out, "refresh", result)
+		}
+		fmt.Fprintln(out, "linkclaw known refresh completed")
+		printKnownContactSummary(out, result.Contact)
+		fmt.Fprintf(out, "snapshots: %d\n", result.SnapshotCount)
+		fmt.Fprintf(out, "proofs: %d\n", result.ProofCount)
+		fmt.Fprintf(out, "status: %s\n", result.Inspection.Status)
+		return 0
+	case "rm":
+		fs := flag.NewFlagSet("known rm", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			fmt.Fprintln(errOut, "known rm requires exactly one contact reference")
+			return 1
+		}
+		service := known.NewService()
+		result, err := service.Remove(ctx, known.RemoveOptions{
+			Home:       *home,
+			Identifier: fs.Args()[0],
+		})
+		if err != nil {
+			return writeKnownError[known.RemoveResult](errOut, out, *jsonOutput, "rm", err)
+		}
+		if *jsonOutput {
+			return writeKnownJSON(errOut, out, "rm", result)
+		}
+		fmt.Fprintln(out, "linkclaw known rm completed")
+		fmt.Fprintf(out, "contact: %s (%s)\n", result.Contact.DisplayName, result.Contact.ContactID)
+		fmt.Fprintf(out, "deleted contacts: %d\n", result.Removed.Contacts)
+		fmt.Fprintf(out, "deleted trust records: %d\n", result.Removed.TrustRecords)
+		fmt.Fprintf(out, "deleted handles: %d\n", result.Removed.Handles)
+		fmt.Fprintf(out, "deleted artifacts: %d\n", result.Removed.Artifacts)
+		fmt.Fprintf(out, "deleted proofs: %d\n", result.Removed.Proofs)
+		fmt.Fprintf(out, "deleted notes: %d\n", result.Removed.Notes)
+		fmt.Fprintf(out, "deleted events: %d\n", result.Removed.Events)
+		return 0
+	default:
+		fmt.Fprintf(errOut, "unknown known subcommand %q\n", args[0])
+		printKnownUsage(errOut)
+		return 1
+	}
+}
+
 func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
 		enc := json.NewEncoder(out)
@@ -327,6 +564,72 @@ func writeImportError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	return 1
 }
 
+func writeKnownJSON[T any](errOut, out io.Writer, subcommand string, result T) int {
+	enc := json.NewEncoder(out)
+	if err := enc.Encode(knownOutput[T]{OK: true, Command: "known", Subcommand: subcommand, Result: result}); err != nil {
+		fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func writeKnownError[T any](errOut, out io.Writer, jsonOutput bool, subcommand string, err error) int {
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		if encodeErr := enc.Encode(knownOutput[T]{OK: false, Command: "known", Subcommand: subcommand, Error: err.Error()}); encodeErr != nil {
+			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
+			return 1
+		}
+		return 1
+	}
+	fmt.Fprintf(errOut, "known %s failed: %v\n", subcommand, err)
+	return 1
+}
+
+func flagProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+func printKnownContactSummary(out io.Writer, contact known.ContactSummary) {
+	fmt.Fprintf(out, "contact: %s\n", contact.ContactID)
+	fmt.Fprintf(out, "name: %s\n", contact.DisplayName)
+	fmt.Fprintf(out, "canonical id: %s\n", contact.CanonicalID)
+	if contact.HomeOrigin != "" {
+		fmt.Fprintf(out, "home origin: %s\n", contact.HomeOrigin)
+	}
+	if contact.ProfileURL != "" {
+		fmt.Fprintf(out, "profile url: %s\n", contact.ProfileURL)
+	}
+	fmt.Fprintf(out, "status: %s\n", contact.Status)
+	fmt.Fprintf(out, "trust: %s\n", contact.Trust.TrustLevel)
+	if contact.Trust.VerificationState != "" {
+		fmt.Fprintf(out, "verification: %s\n", contact.Trust.VerificationState)
+	}
+	if len(contact.Trust.RiskFlags) > 0 {
+		fmt.Fprintf(out, "risk flags: %s\n", strings.Join(contact.Trust.RiskFlags, ", "))
+	}
+	fmt.Fprintf(out, "notes: %d\n", contact.NoteCount)
+	if contact.LastSeenAt != "" {
+		fmt.Fprintf(out, "last seen: %s\n", contact.LastSeenAt)
+	}
+	if contact.LastEventAt != "" {
+		fmt.Fprintf(out, "last event: %s\n", contact.LastEventAt)
+	}
+}
+
 func prompt(reader *bufio.Reader, out io.Writer, label string) (string, error) {
 	fmt.Fprint(out, label)
 	line, err := reader.ReadString('\n')
@@ -350,4 +653,20 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  publish Compile and bundle publishable identity artifacts")
 	fmt.Fprintln(out, "  inspect Resolve and verify public identity artifacts")
 	fmt.Fprintln(out, "  import  Resolve, verify, and persist a public identity")
+	fmt.Fprintln(out, "  known   Read and manage the local trust book")
+}
+
+func printKnownUsage(out io.Writer) {
+	fmt.Fprintln(out, "LinkClaw known")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  linkclaw known <subcommand> [flags] <contact>")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  ls       List known contacts")
+	fmt.Fprintln(out, "  show     Show one known contact")
+	fmt.Fprintln(out, "  trust    Update trust level and risk flags")
+	fmt.Fprintln(out, "  note     Append a note to a contact")
+	fmt.Fprintln(out, "  refresh  Re-resolve and persist current public artifacts")
+	fmt.Fprintln(out, "  rm       Remove a contact from the local trust book")
 }
