@@ -52,16 +52,25 @@ type Options struct {
 }
 
 type Result struct {
-	Home         string     `json:"home"`
-	DBPath       string     `json:"db_path"`
-	OutputDir    string     `json:"output_dir"`
-	Tier         string     `json:"tier"`
-	CanonicalID  string     `json:"canonical_id"`
-	HomeOrigin   string     `json:"home_origin"`
-	Artifacts    []Artifact `json:"artifacts"`
-	Checks       []Check    `json:"checks"`
-	ManifestPath string     `json:"manifest_path"`
-	GeneratedAt  string     `json:"generated_at"`
+	Home         string            `json:"home"`
+	DBPath       string            `json:"db_path"`
+	OutputDir    string            `json:"output_dir"`
+	HeadersPath  string            `json:"headers_path"`
+	Tier         string            `json:"tier"`
+	CanonicalID  string            `json:"canonical_id"`
+	HomeOrigin   string            `json:"home_origin"`
+	Artifacts    []Artifact        `json:"artifacts"`
+	Checks       []Check           `json:"checks"`
+	Deployment   *DeploymentResult `json:"deployment,omitempty"`
+	ManifestPath string            `json:"manifest_path"`
+	GeneratedAt  string            `json:"generated_at"`
+}
+
+type DeploymentResult struct {
+	Provider  string `json:"provider"`
+	Project   string `json:"project"`
+	Directory string `json:"directory"`
+	Tool      string `json:"tool"`
 }
 
 type Artifact struct {
@@ -315,6 +324,11 @@ func (s *Service) Publish(ctx context.Context, opts Options) (Result, error) {
 		contentHashes[artifact.Path] = artifact.SHA256
 	}
 
+	headersPath := filepath.Join(outputDir, HeadersFilePath)
+	if err := writeBundleFile(outputDir, HeadersFilePath, BuildHeadersFile()); err != nil {
+		return Result{}, fmt.Errorf("write headers file: %w", err)
+	}
+
 	manifestPath := filepath.Join(outputDir, "manifest.json")
 	manifest := Manifest{
 		GeneratedAt:   generatedAt,
@@ -338,6 +352,7 @@ func (s *Service) Publish(ctx context.Context, opts Options) (Result, error) {
 			Home:         home,
 			DBPath:       paths.DB,
 			OutputDir:    outputDir,
+			HeadersPath:  headersPath,
 			Tier:         tier,
 			CanonicalID:  identity.CanonicalID,
 			HomeOrigin:   urls.Origin,
@@ -352,6 +367,7 @@ func (s *Service) Publish(ctx context.Context, opts Options) (Result, error) {
 		Home:         home,
 		DBPath:       paths.DB,
 		OutputDir:    outputDir,
+		HeadersPath:  headersPath,
 		Tier:         tier,
 		CanonicalID:  identity.CanonicalID,
 		HomeOrigin:   urls.Origin,
@@ -931,16 +947,10 @@ func (k artifactKind) typeName() string {
 }
 
 func (k artifactKind) mediaType() string {
-	switch k {
-	case artifactDID:
-		return "application/did+json"
-	case artifactWebFinger, artifactAgentCard:
-		return "application/json"
-	case artifactProfile:
-		return "text/html"
-	default:
-		return "application/octet-stream"
+	if mediaType, ok := ContentTypeForBundlePath(k.relPath()); ok {
+		return mediaType
 	}
+	return "application/octet-stream"
 }
 
 func (u bundleURLs) urlFor(kind artifactKind) string {

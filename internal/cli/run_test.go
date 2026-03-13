@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiewanpeng/claw-identity/internal/buildinfo"
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
 
@@ -209,8 +210,115 @@ func TestRunPublishJSON(t *testing.T) {
 	if len(out.Result.Artifacts) != 4 {
 		t.Fatalf("artifact count = %d, want 4", len(out.Result.Artifacts))
 	}
+	if out.Result.HeadersPath != filepath.Join(outputDir, "_headers") {
+		t.Fatalf("headers path = %q", out.Result.HeadersPath)
+	}
 	if _, err := os.Stat(filepath.Join(outputDir, "manifest.json")); err != nil {
 		t.Fatalf("manifest missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "_headers")); err != nil {
+		t.Fatalf("_headers missing: %v", err)
+	}
+}
+
+func TestRunPublishDeployCloudflareJSON(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	initArgs := []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:web:agent.example",
+		"--display-name", "Agent Example",
+		"--non-interactive",
+		"--json",
+	}
+	initCode, _, initErr := runForTest(t, initArgs, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	scriptDir := t.TempDir()
+	captureFile := filepath.Join(scriptDir, "wrangler-args.txt")
+	t.Setenv("CAPTURE_FILE", captureFile)
+	t.Setenv("PATH", scriptDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeExecutableForTest(t, filepath.Join(scriptDir, "wrangler"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_FILE\"\necho deployed\n")
+
+	outputDir := filepath.Join(t.TempDir(), "bundle")
+	args := []string{
+		"publish",
+		"--home", home,
+		"--origin", "https://agent.example",
+		"--output", outputDir,
+		"--deploy", "cloudflare",
+		"--project", "agent-pages",
+		"--json",
+	}
+	code, stdout, stderr := runForTest(t, args, "")
+	if code != 0 {
+		t.Fatalf("publish exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out publishOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if out.Result.Deployment == nil {
+		t.Fatalf("expected deployment result")
+	}
+	if out.Result.Deployment.Provider != "cloudflare" {
+		t.Fatalf("provider = %q", out.Result.Deployment.Provider)
+	}
+	if out.Result.Deployment.Project != "agent-pages" {
+		t.Fatalf("project = %q", out.Result.Deployment.Project)
+	}
+
+	captured, err := os.ReadFile(captureFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(captured)), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("captured args = %v", lines)
+	}
+	if lines[0] != "pages" || lines[1] != "deploy" || lines[3] != "--project-name" || lines[4] != "agent-pages" {
+		t.Fatalf("unexpected deploy args: %v", lines)
+	}
+}
+
+func TestRunVersionJSON(t *testing.T) {
+	previousVersion := buildinfo.Version
+	previousCommit := buildinfo.Commit
+	previousBuildTime := buildinfo.BuildTime
+	t.Cleanup(func() {
+		buildinfo.Version = previousVersion
+		buildinfo.Commit = previousCommit
+		buildinfo.BuildTime = previousBuildTime
+	})
+
+	buildinfo.Version = "0.1.0"
+	buildinfo.Commit = "abc123"
+	buildinfo.BuildTime = "2026-03-14T00:00:00Z"
+
+	code, stdout, stderr := runForTest(t, []string{"version", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("version exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out versionOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "version", nil)
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Version != "0.1.0" {
+		t.Fatalf("version = %q", out.Result.Version)
+	}
+	if out.Result.Commit != "abc123" {
+		t.Fatalf("commit = %q", out.Result.Commit)
+	}
+	if out.Result.BuildTime != "2026-03-14T00:00:00Z" {
+		t.Fatalf("build time = %q", out.Result.BuildTime)
 	}
 }
 
@@ -567,6 +675,14 @@ func runForTest(t *testing.T, args []string, stdin string) (int, string, string)
 	var errOut strings.Builder
 	code := Run(context.Background(), args, in, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+func writeExecutableForTest(t *testing.T, path string, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
 }
 
 func setupImportedContact(t *testing.T) (string, importOutput) {

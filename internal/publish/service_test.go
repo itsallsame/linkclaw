@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,9 @@ func TestServicePublishTierBundles(t *testing.T) {
 			if result.HomeOrigin != "https://agent.example" {
 				t.Fatalf("home origin = %q", result.HomeOrigin)
 			}
+			if result.HeadersPath != filepath.Join(outputDir, HeadersFilePath) {
+				t.Fatalf("headers path = %q", result.HeadersPath)
+			}
 			if len(result.Artifacts) != len(tc.expectedPaths) {
 				t.Fatalf("artifact count = %d, want %d", len(result.Artifacts), len(tc.expectedPaths))
 			}
@@ -119,6 +123,18 @@ func TestServicePublishTierBundles(t *testing.T) {
 				if len(hash) < len("sha256:")+64 || hash[:7] != "sha256:" {
 					t.Fatalf("unexpected hash format for %q: %q", relPath, hash)
 				}
+			}
+
+			headersContent, err := os.ReadFile(filepath.Join(outputDir, HeadersFilePath))
+			if err != nil {
+				t.Fatalf("read _headers: %v", err)
+			}
+			headersText := string(headersContent)
+			if !strings.Contains(headersText, "/.well-known/webfinger") {
+				t.Fatalf("expected webfinger route in _headers: %s", headersText)
+			}
+			if !strings.Contains(headersText, "Content-Type: application/json") {
+				t.Fatalf("expected application/json content type in _headers: %s", headersText)
 			}
 
 			didContent, err := os.ReadFile(filepath.Join(outputDir, ".well-known", "did.json"))

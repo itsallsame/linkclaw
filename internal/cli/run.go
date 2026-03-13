@@ -132,6 +132,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	case "help", "-h", "--help":
 		printUsage(out)
 		return 0
+	case "version":
+		return runVersion(args[1:], out, errOut)
+	case "serve":
+		return runServe(ctx, args[1:], out, errOut)
 	case "init":
 		return runInit(ctx, args[1:], in, out, errOut)
 	case "publish":
@@ -231,6 +235,8 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 	origin := fs.String("origin", "", "public home origin (for example https://agent.example)")
 	outputDir := fs.String("output", "", "bundle output directory (defaults to <home>/publish)")
 	tier := fs.String("tier", publish.TierRecommended, "publish tier: minimum|recommended|full")
+	deployTarget := fs.String("deploy", "", "optional deployment target: cloudflare")
+	projectName := fs.String("project", "", "Cloudflare Pages project name (required with --deploy cloudflare)")
 	jsonOutput := fs.Bool("json", false, "emit JSON result")
 	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 
@@ -250,6 +256,10 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 			fmt.Sprintf("unexpected arguments: %s", strings.Join(fs.Args(), " ")),
 		)
 	}
+	deploy, err := resolvePublishDeploy(*deployTarget, *projectName)
+	if err != nil {
+		return writeValidationFailure(errOut, out, *jsonOutput, "publish", nil, err.Error())
+	}
 
 	service := publish.NewService()
 	result, err := service.Publish(ctx, publish.Options{
@@ -261,6 +271,9 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if err != nil {
 		return writePublishError(errOut, out, *jsonOutput, err)
 	}
+	if err := deployPublishBundle(ctx, errOut, *jsonOutput, &result, deploy); err != nil {
+		return writePublishError(errOut, out, *jsonOutput, err)
+	}
 
 	if *jsonOutput {
 		return writeJSONCommandResult(errOut, out, "publish", nil, nil, result)
@@ -269,10 +282,14 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fmt.Fprintln(out, "linkclaw publish completed")
 	fmt.Fprintf(out, "home: %s\n", result.Home)
 	fmt.Fprintf(out, "output: %s\n", result.OutputDir)
+	fmt.Fprintf(out, "headers: %s\n", result.HeadersPath)
 	fmt.Fprintf(out, "tier: %s\n", result.Tier)
 	fmt.Fprintf(out, "origin: %s\n", result.HomeOrigin)
 	fmt.Fprintf(out, "manifest: %s\n", result.ManifestPath)
 	fmt.Fprintf(out, "artifacts: %d\n", len(result.Artifacts))
+	if result.Deployment != nil {
+		fmt.Fprintf(out, "deploy: %s (%s via %s)\n", result.Deployment.Provider, result.Deployment.Project, result.Deployment.Tool)
+	}
 	return 0
 }
 
@@ -999,6 +1016,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  linkclaw <command> [flags]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
+	fmt.Fprintln(out, "  version Show build and release metadata")
+	fmt.Fprintln(out, "  serve   Serve a publish bundle locally with correct MIME types")
 	fmt.Fprintln(out, "  init    Initialize LinkClaw local home and state")
 	fmt.Fprintln(out, "  publish Compile and bundle publishable identity artifacts")
 	fmt.Fprintln(out, "  inspect Resolve and verify public identity artifacts")

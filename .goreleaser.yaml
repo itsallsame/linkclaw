@@ -1,0 +1,48 @@
+version: 2
+
+project_name: linkclaw
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: linkclaw
+    main: ./cmd/linkclaw
+    binary: linkclaw
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/xiewanpeng/claw-identity/internal/buildinfo.Version={{ .Version }}
+        -X github.com/xiewanpeng/claw-identity/internal/buildinfo.Commit={{ .Commit }}
+        -X github.com/xiewanpeng/claw-identity/internal/buildinfo.BuildTime={{ .CommitDate }}
+
+archives:
+  - id: linkclaw
+    ids:
+      - linkclaw
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - docs/**/*
+
+checksum:
+  name_template: "checksums.txt"
