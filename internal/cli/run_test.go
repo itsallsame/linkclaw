@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xiewanpeng/claw-identity/internal/known"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -88,8 +90,8 @@ func TestRunInitJSONIdempotent(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if migrationCount != 2 {
-		t.Fatalf("expected exactly two applied migrations, got %d", migrationCount)
+	if migrationCount != len(first.Result.Migrations) {
+		t.Fatalf("expected %d applied migrations, got %d", len(first.Result.Migrations), migrationCount)
 	}
 
 	var selfCount int
@@ -265,6 +267,197 @@ func TestRunImportJSON(t *testing.T) {
 	}
 }
 
+func TestRunKnownTrustJSON(t *testing.T) {
+	t.Parallel()
+
+	home, imported := setupImportedContact(t)
+	code, stdout, stderr := runForTest(
+		t,
+		[]string{
+			"known",
+			"trust",
+			"--home", home,
+			"--level", "trusted",
+			"--risk", "manual-review,fixture",
+			"--reason", "reviewed in CLI test",
+			"--json",
+			imported.Result.ContactID,
+		},
+		"",
+	)
+	if code != 0 {
+		t.Fatalf("known trust exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out knownOutput[known.TrustResult]
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Contact.Trust.TrustLevel != "trusted" {
+		t.Fatalf("trust level = %q", out.Result.Contact.Trust.TrustLevel)
+	}
+	if got := strings.Join(out.Result.Contact.Trust.RiskFlags, ","); got != "fixture,manual-review" {
+		t.Fatalf("risk flags = %q", got)
+	}
+
+	db := openDBForTest(t, home)
+	defer db.Close()
+
+	var level string
+	var riskFlags string
+	var reason string
+	if err := db.QueryRow(
+		`SELECT trust_level, risk_flags, decision_reason FROM trust_records WHERE contact_id = ?`,
+		imported.Result.ContactID,
+	).Scan(&level, &riskFlags, &reason); err != nil {
+		t.Fatalf("query trust record: %v", err)
+	}
+	if level != "trusted" {
+		t.Fatalf("stored trust level = %q", level)
+	}
+	if riskFlags != `["fixture","manual-review"]` {
+		t.Fatalf("stored risk flags = %q", riskFlags)
+	}
+	if reason != "reviewed in CLI test" {
+		t.Fatalf("stored reason = %q", reason)
+	}
+	assertCount(t, db, `SELECT COUNT(*) FROM interaction_events WHERE contact_id = ? AND event_type = 'trust'`, imported.Result.ContactID, 1)
+}
+
+func TestRunKnownNoteJSON(t *testing.T) {
+	t.Parallel()
+
+	home, imported := setupImportedContact(t)
+	code, stdout, stderr := runForTest(
+		t,
+		[]string{
+			"known",
+			"note",
+			"--home", home,
+			"--body", "met via fixture test",
+			"--json",
+			imported.Result.ContactID,
+		},
+		"",
+	)
+	if code != 0 {
+		t.Fatalf("known note exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out knownOutput[known.NoteResult]
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Note.Body != "met via fixture test" {
+		t.Fatalf("note body = %q", out.Result.Note.Body)
+	}
+
+	db := openDBForTest(t, home)
+	defer db.Close()
+
+	var noteBody string
+	if err := db.QueryRow(`SELECT body FROM notes WHERE contact_id = ?`, imported.Result.ContactID).Scan(&noteBody); err != nil {
+		t.Fatalf("query note: %v", err)
+	}
+	if noteBody != "met via fixture test" {
+		t.Fatalf("stored note body = %q", noteBody)
+	}
+	assertCount(t, db, `SELECT COUNT(*) FROM interaction_events WHERE contact_id = ? AND event_type = 'note'`, imported.Result.ContactID, 1)
+}
+
+func TestRunKnownRefreshJSON(t *testing.T) {
+	t.Parallel()
+
+	home, imported := setupImportedContact(t)
+	code, stdout, stderr := runForTest(
+		t,
+		[]string{"known", "refresh", "--home", home, "--json", imported.Result.ContactID},
+		"",
+	)
+	if code != 0 {
+		t.Fatalf("known refresh exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out knownOutput[known.RefreshResult]
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Inspection.Status != "consistent" {
+		t.Fatalf("refresh status = %q", out.Result.Inspection.Status)
+	}
+
+	db := openDBForTest(t, home)
+	defer db.Close()
+
+	assertCount(t, db, `SELECT COUNT(*) FROM interaction_events WHERE contact_id = ? AND event_type = 'refresh'`, imported.Result.ContactID, 1)
+	assertCount(t, db, `SELECT COUNT(*) FROM artifact_snapshots WHERE contact_id = ?`, imported.Result.ContactID, 8)
+	var handleCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM handles WHERE owner_type = 'contact' AND owner_id = ?`, imported.Result.ContactID).Scan(&handleCount); err != nil {
+		t.Fatalf("count handles: %v", err)
+	}
+	if handleCount == 0 {
+		t.Fatalf("expected refresh path to leave contact handles")
+	}
+}
+
+func TestRunKnownListShowAndRemoveJSON(t *testing.T) {
+	t.Parallel()
+
+	home, imported := setupImportedContact(t)
+
+	lsCode, lsStdout, lsStderr := runForTest(t, []string{"known", "ls", "--home", home, "--json"}, "")
+	if lsCode != 0 {
+		t.Fatalf("known ls exit code = %d, stderr = %s", lsCode, lsStderr)
+	}
+	var lsOut knownOutput[known.ListResult]
+	if err := json.Unmarshal([]byte(lsStdout), &lsOut); err != nil {
+		t.Fatalf("unmarshal ls output: %v, stdout=%s", err, lsStdout)
+	}
+	if len(lsOut.Result.Contacts) != 1 {
+		t.Fatalf("known ls contacts = %d", len(lsOut.Result.Contacts))
+	}
+
+	showCode, showStdout, showStderr := runForTest(t, []string{"known", "show", "--home", home, "--json", imported.Result.ContactID}, "")
+	if showCode != 0 {
+		t.Fatalf("known show exit code = %d, stderr = %s", showCode, showStderr)
+	}
+	var showOut knownOutput[known.ShowResult]
+	if err := json.Unmarshal([]byte(showStdout), &showOut); err != nil {
+		t.Fatalf("unmarshal show output: %v, stdout=%s", err, showStdout)
+	}
+	if showOut.Result.Contact.ContactID != imported.Result.ContactID {
+		t.Fatalf("shown contact = %q", showOut.Result.Contact.ContactID)
+	}
+	if len(showOut.Result.Contact.Handles) == 0 {
+		t.Fatalf("expected known show to include handles")
+	}
+
+	rmCode, rmStdout, rmStderr := runForTest(t, []string{"known", "rm", "--home", home, "--json", imported.Result.ContactID}, "")
+	if rmCode != 0 {
+		t.Fatalf("known rm exit code = %d, stderr = %s", rmCode, rmStderr)
+	}
+	var rmOut knownOutput[known.RemoveResult]
+	if err := json.Unmarshal([]byte(rmStdout), &rmOut); err != nil {
+		t.Fatalf("unmarshal rm output: %v, stdout=%s", err, rmStdout)
+	}
+	if rmOut.Result.Removed.Contacts != 1 {
+		t.Fatalf("removed contacts = %d", rmOut.Result.Removed.Contacts)
+	}
+
+	db := openDBForTest(t, home)
+	defer db.Close()
+	assertCount(t, db, `SELECT COUNT(*) FROM contacts`, nil, 0)
+}
+
 func runForTest(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
 
@@ -273,6 +466,65 @@ func runForTest(t *testing.T, args []string, stdin string) (int, string, string)
 	var errOut strings.Builder
 	code := Run(context.Background(), args, in, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+func setupImportedContact(t *testing.T) (string, importOutput) {
+	t.Helper()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "consistent"))
+	t.Cleanup(server.Close)
+
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	initArgs := []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:web:self.example",
+		"--display-name", "Self Example",
+		"--non-interactive",
+		"--json",
+	}
+	initCode, _, initErr := runForTest(t, initArgs, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	importCode, importStdout, importErr := runForTest(t, []string{"import", "--home", home, "--json", server.URL + "/profile/"}, "")
+	if importCode != 0 {
+		t.Fatalf("import exit code = %d, stderr = %s", importCode, importErr)
+	}
+	var out importOutput
+	if err := json.Unmarshal([]byte(importStdout), &out); err != nil {
+		t.Fatalf("unmarshal import output: %v, stdout=%s", err, importStdout)
+	}
+	return home, out
+}
+
+func openDBForTest(t *testing.T, home string) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	return db
+}
+
+func assertCount(t *testing.T, db *sql.DB, query string, arg any, want int) {
+	t.Helper()
+
+	var count int
+	var err error
+	if arg == nil {
+		err = db.QueryRow(query).Scan(&count)
+	} else {
+		err = db.QueryRow(query, arg).Scan(&count)
+	}
+	if err != nil {
+		t.Fatalf("query count: %v", err)
+	}
+	if count != want {
+		t.Fatalf("count = %d, want %d for query %q", count, want, query)
+	}
 }
 
 func newFixtureServer(t *testing.T, root string) *httptest.Server {
