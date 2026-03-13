@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
 
 	_ "modernc.org/sqlite"
@@ -456,6 +457,53 @@ func TestRunKnownListShowAndRemoveJSON(t *testing.T) {
 	db := openDBForTest(t, home)
 	defer db.Close()
 	assertCount(t, db, `SELECT COUNT(*) FROM contacts`, nil, 0)
+}
+
+func TestRunIndexCrawlAndSearchJSON(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "consistent"))
+	defer server.Close()
+
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	crawlCode, crawlStdout, crawlStderr := runForTest(t, []string{"index", "crawl", "--home", home, "--json", server.URL + "/profile/"}, "")
+	if crawlCode != 0 {
+		t.Fatalf("index crawl exit code = %d, stderr = %s", crawlCode, crawlStderr)
+	}
+	var crawlOut indexOutput[indexer.CrawlResult]
+	if err := json.Unmarshal([]byte(crawlStdout), &crawlOut); err != nil {
+		t.Fatalf("unmarshal crawl output: %v, stdout=%s", err, crawlStdout)
+	}
+	if !crawlOut.OK {
+		t.Fatalf("expected ok=true crawl output: %+v", crawlOut)
+	}
+	if crawlOut.Result.Record.ConflictState != indexer.ConflictClear {
+		t.Fatalf("conflict state = %q", crawlOut.Result.Record.ConflictState)
+	}
+	if crawlOut.Result.Record.SourceCount != 4 {
+		t.Fatalf("source count = %d", crawlOut.Result.Record.SourceCount)
+	}
+
+	searchCode, searchStdout, searchStderr := runForTest(t, []string{"index", "search", "--home", home, "--json", "fixture"}, "")
+	if searchCode != 0 {
+		t.Fatalf("index search exit code = %d, stderr = %s", searchCode, searchStderr)
+	}
+	var searchOut indexOutput[indexer.SearchResult]
+	if err := json.Unmarshal([]byte(searchStdout), &searchOut); err != nil {
+		t.Fatalf("unmarshal search output: %v, stdout=%s", err, searchStdout)
+	}
+	if !searchOut.OK {
+		t.Fatalf("expected ok=true search output: %+v", searchOut)
+	}
+	if len(searchOut.Result.Records) != 1 {
+		t.Fatalf("search record count = %d", len(searchOut.Result.Records))
+	}
+	if got := searchOut.Result.Records[0].CanonicalID; got != "did:web:fixture.example" {
+		t.Fatalf("canonical id = %q", got)
+	}
+	if len(searchOut.Result.Records[0].SourceURLs) != 4 {
+		t.Fatalf("source urls = %d", len(searchOut.Result.Records[0].SourceURLs))
+	}
 }
 
 func runForTest(t *testing.T, args []string, stdin string) (int, string, string) {

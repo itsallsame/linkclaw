@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/xiewanpeng/claw-identity/internal/importer"
+	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/known"
 	"github.com/xiewanpeng/claw-identity/internal/publish"
@@ -53,6 +54,14 @@ type knownOutput[T any] struct {
 	Error      string `json:"error,omitempty"`
 }
 
+type indexOutput[T any] struct {
+	OK         bool   `json:"ok"`
+	Command    string `json:"command"`
+	Subcommand string `json:"subcommand"`
+	Result     T      `json:"result,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		printUsage(out)
@@ -71,6 +80,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return runInspect(ctx, args[1:], out, errOut)
 	case "import":
 		return runImport(ctx, args[1:], out, errOut)
+	case "index":
+		return runIndex(ctx, args[1:], out, errOut)
 	case "known":
 		return runKnown(ctx, args[1:], out, errOut)
 	default:
@@ -512,6 +523,88 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 }
 
+func runIndex(ctx context.Context, args []string, out, errOut io.Writer) int {
+	if len(args) == 0 {
+		printIndexUsage(out)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		printIndexUsage(out)
+		return 0
+	case "crawl":
+		fs := flag.NewFlagSet("index crawl", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			fmt.Fprintln(errOut, "index crawl requires exactly one input (domain or URL)")
+			return 1
+		}
+		service := indexer.NewService()
+		result, err := service.Crawl(ctx, indexer.CrawlOptions{
+			Home:  *home,
+			Input: fs.Args()[0],
+		})
+		if err != nil {
+			return writeIndexError[indexer.CrawlResult](errOut, out, *jsonOutput, "crawl", err)
+		}
+		if *jsonOutput {
+			return writeIndexJSON(errOut, out, "crawl", result)
+		}
+		fmt.Fprintln(out, "linkclaw index crawl completed")
+		printIndexRecord(out, result.Record)
+		return 0
+	case "search":
+		fs := flag.NewFlagSet("index search", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if len(fs.Args()) > 1 {
+			fmt.Fprintln(errOut, "index search accepts at most one query")
+			return 1
+		}
+		query := ""
+		if len(fs.Args()) == 1 {
+			query = fs.Args()[0]
+		}
+		service := indexer.NewService()
+		result, err := service.Search(ctx, indexer.SearchOptions{
+			Home:  *home,
+			Query: query,
+		})
+		if err != nil {
+			return writeIndexError[indexer.SearchResult](errOut, out, *jsonOutput, "search", err)
+		}
+		if *jsonOutput {
+			return writeIndexJSON(errOut, out, "search", result)
+		}
+		fmt.Fprintln(out, "linkclaw index search")
+		if query != "" {
+			fmt.Fprintf(out, "query: %s\n", query)
+		}
+		fmt.Fprintf(out, "records: %d\n", len(result.Records))
+		for _, record := range result.Records {
+			fmt.Fprintln(out)
+			printIndexRecord(out, record)
+		}
+		return 0
+	default:
+		fmt.Fprintf(errOut, "unknown index subcommand %q\n", args[0])
+		printIndexUsage(errOut)
+		return 1
+	}
+}
+
 func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
 		enc := json.NewEncoder(out)
@@ -586,6 +679,28 @@ func writeKnownError[T any](errOut, out io.Writer, jsonOutput bool, subcommand s
 	return 1
 }
 
+func writeIndexJSON[T any](errOut, out io.Writer, subcommand string, result T) int {
+	enc := json.NewEncoder(out)
+	if err := enc.Encode(indexOutput[T]{OK: true, Command: "index", Subcommand: subcommand, Result: result}); err != nil {
+		fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func writeIndexError[T any](errOut, out io.Writer, jsonOutput bool, subcommand string, err error) int {
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		if encodeErr := enc.Encode(indexOutput[T]{OK: false, Command: "index", Subcommand: subcommand, Error: err.Error()}); encodeErr != nil {
+			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
+			return 1
+		}
+		return 1
+	}
+	fmt.Fprintf(errOut, "index %s failed: %v\n", subcommand, err)
+	return 1
+}
+
 func flagProvided(fs *flag.FlagSet, name string) bool {
 	provided := false
 	fs.Visit(func(f *flag.Flag) {
@@ -630,6 +745,25 @@ func printKnownContactSummary(out io.Writer, contact known.ContactSummary) {
 	}
 }
 
+func printIndexRecord(out io.Writer, record indexer.Record) {
+	fmt.Fprintf(out, "record: %s\n", record.RecordID)
+	fmt.Fprintf(out, "name: %s\n", record.DisplayName)
+	if record.CanonicalID != "" {
+		fmt.Fprintf(out, "canonical id: %s\n", record.CanonicalID)
+	}
+	fmt.Fprintf(out, "origin: %s\n", record.NormalizedOrigin)
+	if record.ProfileURL != "" {
+		fmt.Fprintf(out, "profile url: %s\n", record.ProfileURL)
+	}
+	fmt.Fprintf(out, "status: %s\n", record.ResolverStatus)
+	fmt.Fprintf(out, "conflict: %s\n", record.ConflictState)
+	fmt.Fprintf(out, "freshness: %s\n", record.Freshness)
+	fmt.Fprintf(out, "source urls: %d\n", len(record.SourceURLs))
+	for _, sourceURL := range record.SourceURLs {
+		fmt.Fprintf(out, "  - %s\n", sourceURL)
+	}
+}
+
 func prompt(reader *bufio.Reader, out io.Writer, label string) (string, error) {
 	fmt.Fprint(out, label)
 	line, err := reader.ReadString('\n')
@@ -653,6 +787,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  publish Compile and bundle publishable identity artifacts")
 	fmt.Fprintln(out, "  inspect Resolve and verify public identity artifacts")
 	fmt.Fprintln(out, "  import  Resolve, verify, and persist a public identity")
+	fmt.Fprintln(out, "  index   Crawl and search the local read-only public index")
 	fmt.Fprintln(out, "  known   Read and manage the local trust book")
 }
 
@@ -669,4 +804,15 @@ func printKnownUsage(out io.Writer) {
 	fmt.Fprintln(out, "  note     Append a note to a contact")
 	fmt.Fprintln(out, "  refresh  Re-resolve and persist current public artifacts")
 	fmt.Fprintln(out, "  rm       Remove a contact from the local trust book")
+}
+
+func printIndexUsage(out io.Writer) {
+	fmt.Fprintln(out, "LinkClaw index")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  linkclaw index <subcommand> [flags] [query]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  crawl   Crawl one public identity surface into the local read-only index")
+	fmt.Fprintln(out, "  search  Search index records and show freshness/conflict/source urls")
 }
