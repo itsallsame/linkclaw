@@ -83,6 +83,10 @@ test("bridge runs init and publish against the real binary", async () => {
     pluginRoot,
   );
   assert.equal(initEnvelope.ok, true);
+  assert.equal(initEnvelope.schema_version, "linkclaw.cli.v1");
+  assert.equal(initEnvelope.subcommand, null);
+  assert.deepEqual(initEnvelope.warnings, []);
+  assert.equal(typeof initEnvelope.timestamp, "string");
 
   const publishEnvelope = await runLinkClaw(
     config,
@@ -95,6 +99,8 @@ test("bridge runs init and publish against the real binary", async () => {
     pluginRoot,
   );
   assert.equal(publishEnvelope.ok, true);
+  assert.equal(publishEnvelope.schema_version, "linkclaw.cli.v1");
+  assert.equal(publishEnvelope.subcommand, null);
   const result = publishEnvelope.result as Record<string, unknown>;
   assert.equal(result.home_origin, "https://agent.example");
   assert.equal(result.tier, "full");
@@ -129,9 +135,11 @@ test("bridge covers inspect, import, and known commands against the real binary"
       pluginRoot,
     );
     assert.equal(
-      (inspectEnvelope.result as Record<string, unknown>).status,
+      (inspectEnvelope.result as Record<string, unknown>).verification_state,
       "consistent",
     );
+    assert.equal(inspectEnvelope.schema_version, "linkclaw.cli.v1");
+    assert.equal(inspectEnvelope.subcommand, null);
 
     const importEnvelope = await runLinkClaw(
       config,
@@ -142,6 +150,7 @@ test("bridge covers inspect, import, and known commands against the real binary"
       pluginRoot,
     );
     const importResult = importEnvelope.result as Record<string, unknown>;
+    assert.equal(importEnvelope.schema_version, "linkclaw.cli.v1");
     const contactID = String(importResult.contact_id);
     assert.ok(contactID !== "");
 
@@ -152,6 +161,7 @@ test("bridge covers inspect, import, and known commands against the real binary"
       },
       pluginRoot,
     );
+    assert.equal(lsEnvelope.subcommand, "ls");
     const contacts = (lsEnvelope.result as Record<string, unknown>).contacts as unknown[];
     assert.equal(contacts.length, 1);
 

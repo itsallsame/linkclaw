@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
@@ -39,6 +40,7 @@ func TestRunInitJSONIdempotent(t *testing.T) {
 	if err := json.Unmarshal([]byte(firstOut), &first); err != nil {
 		t.Fatalf("unmarshal first output: %v, output=%s", err, firstOut)
 	}
+	assertEnvelopeMetadata(t, first.SchemaVersion, first.Command, first.Subcommand, first.Timestamp, first.Warnings, "init", nil)
 	if !first.OK {
 		t.Fatalf("first init returned not ok: %+v", first)
 	}
@@ -66,6 +68,7 @@ func TestRunInitJSONIdempotent(t *testing.T) {
 	if err := json.Unmarshal([]byte(secondOut), &second); err != nil {
 		t.Fatalf("unmarshal second output: %v, output=%s", err, secondOut)
 	}
+	assertEnvelopeMetadata(t, second.SchemaVersion, second.Command, second.Subcommand, second.Timestamp, second.Warnings, "init", nil)
 	if second.Result.Identity.Created {
 		t.Fatalf("expected second run not to create identity")
 	}
@@ -121,6 +124,7 @@ func TestRunInitInteractiveJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "init", nil)
 	if out.Result.Identity.CanonicalID != "did:web:interactive.example" {
 		t.Fatalf("unexpected canonical id: %s", out.Result.Identity.CanonicalID)
 	}
@@ -142,11 +146,18 @@ func TestRunInitNonInteractiveRequiresCanonicalID(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v", err)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "init", nil)
 	if out.OK {
 		t.Fatalf("expected ok=false output")
 	}
-	if !strings.Contains(out.Error, "canonical id") {
-		t.Fatalf("expected canonical id error, got %q", out.Error)
+	if out.Error == nil {
+		t.Fatalf("expected structured error")
+	}
+	if out.Error.Code != "invalid_input" {
+		t.Fatalf("error code = %q", out.Error.Code)
+	}
+	if !strings.Contains(out.Error.Message, "canonical id") {
+		t.Fatalf("expected canonical id error, got %q", out.Error.Message)
 	}
 }
 
@@ -185,6 +196,7 @@ func TestRunPublishJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "publish", nil)
 	if !out.OK {
 		t.Fatalf("expected ok=true output: %+v", out)
 	}
@@ -217,14 +229,48 @@ func TestRunInspectJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "inspect", nil)
 	if !out.OK {
 		t.Fatalf("expected ok=true output: %+v", out)
 	}
-	if out.Result.Status != "consistent" {
-		t.Fatalf("status = %q", out.Result.Status)
+	if out.Result.VerificationState != "consistent" {
+		t.Fatalf("verification_state = %q", out.Result.VerificationState)
+	}
+	if !out.Result.CanImport {
+		t.Fatalf("expected can_import=true for consistent inspection")
 	}
 	if out.Result.CanonicalID != "did:web:fixture.example" {
 		t.Fatalf("canonical id = %q", out.Result.CanonicalID)
+	}
+}
+
+func TestRunInspectJSONRequiresInput(t *testing.T) {
+	t.Parallel()
+
+	code, stdout, stderr := runForTest(t, []string{"inspect", "--json"}, "")
+	if code == 0 {
+		t.Fatalf("expected inspect to fail without input")
+	}
+	if stderr != "" {
+		t.Fatalf("expected stderr to stay empty for JSON validation error, got %q", stderr)
+	}
+
+	var out inspectOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "inspect", nil)
+	if out.OK {
+		t.Fatalf("expected ok=false output")
+	}
+	if out.Error == nil {
+		t.Fatalf("expected structured error")
+	}
+	if out.Error.Code != "invalid_input" {
+		t.Fatalf("error code = %q", out.Error.Code)
+	}
+	if out.Error.Details["kind"] != "validation" {
+		t.Fatalf("error details kind = %v", out.Error.Details["kind"])
 	}
 }
 
@@ -257,6 +303,7 @@ func TestRunImportJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "import", nil)
 	if !out.OK {
 		t.Fatalf("expected ok=true output: %+v", out)
 	}
@@ -294,6 +341,7 @@ func TestRunKnownTrustJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "known", stringPtr("trust"))
 	if !out.OK {
 		t.Fatalf("expected ok=true output: %+v", out)
 	}
@@ -352,6 +400,7 @@ func TestRunKnownNoteJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "known", stringPtr("note"))
 	if !out.OK {
 		t.Fatalf("expected ok=true output: %+v", out)
 	}
@@ -389,6 +438,7 @@ func TestRunKnownRefreshJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "known", stringPtr("refresh"))
 	if !out.OK {
 		t.Fatalf("expected ok=true output: %+v", out)
 	}
@@ -423,6 +473,7 @@ func TestRunKnownListShowAndRemoveJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(lsStdout), &lsOut); err != nil {
 		t.Fatalf("unmarshal ls output: %v, stdout=%s", err, lsStdout)
 	}
+	assertEnvelopeMetadata(t, lsOut.SchemaVersion, lsOut.Command, lsOut.Subcommand, lsOut.Timestamp, lsOut.Warnings, "known", stringPtr("ls"))
 	if len(lsOut.Result.Contacts) != 1 {
 		t.Fatalf("known ls contacts = %d", len(lsOut.Result.Contacts))
 	}
@@ -435,6 +486,7 @@ func TestRunKnownListShowAndRemoveJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(showStdout), &showOut); err != nil {
 		t.Fatalf("unmarshal show output: %v, stdout=%s", err, showStdout)
 	}
+	assertEnvelopeMetadata(t, showOut.SchemaVersion, showOut.Command, showOut.Subcommand, showOut.Timestamp, showOut.Warnings, "known", stringPtr("show"))
 	if showOut.Result.Contact.ContactID != imported.Result.ContactID {
 		t.Fatalf("shown contact = %q", showOut.Result.Contact.ContactID)
 	}
@@ -450,6 +502,7 @@ func TestRunKnownListShowAndRemoveJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(rmStdout), &rmOut); err != nil {
 		t.Fatalf("unmarshal rm output: %v, stdout=%s", err, rmStdout)
 	}
+	assertEnvelopeMetadata(t, rmOut.SchemaVersion, rmOut.Command, rmOut.Subcommand, rmOut.Timestamp, rmOut.Warnings, "known", stringPtr("rm"))
 	if rmOut.Result.Removed.Contacts != 1 {
 		t.Fatalf("removed contacts = %d", rmOut.Result.Removed.Contacts)
 	}
@@ -607,4 +660,42 @@ func serverOrigin(r *http.Request) string {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
+}
+
+func assertEnvelopeMetadata(
+	t *testing.T,
+	schemaVersion string,
+	command string,
+	subcommand *string,
+	timestamp string,
+	warnings []string,
+	wantCommand string,
+	wantSubcommand *string,
+) {
+	t.Helper()
+
+	if schemaVersion != cliSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", schemaVersion, cliSchemaVersion)
+	}
+	if command != wantCommand {
+		t.Fatalf("command = %q, want %q", command, wantCommand)
+	}
+	if wantSubcommand == nil {
+		if subcommand != nil {
+			t.Fatalf("subcommand = %q, want null", *subcommand)
+		}
+	} else {
+		if subcommand == nil {
+			t.Fatalf("subcommand = nil, want %q", *wantSubcommand)
+		}
+		if *subcommand != *wantSubcommand {
+			t.Fatalf("subcommand = %q, want %q", *subcommand, *wantSubcommand)
+		}
+	}
+	if warnings == nil {
+		t.Fatalf("warnings should decode as an array")
+	}
+	if _, err := time.Parse(time.RFC3339, timestamp); err != nil {
+		t.Fatalf("timestamp %q is not RFC3339: %v", timestamp, err)
+	}
 }

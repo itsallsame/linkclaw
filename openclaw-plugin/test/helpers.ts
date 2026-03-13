@@ -105,9 +105,20 @@ writeFileSync(
   )
 );
 process.stdout.write(JSON.stringify({
+  schema_version: "linkclaw.cli.v1",
   ok: false,
   command: "publish",
-  error: "bundle consistency checks failed: did-canonical-id"
+  subcommand: null,
+  timestamp: "2026-03-13T12:00:00Z",
+  warnings: [],
+  error: {
+    code: "command_failed",
+    message: "bundle consistency checks failed: did-canonical-id",
+    retryable: false,
+    details: {
+      kind: "command"
+    }
+  }
 }));
 process.exit(1);
 `;

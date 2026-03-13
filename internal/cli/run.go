@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/importer"
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
@@ -18,40 +19,99 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/resolver"
 )
 
+const cliSchemaVersion = "linkclaw.cli.v1"
+
+var envelopeNow = func() time.Time {
+	return time.Now().UTC()
+}
+
+type jsonEnvelope struct {
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        any                `json:"result,omitempty"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
+}
+
+type jsonEnvelopeError struct {
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable"`
+	Details   map[string]any `json:"details"`
+}
+
+type inspectJSONResult struct {
+	Input             string              `json:"input"`
+	NormalizedOrigin  string              `json:"normalized_origin,omitempty"`
+	Resource          string              `json:"resource,omitempty"`
+	VerificationState string              `json:"verification_state"`
+	CanImport         bool                `json:"can_import"`
+	CanonicalID       string              `json:"canonical_id,omitempty"`
+	DisplayName       string              `json:"display_name,omitempty"`
+	ProfileURL        string              `json:"profile_url,omitempty"`
+	Artifacts         []resolver.Artifact `json:"artifacts"`
+	Proofs            []resolver.Proof    `json:"proofs,omitempty"`
+	Mismatches        []string            `json:"mismatches,omitempty"`
+	Warnings          []string            `json:"warnings,omitempty"`
+	ResolvedAt        string              `json:"resolved_at"`
+}
+
 type initOutput struct {
-	OK      bool            `json:"ok"`
-	Command string          `json:"command"`
-	Result  initflow.Result `json:"result,omitempty"`
-	Error   string          `json:"error,omitempty"`
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        initflow.Result    `json:"result"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
 }
 
 type publishOutput struct {
-	OK      bool           `json:"ok"`
-	Command string         `json:"command"`
-	Result  publish.Result `json:"result,omitempty"`
-	Error   string         `json:"error,omitempty"`
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        publish.Result     `json:"result"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
 }
 
 type inspectOutput struct {
-	OK      bool            `json:"ok"`
-	Command string          `json:"command"`
-	Result  resolver.Result `json:"result,omitempty"`
-	Error   string          `json:"error,omitempty"`
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        inspectJSONResult  `json:"result"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
 }
 
 type importOutput struct {
-	OK      bool            `json:"ok"`
-	Command string          `json:"command"`
-	Result  importer.Result `json:"result,omitempty"`
-	Error   string          `json:"error,omitempty"`
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        importer.Result    `json:"result"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
 }
 
 type knownOutput[T any] struct {
-	OK         bool   `json:"ok"`
-	Command    string `json:"command"`
-	Subcommand string `json:"subcommand"`
-	Result     T      `json:"result,omitempty"`
-	Error      string `json:"error,omitempty"`
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        T                  `json:"result"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
 }
 
 type indexOutput[T any] struct {
@@ -92,8 +152,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 }
 
 func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.SetOutput(errOut)
+	jsonRequested := hasJSONFlag(args)
+	fs := newFlagSet("init", errOut, jsonRequested)
 
 	home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 	canonicalID := fs.String("canonical-id", "", "canonical identity id (required in non-interactive mode)")
@@ -103,11 +163,20 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 
 	if err := fs.Parse(args); err != nil {
+		if jsonRequested {
+			return writeJSONCommandError(errOut, out, "init", nil, newFlagParseError(err))
+		}
 		return 1
 	}
 	if len(fs.Args()) > 0 {
-		fmt.Fprintf(errOut, "unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
-		return 1
+		return writeValidationFailure(
+			errOut,
+			out,
+			*jsonOutput,
+			"init",
+			nil,
+			fmt.Sprintf("unexpected arguments: %s", strings.Join(fs.Args(), " ")),
+		)
 	}
 
 	canon := strings.TrimSpace(*canonicalID)
@@ -143,12 +212,7 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	}
 
 	if *jsonOutput {
-		enc := json.NewEncoder(out)
-		if err := enc.Encode(initOutput{OK: true, Command: "init", Result: result}); err != nil {
-			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
-			return 1
-		}
-		return 0
+		return writeJSONCommandResult(errOut, out, "init", nil, nil, result)
 	}
 
 	fmt.Fprintln(out, "linkclaw init completed")
@@ -160,8 +224,8 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 }
 
 func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
-	fs.SetOutput(errOut)
+	jsonRequested := hasJSONFlag(args)
+	fs := newFlagSet("publish", errOut, jsonRequested)
 
 	home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 	origin := fs.String("origin", "", "public home origin (for example https://agent.example)")
@@ -171,11 +235,20 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 
 	if err := fs.Parse(args); err != nil {
+		if jsonRequested {
+			return writeJSONCommandError(errOut, out, "publish", nil, newFlagParseError(err))
+		}
 		return 1
 	}
 	if len(fs.Args()) > 0 {
-		fmt.Fprintf(errOut, "unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
-		return 1
+		return writeValidationFailure(
+			errOut,
+			out,
+			*jsonOutput,
+			"publish",
+			nil,
+			fmt.Sprintf("unexpected arguments: %s", strings.Join(fs.Args(), " ")),
+		)
 	}
 
 	service := publish.NewService()
@@ -190,12 +263,7 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 
 	if *jsonOutput {
-		enc := json.NewEncoder(out)
-		if err := enc.Encode(publishOutput{OK: true, Command: "publish", Result: result}); err != nil {
-			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
-			return 1
-		}
-		return 0
+		return writeJSONCommandResult(errOut, out, "publish", nil, nil, result)
 	}
 
 	fmt.Fprintln(out, "linkclaw publish completed")
@@ -209,18 +277,20 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 }
 
 func runInspect(ctx context.Context, args []string, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
-	fs.SetOutput(errOut)
+	jsonRequested := hasJSONFlag(args)
+	fs := newFlagSet("inspect", errOut, jsonRequested)
 
 	jsonOutput := fs.Bool("json", false, "emit JSON result")
 	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 
 	if err := fs.Parse(args); err != nil {
+		if jsonRequested {
+			return writeJSONCommandError(errOut, out, "inspect", nil, newFlagParseError(err))
+		}
 		return 1
 	}
 	if len(fs.Args()) != 1 {
-		fmt.Fprintln(errOut, "inspect requires exactly one input (domain or URL)")
-		return 1
+		return writeValidationFailure(errOut, out, *jsonOutput, "inspect", nil, "inspect requires exactly one input (domain or URL)")
 	}
 
 	service := resolver.NewService()
@@ -230,12 +300,7 @@ func runInspect(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 
 	if *jsonOutput {
-		enc := json.NewEncoder(out)
-		if err := enc.Encode(inspectOutput{OK: true, Command: "inspect", Result: result}); err != nil {
-			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
-			return 1
-		}
-		return 0
+		return writeJSONCommandResult(errOut, out, "inspect", nil, result.Warnings, makeInspectJSONResult(result))
 	}
 
 	fmt.Fprintln(out, "linkclaw inspect completed")
@@ -251,8 +316,8 @@ func runInspect(ctx context.Context, args []string, out, errOut io.Writer) int {
 }
 
 func runImport(ctx context.Context, args []string, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("import", flag.ContinueOnError)
-	fs.SetOutput(errOut)
+	jsonRequested := hasJSONFlag(args)
+	fs := newFlagSet("import", errOut, jsonRequested)
 
 	home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 	allowDiscovered := fs.Bool("allow-discovered", false, "allow importing discovered identities")
@@ -261,11 +326,13 @@ func runImport(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 
 	if err := fs.Parse(args); err != nil {
+		if jsonRequested {
+			return writeJSONCommandError(errOut, out, "import", nil, newFlagParseError(err))
+		}
 		return 1
 	}
 	if len(fs.Args()) != 1 {
-		fmt.Fprintln(errOut, "import requires exactly one input (domain or URL)")
-		return 1
+		return writeValidationFailure(errOut, out, *jsonOutput, "import", nil, "import requires exactly one input (domain or URL)")
 	}
 
 	service := importer.NewService()
@@ -280,12 +347,7 @@ func runImport(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 
 	if *jsonOutput {
-		enc := json.NewEncoder(out)
-		if err := enc.Encode(importOutput{OK: true, Command: "import", Result: result}); err != nil {
-			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
-			return 1
-		}
-		return 0
+		return writeJSONCommandResult(errOut, out, "import", nil, result.Inspection.Warnings, result)
 	}
 
 	fmt.Fprintln(out, "linkclaw import completed")
@@ -298,7 +360,11 @@ func runImport(ctx context.Context, args []string, out, errOut io.Writer) int {
 }
 
 func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
+	jsonRequested := hasJSONFlag(args)
 	if len(args) == 0 {
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "known", nil, "known requires a subcommand")
+		}
 		printKnownUsage(out)
 		return 0
 	}
@@ -308,17 +374,25 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 		printKnownUsage(out)
 		return 0
 	case "ls":
-		fs := flag.NewFlagSet("known ls", flag.ContinueOnError)
-		fs.SetOutput(errOut)
+		fs := newFlagSet("known ls", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		jsonOutput := fs.Bool("json", false, "emit JSON result")
 		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "known", stringPtr("ls"), newFlagParseError(err))
+			}
 			return 1
 		}
 		if len(fs.Args()) > 0 {
-			fmt.Fprintf(errOut, "known ls does not accept positional arguments: %s\n", strings.Join(fs.Args(), " "))
-			return 1
+			return writeValidationFailure(
+				errOut,
+				out,
+				*jsonOutput,
+				"known",
+				stringPtr("ls"),
+				fmt.Sprintf("known ls does not accept positional arguments: %s", strings.Join(fs.Args(), " ")),
+			)
 		}
 		service := known.NewService()
 		result, err := service.List(ctx, known.ListOptions{Home: *home})
@@ -326,7 +400,7 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return writeKnownError[known.ListResult](errOut, out, *jsonOutput, "ls", err)
 		}
 		if *jsonOutput {
-			return writeKnownJSON(errOut, out, "ls", result)
+			return writeKnownJSON(errOut, out, "ls", nil, result)
 		}
 		if len(result.Contacts) == 0 {
 			fmt.Fprintln(out, "linkclaw known ls")
@@ -348,17 +422,18 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 		return 0
 	case "show":
-		fs := flag.NewFlagSet("known show", flag.ContinueOnError)
-		fs.SetOutput(errOut)
+		fs := newFlagSet("known show", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		jsonOutput := fs.Bool("json", false, "emit JSON result")
 		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "known", stringPtr("show"), newFlagParseError(err))
+			}
 			return 1
 		}
 		if len(fs.Args()) != 1 {
-			fmt.Fprintln(errOut, "known show requires exactly one contact reference")
-			return 1
+			return writeValidationFailure(errOut, out, *jsonOutput, "known", stringPtr("show"), "known show requires exactly one contact reference")
 		}
 		service := known.NewService()
 		result, err := service.Show(ctx, known.LookupOptions{Home: *home, Identifier: fs.Args()[0]})
@@ -366,7 +441,7 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return writeKnownError[known.ShowResult](errOut, out, *jsonOutput, "show", err)
 		}
 		if *jsonOutput {
-			return writeKnownJSON(errOut, out, "show", result)
+			return writeKnownJSON(errOut, out, "show", nil, result)
 		}
 		printKnownContactSummary(out, result.Contact.ContactSummary)
 		fmt.Fprintf(out, "handles: %d\n", len(result.Contact.Handles))
@@ -389,8 +464,7 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 		return 0
 	case "trust":
-		fs := flag.NewFlagSet("known trust", flag.ContinueOnError)
-		fs.SetOutput(errOut)
+		fs := newFlagSet("known trust", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		level := fs.String("level", "", "set trust level: unknown|seen|verified|trusted|pinned")
 		risk := fs.String("risk", "", "comma-separated risk flags; pass empty string to clear")
@@ -398,11 +472,13 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 		jsonOutput := fs.Bool("json", false, "emit JSON result")
 		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "known", stringPtr("trust"), newFlagParseError(err))
+			}
 			return 1
 		}
 		if len(fs.Args()) != 1 {
-			fmt.Fprintln(errOut, "known trust requires exactly one contact reference")
-			return 1
+			return writeValidationFailure(errOut, out, *jsonOutput, "known", stringPtr("trust"), "known trust requires exactly one contact reference")
 		}
 		service := known.NewService()
 		result, err := service.Trust(ctx, known.TrustOptions{
@@ -417,24 +493,25 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return writeKnownError[known.TrustResult](errOut, out, *jsonOutput, "trust", err)
 		}
 		if *jsonOutput {
-			return writeKnownJSON(errOut, out, "trust", result)
+			return writeKnownJSON(errOut, out, "trust", nil, result)
 		}
 		fmt.Fprintln(out, "linkclaw known trust updated")
 		printKnownContactSummary(out, result.Contact)
 		return 0
 	case "note":
-		fs := flag.NewFlagSet("known note", flag.ContinueOnError)
-		fs.SetOutput(errOut)
+		fs := newFlagSet("known note", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		body := fs.String("body", "", "note body")
 		jsonOutput := fs.Bool("json", false, "emit JSON result")
 		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "known", stringPtr("note"), newFlagParseError(err))
+			}
 			return 1
 		}
 		if len(fs.Args()) != 1 {
-			fmt.Fprintln(errOut, "known note requires exactly one contact reference")
-			return 1
+			return writeValidationFailure(errOut, out, *jsonOutput, "known", stringPtr("note"), "known note requires exactly one contact reference")
 		}
 		service := known.NewService()
 		result, err := service.Note(ctx, known.NoteOptions{
@@ -446,24 +523,25 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return writeKnownError[known.NoteResult](errOut, out, *jsonOutput, "note", err)
 		}
 		if *jsonOutput {
-			return writeKnownJSON(errOut, out, "note", result)
+			return writeKnownJSON(errOut, out, "note", nil, result)
 		}
 		fmt.Fprintln(out, "linkclaw known note added")
 		printKnownContactSummary(out, result.Contact)
 		fmt.Fprintf(out, "note: %s\n", result.Note.Body)
 		return 0
 	case "refresh":
-		fs := flag.NewFlagSet("known refresh", flag.ContinueOnError)
-		fs.SetOutput(errOut)
+		fs := newFlagSet("known refresh", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		jsonOutput := fs.Bool("json", false, "emit JSON result")
 		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "known", stringPtr("refresh"), newFlagParseError(err))
+			}
 			return 1
 		}
 		if len(fs.Args()) != 1 {
-			fmt.Fprintln(errOut, "known refresh requires exactly one contact reference")
-			return 1
+			return writeValidationFailure(errOut, out, *jsonOutput, "known", stringPtr("refresh"), "known refresh requires exactly one contact reference")
 		}
 		service := known.NewService()
 		result, err := service.Refresh(ctx, known.RefreshOptions{
@@ -474,7 +552,7 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return writeKnownError[known.RefreshResult](errOut, out, *jsonOutput, "refresh", err)
 		}
 		if *jsonOutput {
-			return writeKnownJSON(errOut, out, "refresh", result)
+			return writeKnownJSON(errOut, out, "refresh", result.Inspection.Warnings, result)
 		}
 		fmt.Fprintln(out, "linkclaw known refresh completed")
 		printKnownContactSummary(out, result.Contact)
@@ -483,17 +561,18 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(out, "status: %s\n", result.Inspection.Status)
 		return 0
 	case "rm":
-		fs := flag.NewFlagSet("known rm", flag.ContinueOnError)
-		fs.SetOutput(errOut)
+		fs := newFlagSet("known rm", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		jsonOutput := fs.Bool("json", false, "emit JSON result")
 		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "known", stringPtr("rm"), newFlagParseError(err))
+			}
 			return 1
 		}
 		if len(fs.Args()) != 1 {
-			fmt.Fprintln(errOut, "known rm requires exactly one contact reference")
-			return 1
+			return writeValidationFailure(errOut, out, *jsonOutput, "known", stringPtr("rm"), "known rm requires exactly one contact reference")
 		}
 		service := known.NewService()
 		result, err := service.Remove(ctx, known.RemoveOptions{
@@ -504,7 +583,7 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return writeKnownError[known.RemoveResult](errOut, out, *jsonOutput, "rm", err)
 		}
 		if *jsonOutput {
-			return writeKnownJSON(errOut, out, "rm", result)
+			return writeKnownJSON(errOut, out, "rm", nil, result)
 		}
 		fmt.Fprintln(out, "linkclaw known rm completed")
 		fmt.Fprintf(out, "contact: %s (%s)\n", result.Contact.DisplayName, result.Contact.ContactID)
@@ -517,6 +596,9 @@ func runKnown(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(out, "deleted events: %d\n", result.Removed.Events)
 		return 0
 	default:
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "known", stringPtr(args[0]), fmt.Sprintf("unknown known subcommand %q", args[0]))
+		}
 		fmt.Fprintf(errOut, "unknown known subcommand %q\n", args[0])
 		printKnownUsage(errOut)
 		return 1
@@ -607,12 +689,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) int {
 
 func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
-		enc := json.NewEncoder(out)
-		if encodeErr := enc.Encode(initOutput{OK: false, Command: "init", Error: err.Error()}); encodeErr != nil {
-			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
-			return 1
-		}
-		return 1
+		return writeJSONCommandError(errOut, out, "init", nil, newCommandError(err))
 	}
 	fmt.Fprintf(errOut, "init failed: %v\n", err)
 	return 1
@@ -620,12 +697,7 @@ func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 
 func writePublishError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
-		enc := json.NewEncoder(out)
-		if encodeErr := enc.Encode(publishOutput{OK: false, Command: "publish", Error: err.Error()}); encodeErr != nil {
-			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
-			return 1
-		}
-		return 1
+		return writeJSONCommandError(errOut, out, "publish", nil, newCommandError(err))
 	}
 	fmt.Fprintf(errOut, "publish failed: %v\n", err)
 	return 1
@@ -633,12 +705,7 @@ func writePublishError(errOut, out io.Writer, jsonOutput bool, err error) int {
 
 func writeInspectError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
-		enc := json.NewEncoder(out)
-		if encodeErr := enc.Encode(inspectOutput{OK: false, Command: "inspect", Error: err.Error()}); encodeErr != nil {
-			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
-			return 1
-		}
-		return 1
+		return writeJSONCommandError(errOut, out, "inspect", nil, newCommandError(err))
 	}
 	fmt.Fprintf(errOut, "inspect failed: %v\n", err)
 	return 1
@@ -646,34 +713,19 @@ func writeInspectError(errOut, out io.Writer, jsonOutput bool, err error) int {
 
 func writeImportError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
-		enc := json.NewEncoder(out)
-		if encodeErr := enc.Encode(importOutput{OK: false, Command: "import", Error: err.Error()}); encodeErr != nil {
-			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
-			return 1
-		}
-		return 1
+		return writeJSONCommandError(errOut, out, "import", nil, newCommandError(err))
 	}
 	fmt.Fprintf(errOut, "import failed: %v\n", err)
 	return 1
 }
 
-func writeKnownJSON[T any](errOut, out io.Writer, subcommand string, result T) int {
-	enc := json.NewEncoder(out)
-	if err := enc.Encode(knownOutput[T]{OK: true, Command: "known", Subcommand: subcommand, Result: result}); err != nil {
-		fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
-		return 1
-	}
-	return 0
+func writeKnownJSON[T any](errOut, out io.Writer, subcommand string, warnings []string, result T) int {
+	return writeJSONCommandResult(errOut, out, "known", stringPtr(subcommand), warnings, result)
 }
 
 func writeKnownError[T any](errOut, out io.Writer, jsonOutput bool, subcommand string, err error) int {
 	if jsonOutput {
-		enc := json.NewEncoder(out)
-		if encodeErr := enc.Encode(knownOutput[T]{OK: false, Command: "known", Subcommand: subcommand, Error: err.Error()}); encodeErr != nil {
-			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
-			return 1
-		}
-		return 1
+		return writeJSONCommandError(errOut, out, "known", stringPtr(subcommand), newCommandError(err))
 	}
 	fmt.Fprintf(errOut, "known %s failed: %v\n", subcommand, err)
 	return 1
@@ -699,6 +751,170 @@ func writeIndexError[T any](errOut, out io.Writer, jsonOutput bool, subcommand s
 	}
 	fmt.Fprintf(errOut, "index %s failed: %v\n", subcommand, err)
 	return 1
+}
+
+func writeJSONCommandResult(errOut, out io.Writer, command string, subcommand *string, warnings []string, result any) int {
+	return writeJSONEnvelope(errOut, out, jsonEnvelope{
+		SchemaVersion: cliSchemaVersion,
+		Command:       command,
+		Subcommand:    subcommand,
+		OK:            true,
+		Timestamp:     envelopeNow().Format(time.RFC3339),
+		Warnings:      normalizeWarnings(warnings),
+		Result:        result,
+	})
+}
+
+func writeJSONCommandError(errOut, out io.Writer, command string, subcommand *string, err *jsonEnvelopeError) int {
+	return writeJSONEnvelope(errOut, out, jsonEnvelope{
+		SchemaVersion: cliSchemaVersion,
+		Command:       command,
+		Subcommand:    subcommand,
+		OK:            false,
+		Timestamp:     envelopeNow().Format(time.RFC3339),
+		Warnings:      []string{},
+		Error:         err,
+	})
+}
+
+func writeJSONEnvelope(errOut, out io.Writer, envelope jsonEnvelope) int {
+	enc := json.NewEncoder(out)
+	if err := enc.Encode(envelope); err != nil {
+		fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
+		return 1
+	}
+	if envelope.OK {
+		return 0
+	}
+	return 1
+}
+
+func writeValidationFailure(errOut, out io.Writer, jsonOutput bool, command string, subcommand *string, message string) int {
+	if jsonOutput {
+		return writeJSONCommandError(errOut, out, command, subcommand, newValidationError(message))
+	}
+	fmt.Fprintln(errOut, message)
+	return 1
+}
+
+func newFlagSet(name string, errOut io.Writer, jsonRequested bool) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	if jsonRequested {
+		fs.SetOutput(io.Discard)
+		return fs
+	}
+	fs.SetOutput(errOut)
+	return fs
+}
+
+func hasJSONFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" || arg == "-j" {
+			return true
+		}
+	}
+	return false
+}
+
+func newFlagParseError(err error) *jsonEnvelopeError {
+	return &jsonEnvelopeError{
+		Code:      "invalid_input",
+		Message:   err.Error(),
+		Retryable: false,
+		Details: map[string]any{
+			"kind": "flag_parse",
+		},
+	}
+}
+
+func newValidationError(message string) *jsonEnvelopeError {
+	return &jsonEnvelopeError{
+		Code:      "invalid_input",
+		Message:   message,
+		Retryable: false,
+		Details: map[string]any{
+			"kind": "validation",
+		},
+	}
+}
+
+func newCommandError(err error) *jsonEnvelopeError {
+	return &jsonEnvelopeError{
+		Code:      commandErrorCode(err),
+		Message:   err.Error(),
+		Retryable: isRetryableError(err),
+		Details: map[string]any{
+			"kind": "command",
+		},
+	}
+}
+
+func commandErrorCode(err error) string {
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(message, "state db not found"):
+		return "state_not_initialized"
+	case strings.Contains(message, " not found"):
+		return "not_found"
+	case strings.Contains(message, "requires exactly one"),
+		strings.Contains(message, "does not accept positional arguments"),
+		strings.Contains(message, "unexpected arguments"),
+		strings.Contains(message, "canonical id is required"),
+		strings.Contains(message, "must include"),
+		strings.Contains(message, "must use"),
+		strings.Contains(message, "must not"),
+		strings.Contains(message, "unsupported"):
+		return "invalid_input"
+	default:
+		return "command_failed"
+	}
+}
+
+func isRetryableError(err error) bool {
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "timeout") ||
+		strings.Contains(message, "temporar") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "unexpected http status 5")
+}
+
+func normalizeWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return []string{}
+	}
+	return warnings
+}
+
+func makeInspectJSONResult(result resolver.Result) inspectJSONResult {
+	return inspectJSONResult{
+		Input:             result.Input,
+		NormalizedOrigin:  result.NormalizedOrigin,
+		Resource:          result.Resource,
+		VerificationState: result.Status,
+		CanImport:         canImportInspection(result.Status),
+		CanonicalID:       result.CanonicalID,
+		DisplayName:       result.DisplayName,
+		ProfileURL:        result.ProfileURL,
+		Artifacts:         result.Artifacts,
+		Proofs:            result.Proofs,
+		Mismatches:        result.Mismatches,
+		Warnings:          result.Warnings,
+		ResolvedAt:        result.ResolvedAt,
+	}
+}
+
+func canImportInspection(status string) bool {
+	switch status {
+	case resolver.StatusResolved, resolver.StatusConsistent:
+		return true
+	default:
+		return false
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
 }
 
 func flagProvided(fs *flag.FlagSet, name string) bool {

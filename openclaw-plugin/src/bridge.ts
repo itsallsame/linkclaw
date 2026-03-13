@@ -45,12 +45,22 @@ export type LinkClawBridgeRequest = {
   allowMismatch?: boolean;
 };
 
+export type LinkClawEnvelopeError = {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details: Record<string, unknown>;
+};
+
 export type LinkClawEnvelope = {
+  schema_version?: string;
   ok: boolean;
   command: string;
-  subcommand?: string;
+  subcommand?: string | null;
+  timestamp?: string;
+  warnings?: string[];
   result?: unknown;
-  error?: string;
+  error?: LinkClawEnvelopeError;
 };
 
 type ExecFailure = Error & {
@@ -113,7 +123,7 @@ export async function runLinkClaw(
     const envelope = parseEnvelope(stdout);
     if (!envelope.ok) {
       throw new LinkClawCommandError(
-        envelope.error ?? `${request.command} failed`,
+        envelopeMessage(envelope, `${request.command} failed`),
         {
           exitCode: 1,
           stderr: "",
@@ -132,8 +142,10 @@ export async function runLinkClaw(
       throw error;
     }
     if (typeof failure.code === "number") {
-      const message =
-        envelope?.error ?? (stderr.trim() || `${request.command} failed`);
+      const message = envelopeMessage(
+        envelope,
+        stderr.trim() || `${request.command} failed`,
+      );
       throw new LinkClawCommandError(
         message,
         {
@@ -356,6 +368,14 @@ function maybeParseEnvelope(stdout: string): LinkClawEnvelope | undefined {
     return undefined;
   }
   return undefined;
+}
+
+function envelopeMessage(envelope: LinkClawEnvelope | undefined, fallback: string): string {
+  const message = envelope?.error?.message;
+  if (typeof message === "string" && message.trim() !== "") {
+    return message;
+  }
+  return fallback;
 }
 
 function isEnvelope(value: unknown): value is LinkClawEnvelope {
