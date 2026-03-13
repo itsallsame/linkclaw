@@ -1,0 +1,9 @@
+{
+  "canonical_id": "did:web:rogue.example",
+  "name": "Mismatch Agent",
+  "origin": "{{ORIGIN}}",
+  "did_url": "{{ORIGIN}}/.well-known/did.json",
+  "verification_methods": [
+    "did:web:fixture.example#key-1"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "canonical_id": "did:web:fixture.example",
+  "name": "Fixture Agent",
+  "origin": "{{ORIGIN}}",
+  "did_url": "{{ORIGIN}}/.well-known/did.json",
+  "webfinger_url": "{{ORIGIN}}/.well-known/webfinger",
+  "profile_url": "{{ORIGIN}}/profile/",
+  "verification_methods": [
+    "did:web:fixture.example#key-1"
+  ]
+}

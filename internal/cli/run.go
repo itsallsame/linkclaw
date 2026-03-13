@@ -10,8 +10,10 @@ import (
 	"io"
 	"strings"
 
+	"github.com/xiewanpeng/claw-identity/internal/importer"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/publish"
+	"github.com/xiewanpeng/claw-identity/internal/resolver"
 )
 
 type initOutput struct {
@@ -28,6 +30,20 @@ type publishOutput struct {
 	Error   string         `json:"error,omitempty"`
 }
 
+type inspectOutput struct {
+	OK      bool            `json:"ok"`
+	Command string          `json:"command"`
+	Result  resolver.Result `json:"result,omitempty"`
+	Error   string          `json:"error,omitempty"`
+}
+
+type importOutput struct {
+	OK      bool            `json:"ok"`
+	Command string          `json:"command"`
+	Result  importer.Result `json:"result,omitempty"`
+	Error   string          `json:"error,omitempty"`
+}
+
 func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		printUsage(out)
@@ -42,6 +58,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return runInit(ctx, args[1:], in, out, errOut)
 	case "publish":
 		return runPublish(ctx, args[1:], out, errOut)
+	case "inspect":
+		return runInspect(ctx, args[1:], out, errOut)
+	case "import":
+		return runImport(ctx, args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "unknown command %q\n", args[0])
 		printUsage(errOut)
@@ -166,6 +186,95 @@ func runPublish(ctx context.Context, args []string, out, errOut io.Writer) int {
 	return 0
 }
 
+func runInspect(ctx context.Context, args []string, out, errOut io.Writer) int {
+	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+
+	jsonOutput := fs.Bool("json", false, "emit JSON result")
+	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if len(fs.Args()) != 1 {
+		fmt.Fprintln(errOut, "inspect requires exactly one input (domain or URL)")
+		return 1
+	}
+
+	service := resolver.NewService()
+	result, err := service.Inspect(ctx, fs.Args()[0])
+	if err != nil {
+		return writeInspectError(errOut, out, *jsonOutput, err)
+	}
+
+	if *jsonOutput {
+		enc := json.NewEncoder(out)
+		if err := enc.Encode(inspectOutput{OK: true, Command: "inspect", Result: result}); err != nil {
+			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintln(out, "linkclaw inspect completed")
+	fmt.Fprintf(out, "input: %s\n", result.Input)
+	fmt.Fprintf(out, "origin: %s\n", result.NormalizedOrigin)
+	fmt.Fprintf(out, "status: %s\n", result.Status)
+	if result.CanonicalID != "" {
+		fmt.Fprintf(out, "canonical id: %s\n", result.CanonicalID)
+	}
+	fmt.Fprintf(out, "artifacts: %d\n", len(result.Artifacts))
+	fmt.Fprintf(out, "proofs: %d\n", len(result.Proofs))
+	return 0
+}
+
+func runImport(ctx context.Context, args []string, out, errOut io.Writer) int {
+	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+
+	home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+	allowDiscovered := fs.Bool("allow-discovered", false, "allow importing discovered identities")
+	allowMismatch := fs.Bool("allow-mismatch", false, "allow importing mismatched identities")
+	jsonOutput := fs.Bool("json", false, "emit JSON result")
+	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if len(fs.Args()) != 1 {
+		fmt.Fprintln(errOut, "import requires exactly one input (domain or URL)")
+		return 1
+	}
+
+	service := importer.NewService()
+	result, err := service.Import(ctx, importer.Options{
+		Home:            *home,
+		Input:           fs.Args()[0],
+		AllowDiscovered: *allowDiscovered,
+		AllowMismatch:   *allowMismatch,
+	})
+	if err != nil {
+		return writeImportError(errOut, out, *jsonOutput, err)
+	}
+
+	if *jsonOutput {
+		enc := json.NewEncoder(out)
+		if err := enc.Encode(importOutput{OK: true, Command: "import", Result: result}); err != nil {
+			fmt.Fprintf(errOut, "encode JSON output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintln(out, "linkclaw import completed")
+	fmt.Fprintf(out, "home: %s\n", result.Home)
+	fmt.Fprintf(out, "contact: %s\n", result.ContactID)
+	fmt.Fprintf(out, "status: %s\n", result.Inspection.Status)
+	fmt.Fprintf(out, "snapshots: %d\n", result.SnapshotCount)
+	fmt.Fprintf(out, "proofs: %d\n", result.ProofCount)
+	return 0
+}
+
 func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
 		enc := json.NewEncoder(out)
@@ -192,6 +301,32 @@ func writePublishError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	return 1
 }
 
+func writeInspectError(errOut, out io.Writer, jsonOutput bool, err error) int {
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		if encodeErr := enc.Encode(inspectOutput{OK: false, Command: "inspect", Error: err.Error()}); encodeErr != nil {
+			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
+			return 1
+		}
+		return 1
+	}
+	fmt.Fprintf(errOut, "inspect failed: %v\n", err)
+	return 1
+}
+
+func writeImportError(errOut, out io.Writer, jsonOutput bool, err error) int {
+	if jsonOutput {
+		enc := json.NewEncoder(out)
+		if encodeErr := enc.Encode(importOutput{OK: false, Command: "import", Error: err.Error()}); encodeErr != nil {
+			fmt.Fprintf(errOut, "encode error JSON output: %v\n", encodeErr)
+			return 1
+		}
+		return 1
+	}
+	fmt.Fprintf(errOut, "import failed: %v\n", err)
+	return 1
+}
+
 func prompt(reader *bufio.Reader, out io.Writer, label string) (string, error) {
 	fmt.Fprint(out, label)
 	line, err := reader.ReadString('\n')
@@ -213,4 +348,6 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintln(out, "  init    Initialize LinkClaw local home and state")
 	fmt.Fprintln(out, "  publish Compile and bundle publishable identity artifacts")
+	fmt.Fprintln(out, "  inspect Resolve and verify public identity artifacts")
+	fmt.Fprintln(out, "  import  Resolve, verify, and persist a public identity")
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,8 +45,13 @@ func TestRunInitJSONIdempotent(t *testing.T) {
 	if !first.Result.Key.Created {
 		t.Fatalf("expected first run to create key")
 	}
-	if len(first.Result.Migrations) == 0 || !first.Result.Migrations[0].Applied {
-		t.Fatalf("expected first migration run to apply migration, got %+v", first.Result.Migrations)
+	if len(first.Result.Migrations) < 2 {
+		t.Fatalf("expected at least two migrations, got %+v", first.Result.Migrations)
+	}
+	for _, step := range first.Result.Migrations {
+		if !step.Applied {
+			t.Fatalf("expected first migration run to apply all migrations, got %+v", first.Result.Migrations)
+		}
 	}
 
 	secondCode, secondOut, secondErr := runForTest(t, args, "")
@@ -62,8 +69,13 @@ func TestRunInitJSONIdempotent(t *testing.T) {
 	if second.Result.Key.Created {
 		t.Fatalf("expected second run not to create key")
 	}
-	if len(second.Result.Migrations) == 0 || second.Result.Migrations[0].Applied {
-		t.Fatalf("expected second migration run to be idempotent, got %+v", second.Result.Migrations)
+	if len(second.Result.Migrations) < 2 {
+		t.Fatalf("expected at least two migrations on second run, got %+v", second.Result.Migrations)
+	}
+	for _, step := range second.Result.Migrations {
+		if step.Applied {
+			t.Fatalf("expected second migration run to be idempotent, got %+v", second.Result.Migrations)
+		}
 	}
 
 	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
@@ -76,8 +88,8 @@ func TestRunInitJSONIdempotent(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if migrationCount != 1 {
-		t.Fatalf("expected exactly one applied migration, got %d", migrationCount)
+	if migrationCount != 2 {
+		t.Fatalf("expected exactly two applied migrations, got %d", migrationCount)
 	}
 
 	var selfCount int
@@ -187,6 +199,72 @@ func TestRunPublishJSON(t *testing.T) {
 	}
 }
 
+func TestRunInspectJSON(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "consistent"))
+	defer server.Close()
+
+	code, stdout, stderr := runForTest(t, []string{"inspect", "--json", server.URL + "/profile/"}, "")
+	if code != 0 {
+		t.Fatalf("inspect exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out inspectOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Status != "consistent" {
+		t.Fatalf("status = %q", out.Result.Status)
+	}
+	if out.Result.CanonicalID != "did:web:fixture.example" {
+		t.Fatalf("canonical id = %q", out.Result.CanonicalID)
+	}
+}
+
+func TestRunImportJSON(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "consistent"))
+	defer server.Close()
+
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	initArgs := []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:web:self.example",
+		"--display-name", "Self Example",
+		"--non-interactive",
+		"--json",
+	}
+	initCode, _, initErr := runForTest(t, initArgs, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	code, stdout, stderr := runForTest(t, []string{"import", "--home", home, "--json", server.URL + "/profile/"}, "")
+	if code != 0 {
+		t.Fatalf("import exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out importOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if out.Result.Inspection.Status != "consistent" {
+		t.Fatalf("status = %q", out.Result.Inspection.Status)
+	}
+	if out.Result.SnapshotCount != 4 {
+		t.Fatalf("snapshot count = %d", out.Result.SnapshotCount)
+	}
+}
+
 func runForTest(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
 
@@ -195,4 +273,38 @@ func runForTest(t *testing.T, args []string, stdin string) (int, string, string)
 	var errOut strings.Builder
 	code := Run(context.Background(), args, in, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+func newFixtureServer(t *testing.T, root string) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		filePath := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(r.URL.Path, "/")))
+		if strings.HasSuffix(r.URL.Path, "/") {
+			filePath = filepath.Join(filePath, "index.html")
+		}
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		replaced := strings.ReplaceAll(string(content), "{{ORIGIN}}", serverOrigin(r))
+		replaced = strings.ReplaceAll(replaced, "{{RESOURCE}}", serverOrigin(r)+"/")
+		switch filepath.Ext(filePath) {
+		case ".html":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		default:
+			w.Header().Set("Content-Type", "application/json")
+		}
+		_, _ = w.Write([]byte(replaced))
+	}))
+}
+
+func serverOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }

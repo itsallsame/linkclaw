@@ -1,0 +1,21 @@
+{
+  "@context": ["https://www.w3.org/ns/did/v1"],
+  "id": "did:web:fixture.example",
+  "alsoKnownAs": [
+    "{{RESOURCE}}"
+  ],
+  "verificationMethod": [
+    {
+      "id": "did:web:fixture.example#key-1"
+    }
+  ],
+  "authentication": [
+    "did:web:fixture.example#key-1"
+  ],
+  "service": [
+    {
+      "type": "AgentCard",
+      "serviceEndpoint": "{{ORIGIN}}/.well-known/agent-card.json"
+    }
+  ]
+}
