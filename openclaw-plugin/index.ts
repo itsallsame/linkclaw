@@ -5,6 +5,12 @@ import {
   runLinkClaw,
   type LinkClawPluginConfig,
 } from "./src/bridge.ts";
+import { runImportCommand, runShareCommand } from "./src/commands.ts";
+import {
+  attachDIDLinkToOutgoingEvent,
+  type HookEvent,
+  handlePassiveDiscovery,
+} from "./src/discovery.ts";
 import { runPublishSkill } from "./src/publish-skill.ts";
 
 type ToolContent = {
@@ -16,6 +22,11 @@ type ToolResult = {
   content: ToolContent[];
 };
 
+type CommandResult = {
+  type: "message";
+  message: string;
+};
+
 type ToolRegistration = {
   name: string;
   description: string;
@@ -24,10 +35,23 @@ type ToolRegistration = {
   execute: (params: Record<string, unknown>) => Promise<ToolResult>;
 };
 
+type CommandHandler = (args: string) => Promise<CommandResult> | CommandResult;
+
 export type PluginAPI = {
   config?: LinkClawPluginConfig;
   getConfig?: () => LinkClawPluginConfig | undefined;
   registerTool: (tool: ToolRegistration) => void;
+  registerCommand?: (
+    name: string,
+    description: string,
+    handler: CommandHandler,
+  ) => void;
+  registerHook?: (
+    name: string,
+    description: string,
+    handler: (event: HookEvent) => Promise<void> | void,
+  ) => void;
+  on?: (name: string, handler: (event: unknown) => Promise<void> | void) => void;
 };
 
 const pluginRoot = fileURLToPath(new URL(".", import.meta.url));
@@ -174,5 +198,33 @@ export default function registerLinkClawPlugin(api: PluginAPI): void {
         content: [{ type: "text", text }],
       };
     },
+  });
+
+  api.registerCommand?.(
+    "linkclaw-import",
+    "Import a LinkClaw did.json or agent-card.json link into the local known contacts store.",
+    async (args) => runImportCommand(loadConfig(api), args, pluginRoot),
+  );
+
+  api.registerCommand?.(
+    "linkclaw-share",
+    "Share the published LinkClaw agent-card and did.json links for the configured publish origin.",
+    async (args) => runShareCommand(loadConfig(api), args, pluginRoot),
+  );
+
+  api.registerHook?.(
+    "message:preprocessed",
+    "Inspect inbound LinkClaw artifact links and suggest importing identities that are not already known.",
+    async (event) => {
+      await handlePassiveDiscovery(loadConfig(api), event, pluginRoot);
+    },
+  );
+
+  api.on?.("message_sending", async (event) => {
+    const config = loadConfig(api);
+    if (!config.publishOrigin) {
+      return;
+    }
+    attachDIDLinkToOutgoingEvent(event, config.publishOrigin);
   });
 }

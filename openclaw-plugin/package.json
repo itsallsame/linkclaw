@@ -1,7 +1,32 @@
 {
   "name": "linkclaw-openclaw-plugin",
-  "private": true,
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for running LinkClaw publish/inspect/import workflows and passive identity discovery.",
+  "keywords": [
+    "openclaw",
+    "linkclaw",
+    "plugin",
+    "did",
+    "agent-card"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wanpengxie/claw-identity.git",
+    "directory": "openclaw-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/wanpengxie/claw-identity/issues"
+  },
+  "homepage": "https://github.com/wanpengxie/claw-identity/tree/main/openclaw-plugin",
+  "license": "UNLICENSED",
   "type": "module",
+  "files": [
+    "README.md",
+    "index.ts",
+    "openclaw.plugin.json",
+    "skills",
+    "src"
+  ],
   "openclaw": {
     "extensions": ["./index.ts"]
   },

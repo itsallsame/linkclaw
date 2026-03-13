@@ -87,6 +87,18 @@ linkclaw publish \
 
 The CLI prefers a global `wrangler` binary and falls back to `npx wrangler@latest` when available.
 
+## OpenClaw Plugin
+
+The OpenClaw integration lives in [`openclaw-plugin`](openclaw-plugin/README.md).
+
+From an OpenClaw workspace:
+
+```bash
+pnpm add linkclaw-openclaw-plugin
+```
+
+The package README covers plugin registration, `binaryPath` / `home` / `publishOrigin` config, passive discovery, and the `/linkclaw-import` plus `/linkclaw-share` commands.
+
 ## Docs
 
 - [Quickstart](docs/quickstart.md)
