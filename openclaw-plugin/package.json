@@ -1,0 +1,11 @@
+{
+  "name": "linkclaw-openclaw-plugin",
+  "private": true,
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "node --test test/**/*.test.ts"
+  }
+}

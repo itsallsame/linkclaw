@@ -1,0 +1,53 @@
+{
+  "id": "linkclaw",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "binaryPath": {
+        "type": "string",
+        "description": "Absolute path to the local linkclaw core binary."
+      },
+      "home": {
+        "type": "string",
+        "description": "Default LINKCLAW_HOME passed to commands that support --home."
+      },
+      "publishOrigin": {
+        "type": "string",
+        "description": "Default public origin used by the publishing skill when --origin is omitted."
+      },
+      "publishOutput": {
+        "type": "string",
+        "description": "Default output directory for publish runs. Falls back to <home>/publish."
+      },
+      "publishTier": {
+        "type": "string",
+        "enum": ["minimum", "recommended", "full"],
+        "default": "recommended",
+        "description": "Default publish tier used by the publishing skill."
+      }
+    }
+  },
+  "uiHints": {
+    "binaryPath": {
+      "label": "LinkClaw Binary Path",
+      "placeholder": "/absolute/path/to/linkclaw"
+    },
+    "home": {
+      "label": "LinkClaw Home",
+      "placeholder": "/absolute/path/to/.linkclaw"
+    },
+    "publishOrigin": {
+      "label": "Default Publish Origin",
+      "placeholder": "https://agent.example"
+    },
+    "publishOutput": {
+      "label": "Default Publish Output",
+      "placeholder": "/absolute/path/to/publish-bundle"
+    },
+    "publishTier": {
+      "label": "Default Publish Tier"
+    }
+  }
+}
