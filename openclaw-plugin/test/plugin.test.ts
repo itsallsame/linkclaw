@@ -29,9 +29,18 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
     { name: "linkclaw_core", optional: true },
     { name: "linkclaw_publish", optional: true },
   ]);
-  assert.deepEqual(commands, ["linkclaw-import", "linkclaw-share"]);
+  assert.deepEqual(commands, [
+    "linkclaw-import",
+    "linkclaw-share",
+    "linkclaw-connect",
+    "linkclaw-message",
+    "linkclaw-inbox",
+    "linkclaw-sync",
+  ]);
   assert.deepEqual(hooks, ["message:preprocessed"]);
   assert.equal(lifecycle.has("message_sending"), true);
+  assert.equal(lifecycle.has("session_started"), true);
+  assert.equal(lifecycle.has("message_received"), true);
 
   const messageSending = lifecycle.get("message_sending");
   assert.ok(messageSending);

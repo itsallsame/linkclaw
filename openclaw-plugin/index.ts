@@ -5,12 +5,20 @@ import {
   runLinkClaw,
   type LinkClawPluginConfig,
 } from "./src/bridge.ts";
-import { runImportCommand, runShareCommand } from "./src/commands.ts";
+import {
+  runConnectCommand,
+  runImportCommand,
+  runInboxCommand,
+  runMessageCommand,
+  runShareCommand,
+  runSyncCommand,
+} from "./src/commands.ts";
 import {
   attachDIDLinkToOutgoingEvent,
   type HookEvent,
   handlePassiveDiscovery,
 } from "./src/discovery.ts";
+import { appendSyncMessage, triggerBackgroundSync } from "./src/messaging.ts";
 import { runPublishSkill } from "./src/publish-skill.ts";
 
 type ToolContent = {
@@ -71,6 +79,7 @@ function asBridgeRequest(params: Record<string, unknown>): LinkClawBridgeRequest
     tier: asOptionalString(params.tier),
     input: asOptionalString(params.input),
     identifier: asOptionalString(params.identifier),
+    body: asOptionalString(params.body),
     trustLevel: asOptionalString(params.trustLevel),
     reason: asOptionalString(params.reason),
     noteBody: asOptionalString(params.noteBody),
@@ -126,6 +135,12 @@ export default function registerLinkClawPlugin(api: PluginAPI): void {
             "publish",
             "inspect",
             "import",
+            "card_export",
+            "card_import",
+            "message_send",
+            "message_inbox",
+            "message_outbox",
+            "message_sync",
             "known_ls",
             "known_show",
             "known_trust",
@@ -142,6 +157,7 @@ export default function registerLinkClawPlugin(api: PluginAPI): void {
         tier: { type: "string", enum: ["minimum", "recommended", "full"] },
         input: { type: "string" },
         identifier: { type: "string" },
+        body: { type: "string" },
         trustLevel: {
           type: "string",
           enum: ["unknown", "seen", "verified", "trusted", "pinned"],
@@ -212,6 +228,30 @@ export default function registerLinkClawPlugin(api: PluginAPI): void {
     async (args) => runShareCommand(loadConfig(api), args, pluginRoot),
   );
 
+  api.registerCommand?.(
+    "linkclaw-connect",
+    "Import a LinkClaw identity card into the local contacts book.",
+    async (args) => runConnectCommand(loadConfig(api), args, pluginRoot),
+  );
+
+  api.registerCommand?.(
+    "linkclaw-message",
+    "Send a direct LinkClaw message to an imported contact.",
+    async (args) => runMessageCommand(loadConfig(api), args, pluginRoot),
+  );
+
+  api.registerCommand?.(
+    "linkclaw-inbox",
+    "Show LinkClaw conversations from the local inbox.",
+    async (args) => runInboxCommand(loadConfig(api), args, pluginRoot),
+  );
+
+  api.registerCommand?.(
+    "linkclaw-sync",
+    "Sync LinkClaw messages from the configured relay.",
+    async (args) => runSyncCommand(loadConfig(api), args, pluginRoot),
+  );
+
   api.registerHook?.(
     "message:preprocessed",
     "Inspect inbound LinkClaw artifact links and suggest importing identities that are not already known.",
@@ -226,5 +266,19 @@ export default function registerLinkClawPlugin(api: PluginAPI): void {
       return;
     }
     attachDIDLinkToOutgoingEvent(event, config.publishOrigin);
+  });
+
+  api.on?.("session_started", async (event) => {
+    const message = await triggerBackgroundSync(loadConfig(api), pluginRoot);
+    if (message) {
+      appendSyncMessage(event, message);
+    }
+  });
+
+  api.on?.("message_received", async (event) => {
+    const message = await triggerBackgroundSync(loadConfig(api), pluginRoot);
+    if (message) {
+      appendSyncMessage(event, message);
+    }
   });
 }

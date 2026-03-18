@@ -9,6 +9,12 @@ It is aimed at developers who want a working identity toolchain before they need
 - `linkclaw serve` hosts that bundle locally with the right MIME types.
 - `linkclaw inspect` and `linkclaw import` verify other identity surfaces back into a local trust book.
 
+It also includes a V0 local-direct-messaging stack for OpenClaw users:
+
+- `linkclaw card export` and `linkclaw card import` exchange signed identity cards
+- `linkclaw message send`, `sync`, `inbox`, and `outbox` cover one-to-one relay-backed messaging
+- `linkclaw-relay` provides encrypted store-and-forward delivery
+
 ## 30-Second Flow
 
 Install the CLI:
@@ -68,6 +74,29 @@ linkclaw serve
 linkclaw inspect https://agent.example/profile/
 linkclaw import https://agent.example/profile/
 linkclaw known ls
+linkclaw card export
+linkclaw message inbox
+```
+
+## Direct Messaging V0
+
+LinkClaw V0 supports one-to-one asynchronous messaging for OpenClaw users without requiring a domain.
+
+The loop is:
+
+1. `linkclaw init` creates a local identity.
+2. `linkclaw card export` produces a signed identity card.
+3. Share that card with the other user over any existing channel.
+4. The recipient runs `linkclaw card import <path-or-json>` to save you as a contact.
+5. Messages are sent with `linkclaw message send <contact> --body "..."`
+6. Offline messages sit in `linkclaw-relay` until the recipient runs `linkclaw message sync`
+
+Minimal local example:
+
+```bash
+linkclaw init --canonical-id did:key:z6MkAlice --display-name Alice --non-interactive
+LINKCLAW_RELAY_URL=http://127.0.0.1:8788 linkclaw card export --json
+LINKCLAW_RELAY_URL=http://127.0.0.1:8788 linkclaw message inbox --json
 ```
 
 ## Cloudflare Pages
@@ -103,3 +132,4 @@ The package README covers plugin registration, `binaryPath` / `home` / `publishO
 
 - [Quickstart](docs/quickstart.md)
 - [Cloudflare Pages Deployment](docs/deploy-cloudflare.md)
+- [V0 Messaging Plan](docs/v0-messaging-plan.md)
