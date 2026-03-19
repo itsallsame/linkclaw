@@ -130,6 +130,8 @@ The package README covers plugin registration, `binaryPath` / `home` / `publishO
 
 ## Docs
 
+Current milestone validation for the OpenClaw natural-language messaging MVP is tracked in git as `milestone-v0-openclaw-dm`.
+
 - [Quickstart](docs/quickstart.md)
 - [Cloudflare Pages Deployment](docs/deploy-cloudflare.md)
 - [V0 Messaging Plan](docs/v0-messaging-plan.md)
