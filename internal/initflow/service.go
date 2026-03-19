@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiewanpeng/claw-identity/internal/didkey"
 	"github.com/xiewanpeng/claw-identity/internal/ids"
 	"github.com/xiewanpeng/claw-identity/internal/keys"
 	"github.com/xiewanpeng/claw-identity/internal/layout"
@@ -58,9 +59,6 @@ func NewService() *Service {
 
 func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 	canonicalID := strings.TrimSpace(opts.CanonicalID)
-	if canonicalID == "" {
-		return Result{}, errors.New("canonical id is required")
-	}
 	if s.KeyBackend == nil {
 		return Result{}, errors.New("key backend is not configured")
 	}
@@ -104,14 +102,60 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 
-	identity, err := ensureSelfIdentity(ctx, db, now, canonicalID, strings.TrimSpace(opts.DisplayName))
-	if err != nil {
-		return Result{}, err
-	}
+	displayName := strings.TrimSpace(opts.DisplayName)
+	var identity IdentityStatus
+	var keyResult keys.Result
 
-	keyResult, err := s.KeyBackend.EnsureDefaultKey(ctx, db, identity.SelfID, layoutResult.Paths.KeysDir)
-	if err != nil {
-		return Result{}, err
+	if canonicalID == "" {
+		identity, err = findSelfIdentity(ctx, db)
+		if err != nil {
+			return Result{}, err
+		}
+		if identity.SelfID != "" {
+			identity, err = updateDisplayName(ctx, db, now, identity, displayName)
+			if err != nil {
+				return Result{}, err
+			}
+			keyResult, err = s.KeyBackend.EnsureDefaultKey(ctx, db, identity.SelfID, layoutResult.Paths.KeysDir)
+			if err != nil {
+				return Result{}, err
+			}
+			return Result{
+				Home:        layoutResult.Paths.Home,
+				DBPath:      layoutResult.Paths.DB,
+				Directories: directories,
+				Migrations:  migrations,
+				Identity:    identity,
+				Key:         keyResult,
+				GeneratedAt: now.UTC().Format(time.RFC3339Nano),
+			}, nil
+		}
+
+		selfID, err := ids.New("self")
+		if err != nil {
+			return Result{}, err
+		}
+		keyResult, err = s.KeyBackend.EnsureDefaultKey(ctx, db, selfID, layoutResult.Paths.KeysDir)
+		if err != nil {
+			return Result{}, err
+		}
+		canonicalID, err = didkey.FromBase64PublicKey(keyResult.PublicKey)
+		if err != nil {
+			return Result{}, fmt.Errorf("derive did:key from default key: %w", err)
+		}
+		identity, err = insertSelfIdentity(ctx, db, now, selfID, canonicalID, displayName)
+		if err != nil {
+			return Result{}, err
+		}
+	} else {
+		identity, err = ensureSelfIdentity(ctx, db, now, canonicalID, displayName)
+		if err != nil {
+			return Result{}, err
+		}
+		keyResult, err = s.KeyBackend.EnsureDefaultKey(ctx, db, identity.SelfID, layoutResult.Paths.KeysDir)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 
 	return Result{
@@ -162,6 +206,51 @@ func ensureSelfIdentity(ctx context.Context, db *sql.DB, now time.Time, canonica
 	selfID, err := ids.New("self")
 	if err != nil {
 		return IdentityStatus{}, err
+	}
+	return insertSelfIdentity(ctx, db, now, selfID, canonicalID, displayName)
+}
+
+func findSelfIdentity(ctx context.Context, db *sql.DB) (IdentityStatus, error) {
+	const selectSQL = `
+		SELECT self_id, canonical_id, display_name
+		FROM self_identities
+		ORDER BY created_at ASC
+		LIMIT 1
+	`
+
+	var status IdentityStatus
+	err := db.QueryRowContext(ctx, selectSQL).Scan(&status.SelfID, &status.CanonicalID, &status.DisplayName)
+	switch {
+	case err == nil:
+		status.Created = false
+		return status, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return IdentityStatus{}, nil
+	default:
+		return IdentityStatus{}, fmt.Errorf("query self identity: %w", err)
+	}
+}
+
+func updateDisplayName(ctx context.Context, db *sql.DB, now time.Time, status IdentityStatus, displayName string) (IdentityStatus, error) {
+	if strings.TrimSpace(displayName) == "" || displayName == status.DisplayName {
+		return status, nil
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		"UPDATE self_identities SET display_name = ?, updated_at = ? WHERE self_id = ?",
+		displayName,
+		now.UTC().Format(time.RFC3339Nano),
+		status.SelfID,
+	); err != nil {
+		return IdentityStatus{}, fmt.Errorf("update display name: %w", err)
+	}
+	status.DisplayName = displayName
+	return status, nil
+}
+
+func insertSelfIdentity(ctx context.Context, db *sql.DB, now time.Time, selfID, canonicalID, displayName string) (IdentityStatus, error) {
+	if displayName == "" {
+		displayName = canonicalID
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
 

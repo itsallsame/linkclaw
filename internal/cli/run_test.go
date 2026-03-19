@@ -115,12 +115,15 @@ func TestRunInitInteractiveJSON(t *testing.T) {
 
 	home := filepath.Join(t.TempDir(), "linkclaw-home")
 	args := []string{"init", "--home", home, "--json"}
-	code, stdout, stderr := runForTest(t, args, "did:web:interactive.example\nInteractive Example\n")
+	code, stdout, stderr := runForTest(t, args, "Interactive Example\n")
 	if code != 0 {
 		t.Fatalf("interactive init exit code = %d, stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "Canonical ID:") {
-		t.Fatalf("expected prompt in stderr, got %q", stderr)
+	if strings.Contains(stderr, "Canonical ID:") {
+		t.Fatalf("did not expect canonical id prompt, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "Display Name (optional):") {
+		t.Fatalf("expected display name prompt in stderr, got %q", stderr)
 	}
 
 	var out initOutput
@@ -128,7 +131,7 @@ func TestRunInitInteractiveJSON(t *testing.T) {
 		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
 	}
 	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "init", nil)
-	if out.Result.Identity.CanonicalID != "did:web:interactive.example" {
+	if !strings.HasPrefix(out.Result.Identity.CanonicalID, "did:key:z") {
 		t.Fatalf("unexpected canonical id: %s", out.Result.Identity.CanonicalID)
 	}
 	if out.Result.Identity.DisplayName != "Interactive Example" {
@@ -136,13 +139,13 @@ func TestRunInitInteractiveJSON(t *testing.T) {
 	}
 }
 
-func TestRunInitNonInteractiveRequiresCanonicalID(t *testing.T) {
+func TestRunInitNonInteractiveAutoGeneratesCanonicalID(t *testing.T) {
 	t.Parallel()
 
 	home := filepath.Join(t.TempDir(), "linkclaw-home")
-	code, stdout, _ := runForTest(t, []string{"init", "--home", home, "--non-interactive", "--json"}, "")
-	if code == 0 {
-		t.Fatalf("expected failure when canonical id is missing")
+	code, stdout, stderr := runForTest(t, []string{"init", "--home", home, "--display-name", "Auto", "--non-interactive", "--json"}, "")
+	if code != 0 {
+		t.Fatalf("expected init success, exit code = %d, stderr=%s", code, stderr)
 	}
 
 	var out initOutput
@@ -150,17 +153,14 @@ func TestRunInitNonInteractiveRequiresCanonicalID(t *testing.T) {
 		t.Fatalf("unmarshal stdout: %v", err)
 	}
 	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "init", nil)
-	if out.OK {
-		t.Fatalf("expected ok=false output")
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
 	}
-	if out.Error == nil {
-		t.Fatalf("expected structured error")
+	if !strings.HasPrefix(out.Result.Identity.CanonicalID, "did:key:z") {
+		t.Fatalf("unexpected canonical id: %q", out.Result.Identity.CanonicalID)
 	}
-	if out.Error.Code != "invalid_input" {
-		t.Fatalf("error code = %q", out.Error.Code)
-	}
-	if !strings.Contains(out.Error.Message, "canonical id") {
-		t.Fatalf("expected canonical id error, got %q", out.Error.Message)
+	if out.Result.Identity.DisplayName != "Auto" {
+		t.Fatalf("display name = %q", out.Result.Identity.DisplayName)
 	}
 }
 

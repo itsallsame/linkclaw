@@ -488,13 +488,13 @@ test("runSetupCommand initializes an uninitialized home", async () => {
 
   const result = await runSetupCommand(
     { binaryPath, home },
-    "--canonical-id did:key:z6MkSetup --display-name Setup",
+    "--display-name Setup",
     pluginRoot,
   );
 
   assert.equal(result.type, "message");
   assert.match(result.message, /LinkClaw setup completed/);
-  assert.match(result.message, /did:key:z6MkSetup/);
+  assert.match(result.message, /canonical id: did:key:z/);
   assert.match(result.message, /Checks:/);
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
@@ -519,6 +519,7 @@ test("runSetupCommand supports check-only mode before initialization", async () 
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: ok/);
   assert.match(result.message, /relay: not configured/);
+  assert.match(result.message, /run \/linkclaw-setup --display-name <name>/);
 });
 
 test("runSetupCommand reports relay reachability when configured", async () => {
@@ -535,7 +536,7 @@ test("runSetupCommand reports relay reachability when configured", async () => {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
     const result = await runSetupCommand(
       { binaryPath, home, relayUrl: `http://127.0.0.1:${relayPort}` },
-      "--canonical-id did:key:z6MkSetupRelay --display-name SetupRelay",
+      "--display-name SetupRelay",
       pluginRoot,
     );
 
@@ -555,7 +556,7 @@ test("runSetupCommand reports publish origin readiness when configured", async (
   try {
     const result = await runSetupCommand(
       { binaryPath, home, publishOrigin: fixture.origin },
-      "--canonical-id did:key:z6MkSetupPublish --display-name SetupPublish",
+      "--display-name SetupPublish",
       pluginRoot,
     );
 

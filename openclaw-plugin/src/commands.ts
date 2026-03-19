@@ -215,18 +215,18 @@ export async function runSetupCommand(
         "state: not initialized",
         ...formatHealthSection(health),
         "Next:",
-        "- run /linkclaw-setup --canonical-id <did:key|did:web> --display-name <name> to initialize this home",
+        "- run /linkclaw-setup --display-name <name> to initialize this home",
       ].join("\n"),
     };
   }
 
-  if (!options.canonicalId) {
+  if (!options.canonicalId && !options.displayName) {
     return {
       type: "message",
       message: [
         "LinkClaw home is not initialized yet.",
-        "Usage: /linkclaw-setup [--check-only] --canonical-id <did:key|did:web> [--display-name <name>]",
-        "Example: /linkclaw-setup --canonical-id did:key:z6MkAlice --display-name Alice",
+        "Usage: /linkclaw-setup [--check-only] [--display-name <name>] [--canonical-id <did:key|did:web>]",
+        "Example: /linkclaw-setup --display-name Alice",
       ].join("\n"),
     };
   }
@@ -325,7 +325,7 @@ export async function runStatusCommand(
         "state: not initialized",
         ...formatHealthSection(health),
         "Next:",
-        "- run /linkclaw-setup --canonical-id <did:key|did:web> --display-name <name>",
+        "- run /linkclaw-setup --display-name <name>",
       ].join("\n"),
       };
     }

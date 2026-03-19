@@ -40,10 +40,14 @@ type ToolResult = {
   content: ToolContent[];
 };
 
-type CommandResult = {
-  type: "message";
-  message: string;
-};
+type LegacyCommandResult =
+  | {
+      type: "message";
+      message: string;
+    }
+  | {
+      text: string;
+    };
 
 type ToolRegistration = {
   name: string;
@@ -53,14 +57,21 @@ type ToolRegistration = {
   execute: (params: Record<string, unknown>) => Promise<ToolResult>;
 };
 
-type CommandHandler = (args: string) => Promise<CommandResult> | CommandResult;
+type CommandHandler = (args: string) => Promise<LegacyCommandResult> | LegacyCommandResult;
 
 type CommandRegistration = {
   name: string;
   description: string;
   acceptsArgs?: boolean;
-  handler: (ctx: { args?: string }) => Promise<CommandResult> | CommandResult;
+  handler: (ctx: { args?: string }) => Promise<{ text: string }> | { text: string };
 };
+
+function toReplyPayload(result: LegacyCommandResult): { text: string } {
+  if ("text" in result && typeof result.text === "string") {
+    return { text: result.text };
+  }
+  return { text: result.message };
+}
 
 type PluginAPI = {
   config?: LinkClawPluginConfig;
@@ -163,14 +174,20 @@ function registerPluginCommand(
       name,
       description,
       acceptsArgs: true,
-      handler: async (ctx) => await handler(ctx.args ?? ""),
+      handler: async (ctx) => {
+        const result = await handler(ctx.args ?? "");
+        return toReplyPayload(result);
+      },
     });
     return;
   }
   (registrar as (legacyName: string, legacyDescription: string, legacyHandler: CommandHandler) => void)(
     name,
     description,
-    handler,
+    async (args) => {
+      const result = await handler(args);
+      return toReplyPayload(result);
+    },
   );
 }
 

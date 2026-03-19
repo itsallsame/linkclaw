@@ -177,9 +177,9 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	fs := newFlagSet("init", errOut, jsonRequested)
 
 	home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
-	canonicalID := fs.String("canonical-id", "", "canonical identity id (required in non-interactive mode)")
+	canonicalID := fs.String("canonical-id", "", "canonical identity id (optional; auto-generates did:key when omitted)")
 	displayName := fs.String("display-name", "", "human-readable display name")
-	nonInteractive := fs.Bool("non-interactive", false, "disable prompts; requires --canonical-id")
+	nonInteractive := fs.Bool("non-interactive", false, "disable prompts")
 	jsonOutput := fs.Bool("json", false, "emit JSON result")
 	fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
 
@@ -204,22 +204,12 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	display := strings.TrimSpace(*displayName)
 	reader := bufio.NewReader(in)
 
-	if canon == "" && !*nonInteractive {
-		value, err := prompt(reader, errOut, "Canonical ID: ")
-		if err != nil {
-			return writeInitError(errOut, out, *jsonOutput, err)
-		}
-		canon = strings.TrimSpace(value)
-	}
 	if display == "" && !*nonInteractive {
 		value, err := prompt(reader, errOut, "Display Name (optional): ")
 		if err != nil {
 			return writeInitError(errOut, out, *jsonOutput, err)
 		}
 		display = strings.TrimSpace(value)
-	}
-	if canon == "" {
-		return writeInitError(errOut, out, *jsonOutput, errors.New("canonical id is required (set --canonical-id or use interactive prompt)"))
 	}
 
 	service := initflow.NewService()

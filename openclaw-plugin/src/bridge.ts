@@ -232,21 +232,15 @@ export function buildLinkClawArgs(
   publishOutput?: string,
 ): string[] {
   const args: string[] = [];
-  switch (command) {
-    case "init":
-      requireField(request.canonicalId, "canonicalId");
-      args.push(
-        "init",
-        "--home",
-        home,
-        "--canonical-id",
-        request.canonicalId,
-        "--non-interactive",
-        "--json",
-      );
-      if (request.displayName) {
-        args.push("--display-name", request.displayName);
-      }
+	switch (command) {
+	case "init":
+		args.push("init", "--home", home, "--non-interactive", "--json");
+		if (request.canonicalId) {
+			args.push("--canonical-id", request.canonicalId);
+		}
+		if (request.displayName) {
+			args.push("--display-name", request.displayName);
+		}
       return args;
     case "publish":
       args.push("publish", "--home", home, "--json");
