@@ -249,6 +249,7 @@ export async function runSetupCommand(
         "LinkClaw setup completed.",
         `home: ${String(result?.home ?? options.home ?? config.home ?? "")}`,
         `canonical id: ${String(result?.identity && asObject(result.identity)?.canonical_id ? asObject(result.identity)?.canonical_id : options.canonicalId)}`,
+        ...(describeMessagingReadiness(result).length > 0 ? describeMessagingReadiness(result) : []),
         ...formatHealthSection(health),
         "Next:",
         "- run /linkclaw-share to publish or share your identity",
@@ -261,6 +262,32 @@ export async function runSetupCommand(
       message: formatCommandError("linkclaw setup", error),
     };
   }
+}
+
+function describeMessagingReadiness(result: Record<string, unknown> | undefined): string[] {
+  const messaging = asObject(result?.messaging);
+  if (!messaging) {
+    return [];
+  }
+  const lines: string[] = [];
+  const transport = readString(messaging.transport);
+  const recipientId = readString(messaging.recipient_id);
+  const relayUrl = readString(messaging.relay_url);
+  const ready = typeof messaging.ready === "boolean" ? messaging.ready : undefined;
+  if (transport) {
+    lines.push(`messaging: ${transport}${ready !== undefined ? ` | ready=${ready}` : ""}`);
+  }
+  if (recipientId) {
+    lines.push(`recipient id: ${recipientId}`);
+  }
+  if (relayUrl) {
+    lines.push(`relay url: ${relayUrl}`);
+  }
+  return lines;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
 export async function runStatusCommand(

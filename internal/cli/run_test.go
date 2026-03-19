@@ -370,6 +370,46 @@ func TestRunCardExportAndVerifyJSON(t *testing.T) {
 	}
 }
 
+func TestRunInitSeedsRelayIntoExportedCard(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	t.Setenv(card.EnvRelayURL, "http://relay.example:8788")
+
+	initCode, _, initErr := runForTest(
+		t,
+		[]string{
+			"init",
+			"--home", home,
+			"--display-name", "Relay Seeded",
+			"--non-interactive",
+			"--json",
+		},
+		"",
+	)
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	exportCode, exportOut, exportErr := runForTest(t, []string{"card", "export", "--home", home, "--json"}, "")
+	if exportCode != 0 {
+		t.Fatalf("card export exit code = %d, stderr = %s", exportCode, exportErr)
+	}
+
+	var exported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
+		t.Fatalf("unmarshal card export output: %v, output=%s", err, exportOut)
+	}
+	if exported.Result.Card.Messaging.RelayURL != "http://relay.example:8788" {
+		t.Fatalf("relay url = %q", exported.Result.Card.Messaging.RelayURL)
+	}
+	if exported.Result.Card.Messaging.RecipientID == "" {
+		t.Fatalf("expected recipient id to be seeded during init")
+	}
+}
+
 func TestRunCardImportJSON(t *testing.T) {
 	t.Parallel()
 

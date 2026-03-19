@@ -12,6 +12,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/ids"
 	"github.com/xiewanpeng/claw-identity/internal/keys"
 	"github.com/xiewanpeng/claw-identity/internal/layout"
+	"github.com/xiewanpeng/claw-identity/internal/messagingprofile"
 	"github.com/xiewanpeng/claw-identity/internal/migrate"
 
 	_ "modernc.org/sqlite"
@@ -35,6 +36,14 @@ type IdentityStatus struct {
 	Created     bool   `json:"created"`
 }
 
+type MessagingStatus struct {
+	Transport   string `json:"transport"`
+	RelayURL    string `json:"relay_url,omitempty"`
+	RecipientID string `json:"recipient_id"`
+	Created     bool   `json:"created"`
+	Ready       bool   `json:"ready"`
+}
+
 type Result struct {
 	Home        string            `json:"home"`
 	DBPath      string            `json:"db_path"`
@@ -42,6 +51,7 @@ type Result struct {
 	Migrations  []migrate.Step    `json:"migrations"`
 	Identity    IdentityStatus    `json:"identity"`
 	Key         keys.Result       `json:"key"`
+	Messaging   MessagingStatus   `json:"messaging"`
 	GeneratedAt string            `json:"generated_at"`
 }
 
@@ -105,6 +115,7 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 	displayName := strings.TrimSpace(opts.DisplayName)
 	var identity IdentityStatus
 	var keyResult keys.Result
+	var messagingStatus MessagingStatus
 
 	if canonicalID == "" {
 		identity, err = findSelfIdentity(ctx, db)
@@ -120,6 +131,18 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 			if err != nil {
 				return Result{}, err
 			}
+			profile, _, ensureErr := messagingprofile.EnsureSelfProfile(
+				ctx,
+				db,
+				identity.SelfID,
+				keyResult.KeyID,
+				layoutResult.Paths.Home,
+				now,
+			)
+			if ensureErr != nil {
+				return Result{}, ensureErr
+			}
+			messagingStatus = buildMessagingStatus(profile, false)
 			return Result{
 				Home:        layoutResult.Paths.Home,
 				DBPath:      layoutResult.Paths.DB,
@@ -127,6 +150,7 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 				Migrations:  migrations,
 				Identity:    identity,
 				Key:         keyResult,
+				Messaging:   messagingStatus,
 				GeneratedAt: now.UTC().Format(time.RFC3339Nano),
 			}, nil
 		}
@@ -147,6 +171,7 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
+		messagingStatus.Created = true
 	} else {
 		identity, err = ensureSelfIdentity(ctx, db, now, canonicalID, displayName)
 		if err != nil {
@@ -158,6 +183,19 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	profile, _, err := messagingprofile.EnsureSelfProfile(
+		ctx,
+		db,
+		identity.SelfID,
+		keyResult.KeyID,
+		layoutResult.Paths.Home,
+		now,
+	)
+	if err != nil {
+		return Result{}, err
+	}
+	messagingStatus = buildMessagingStatus(profile, messagingStatus.Created)
+
 	return Result{
 		Home:        layoutResult.Paths.Home,
 		DBPath:      layoutResult.Paths.DB,
@@ -165,8 +203,19 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 		Migrations:  migrations,
 		Identity:    identity,
 		Key:         keyResult,
+		Messaging:   messagingStatus,
 		GeneratedAt: now.UTC().Format(time.RFC3339Nano),
 	}, nil
+}
+
+func buildMessagingStatus(profile messagingprofile.Profile, created bool) MessagingStatus {
+	return MessagingStatus{
+		Transport:   profile.Transport,
+		RelayURL:    profile.RelayURL,
+		RecipientID: profile.RecipientID,
+		Created:     created,
+		Ready:       strings.TrimSpace(profile.RecipientID) != "",
+	}
 }
 
 func ensureSelfIdentity(ctx context.Context, db *sql.DB, now time.Time, canonicalID, displayName string) (IdentityStatus, error) {

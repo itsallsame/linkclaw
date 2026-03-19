@@ -231,6 +231,10 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	fmt.Fprintf(out, "state db: %s\n", result.DBPath)
 	fmt.Fprintf(out, "self: %s (%s)\n", result.Identity.DisplayName, result.Identity.CanonicalID)
 	fmt.Fprintf(out, "key: %s (%s)\n", result.Key.KeyID, result.Key.Algorithm)
+	fmt.Fprintf(out, "messaging: %s | ready=%t | recipient=%s\n", result.Messaging.Transport, result.Messaging.Ready, result.Messaging.RecipientID)
+	if strings.TrimSpace(result.Messaging.RelayURL) != "" {
+		fmt.Fprintf(out, "relay: %s\n", result.Messaging.RelayURL)
+	}
 	return 0
 }
 
