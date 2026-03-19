@@ -159,6 +159,12 @@ function asJSONText(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function asToolTextResult(text: string): ToolResult {
+  return {
+    content: [{ type: "text", text }],
+  };
+}
+
 function registerPluginCommand(
   api: PluginAPI,
   name: string,
@@ -307,6 +313,165 @@ const plugin = {
         return {
           content: [{ type: "text", text }],
         };
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_setup",
+      description:
+        "Initialize or repair the local LinkClaw identity in the configured home. Use this when a user asks to set up LinkClaw, initialize an identity, or make messaging ready. relayUrl from plugin config is applied automatically.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          displayName: { type: "string" },
+          canonicalId: { type: "string" },
+          home: { type: "string" },
+          checkOnly: { type: "boolean" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.checkOnly === "boolean" && params.checkOnly) {
+          args.push("--check-only");
+        }
+        if (typeof params.displayName === "string" && params.displayName.trim() !== "") {
+          args.push("--display-name", params.displayName.trim());
+        }
+        if (typeof params.canonicalId === "string" && params.canonicalId.trim() !== "") {
+          args.push("--canonical-id", params.canonicalId.trim());
+        }
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        const result = await runSetupCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_status",
+      description:
+        "Show LinkClaw readiness, relay health, contacts, and inbox summary for the configured home. Use this when a user asks to check LinkClaw status.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          home: { type: "string" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        const result = await runStatusCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_share_card",
+      description:
+        "Export the current signed LinkClaw identity card JSON for sharing with another user. relayUrl from plugin config is applied automatically so the card is message-ready.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          home: { type: "string" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = ["--card"];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        const result = await runShareCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_connect_card",
+      description:
+        "Import another user's LinkClaw identity card JSON into local contacts. Use this when a user pastes an identity card and asks to add the contact.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["input"],
+        properties: {
+          input: { type: "string" },
+          home: { type: "string" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        if (typeof params.input === "string" && params.input.trim() !== "") {
+          args.push(params.input);
+        }
+        const result = await runConnectCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_send_message",
+      description:
+        "Send a LinkClaw direct message to an imported contact by display name, contact id, or canonical id. Use this for natural-language requests to send a message.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["identifier", "body"],
+        properties: {
+          identifier: { type: "string" },
+          body: { type: "string" },
+          home: { type: "string" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        if (typeof params.identifier === "string" && params.identifier.trim() !== "") {
+          args.push(params.identifier.trim());
+        }
+        if (typeof params.body === "string" && params.body.trim() !== "") {
+          args.push(params.body);
+        }
+        const result = await runMessageCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_sync_inbox",
+      description:
+        "Sync LinkClaw messages from the configured relay and return inbox summary. Use this when a user asks to check for new LinkClaw messages.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          home: { type: "string" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        const sync = await runSyncCommand(loadConfig(api), args.join(" "), pluginRoot);
+        const inbox = await runInboxCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(`${sync.message}\n\n${inbox.message}`);
       },
     });
 
