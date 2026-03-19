@@ -1,5 +1,5 @@
 {
-  "name": "linkclaw-openclaw-plugin",
+  "name": "linkclaw",
   "version": "0.1.0",
   "description": "OpenClaw plugin for running LinkClaw publish/inspect/import workflows and passive identity discovery.",
   "keywords": [

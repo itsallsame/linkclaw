@@ -13,6 +13,7 @@ export type LinkClawPluginConfig = {
   publishOrigin?: string;
   publishOutput?: string;
   publishTier?: "minimum" | "recommended" | "full";
+  syncIntervalMs?: number;
 };
 
 export type LinkClawCommand =
@@ -24,6 +25,7 @@ export type LinkClawCommand =
   | "card_import"
   | "message_send"
   | "message_inbox"
+  | "message_thread"
   | "message_outbox"
   | "message_sync"
   | "known_ls"
@@ -44,6 +46,7 @@ export type LinkClawBridgeRequest = {
   input?: string;
   identifier?: string;
   body?: string;
+  limit?: number;
   trustLevel?: string;
   riskFlags?: string[];
   clearRiskFlags?: boolean;
@@ -289,6 +292,14 @@ export function buildLinkClawArgs(
       ];
     case "message_inbox":
       return ["message", "inbox", "--home", home, "--json"];
+    case "message_thread":
+      requireField(request.identifier, "identifier");
+      args.push("message", "thread", "--home", home);
+      if (typeof request.limit === "number" && Number.isFinite(request.limit)) {
+        args.push("--limit", String(Math.floor(request.limit)));
+      }
+      args.push("--json", request.identifier);
+      return args;
     case "message_outbox":
       return ["message", "outbox", "--home", home, "--json"];
     case "message_sync":
@@ -435,6 +446,7 @@ function normalizeCommand(raw: string): LinkClawCommand {
     case "card_import":
     case "message_send":
     case "message_inbox":
+    case "message_thread":
     case "message_outbox":
     case "message_sync":
     case "known_ls":

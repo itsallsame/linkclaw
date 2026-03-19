@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createBackgroundSyncService,
   extractUnknownSenders,
   formatBackgroundSyncNotice,
 } from "../src/messaging.ts";
@@ -49,4 +50,24 @@ test("formatBackgroundSyncNotice adds explicit guidance for unknown senders", ()
   assert.match(message, /did:key:z6MkBob/);
   assert.match(message, /\/linkclaw-inbox/);
   assert.match(message, /\/linkclaw-connect <card>/);
+});
+
+test("createBackgroundSyncService no-ops when required config is missing", async () => {
+  const service = createBackgroundSyncService({
+    config: {},
+    pluginRoot: "/tmp/plugin-root",
+    logger: {
+      info() {
+        throw new Error("unexpected info log");
+      },
+      warn() {
+        throw new Error("unexpected warn log");
+      },
+    },
+  });
+
+  await service.start();
+  await service.stop?.();
+
+  assert.equal(service.id, "linkclaw-background-sync");
 });

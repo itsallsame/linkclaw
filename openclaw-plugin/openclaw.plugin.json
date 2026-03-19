@@ -30,6 +30,11 @@
         "enum": ["minimum", "recommended", "full"],
         "default": "recommended",
         "description": "Default publish tier used by the publishing skill."
+      },
+      "syncIntervalMs": {
+        "type": "number",
+        "minimum": 5000,
+        "description": "Optional background polling interval for relay sync, in milliseconds."
       }
     }
   },
@@ -56,6 +61,10 @@
     },
     "publishTier": {
       "label": "Default Publish Tier"
+    },
+    "syncIntervalMs": {
+      "label": "Background Sync Interval (ms)",
+      "placeholder": "30000"
     }
   }
 }

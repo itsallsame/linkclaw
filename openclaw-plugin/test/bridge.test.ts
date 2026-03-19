@@ -66,6 +66,26 @@ test("buildLinkClawArgs maps known trust and note flags", () => {
     "--json",
     "contact-1",
   ]);
+
+  const threadArgs = buildLinkClawArgs(
+    "message_thread",
+    {
+      command: "message_thread",
+      identifier: "did:key:z6MkAlice",
+      limit: 15,
+    },
+    "/tmp/linkclaw-home",
+  );
+  assert.deepEqual(threadArgs, [
+    "message",
+    "thread",
+    "--home",
+    "/tmp/linkclaw-home",
+    "--limit",
+    "15",
+    "--json",
+    "did:key:z6MkAlice",
+  ]);
 });
 
 test("bridge runs init and publish against the real binary", async () => {

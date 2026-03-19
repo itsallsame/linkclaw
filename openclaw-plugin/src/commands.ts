@@ -1,6 +1,10 @@
+import { readFile } from "node:fs/promises";
+
 import {
   LinkClawCommandError,
   type LinkClawPluginConfig,
+  resolveLinkClawBinary,
+  resolveLinkClawHome,
   runLinkClaw,
 } from "./bridge.ts";
 import {
@@ -15,6 +19,17 @@ type CommandResult = {
   message: string;
 };
 
+type SetupOptions = {
+  canonicalId?: string;
+  displayName?: string;
+  home?: string;
+  checkOnly?: boolean;
+};
+
+type StatusOptions = {
+  home?: string;
+};
+
 type ImportOptions = {
   input: string;
   allowDiscovered: boolean;
@@ -24,10 +39,22 @@ type ImportOptions = {
 
 type ShareOptions = {
   origin?: string;
+  home?: string;
+  card?: boolean;
 };
 
 type ConnectOptions = {
   input: string;
+  home?: string;
+};
+
+type FindOptions = {
+  query: string;
+  home?: string;
+};
+
+type ContactsOptions = {
+  query?: string;
   home?: string;
 };
 
@@ -36,6 +63,43 @@ type MessageOptions = {
   body: string;
   home?: string;
 };
+
+type ThreadOptions = {
+  identifier: string;
+  home?: string;
+  limit?: number;
+};
+
+type InboxOptions = {
+  home?: string;
+  query?: string;
+};
+
+type KnownContact = {
+  contactId?: string;
+  canonicalId?: string;
+  displayName?: string;
+};
+
+type InboxConversation = {
+  canonicalId?: string;
+  displayName?: string;
+  status?: string;
+  lastMessageAt?: string;
+};
+
+type SetupHealth = {
+  binaryPath: string;
+  relayStatus: string;
+  publishStatus: string;
+};
+
+const replyContextByHome = new Map<string, string>();
+
+type ContactResolutionContext =
+  | { command: "message"; body?: string }
+  | { command: "reply"; body?: string }
+  | { command: "thread" };
 
 export async function runImportCommand(
   config: LinkClawPluginConfig,
@@ -84,6 +148,194 @@ export async function runImportCommand(
   }
 }
 
+export async function runSetupCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: SetupOptions;
+  try {
+    options = parseSetupCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw setup command failed: ${(error as Error).message}`,
+    };
+  }
+
+  if (!config.binaryPath) {
+    return {
+      type: "message",
+      message:
+        "LinkClaw is not configured yet. Set plugins.entries.linkclaw.config.binaryPath to the local linkclaw binary first.",
+    };
+  }
+
+  const health = await collectSetupHealth(config, options.home, pluginRoot);
+
+  try {
+    const knownEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "known_ls",
+        home: options.home,
+      },
+      pluginRoot,
+    );
+    const result = asObject(knownEnvelope.result);
+    const contacts = Array.isArray(result?.contacts) ? result.contacts.length : 0;
+    return {
+      type: "message",
+      message: [
+        "LinkClaw is ready.",
+        `home: ${resolveLinkClawHome(options.home, config)}`,
+        `contacts: ${contacts}`,
+        ...formatHealthSection(health),
+        "Next:",
+        "- run /linkclaw-share to share your identity surface",
+        "- run /linkclaw-connect <card-or-url> to add a contact",
+        "- run /linkclaw-message <contact> <text> to send a message",
+      ].join("\n"),
+    };
+  } catch (error) {
+    if (!isStateNotInitialized(error)) {
+      return {
+        type: "message",
+        message: formatCommandError("linkclaw setup", error),
+      };
+    }
+  }
+
+  if (options.checkOnly) {
+    return {
+      type: "message",
+      message: [
+        "LinkClaw setup check completed.",
+        `home: ${resolveLinkClawHome(options.home, config)}`,
+        "state: not initialized",
+        ...formatHealthSection(health),
+        "Next:",
+        "- run /linkclaw-setup --canonical-id <did:key|did:web> --display-name <name> to initialize this home",
+      ].join("\n"),
+    };
+  }
+
+  if (!options.canonicalId) {
+    return {
+      type: "message",
+      message: [
+        "LinkClaw home is not initialized yet.",
+        "Usage: /linkclaw-setup [--check-only] --canonical-id <did:key|did:web> [--display-name <name>]",
+        "Example: /linkclaw-setup --canonical-id did:key:z6MkAlice --display-name Alice",
+      ].join("\n"),
+    };
+  }
+
+  try {
+    const initEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "init",
+        home: options.home,
+        canonicalId: options.canonicalId,
+        displayName: options.displayName,
+      },
+      pluginRoot,
+    );
+    const result = asObject(initEnvelope.result);
+    return {
+      type: "message",
+      message: [
+        "LinkClaw setup completed.",
+        `home: ${String(result?.home ?? options.home ?? config.home ?? "")}`,
+        `canonical id: ${String(result?.identity && asObject(result.identity)?.canonical_id ? asObject(result.identity)?.canonical_id : options.canonicalId)}`,
+        ...formatHealthSection(health),
+        "Next:",
+        "- run /linkclaw-share to publish or share your identity",
+        "- run /linkclaw-connect <card-or-url> after the other side shares theirs",
+      ].join("\n"),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw setup", error),
+    };
+  }
+}
+
+export async function runStatusCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: StatusOptions;
+  try {
+    options = parseStatusCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw status command failed: ${(error as Error).message}`,
+    };
+  }
+
+  if (!config.binaryPath) {
+    return {
+      type: "message",
+      message:
+        "LinkClaw is not configured yet. Set plugins.entries.linkclaw.config.binaryPath to the local linkclaw binary first.",
+    };
+  }
+
+  try {
+    const health = await collectSetupHealth(config, options.home, pluginRoot);
+    const knownEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "known_ls",
+        home: options.home,
+      },
+      pluginRoot,
+    );
+    const inboxEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "message_inbox",
+        home: options.home,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatStatus(
+        options.home,
+        config,
+        health,
+        knownEnvelope.result,
+        inboxEnvelope.result,
+      ),
+    };
+  } catch (error) {
+    if (isStateNotInitialized(error)) {
+      const health = await collectSetupHealth(config, options.home, pluginRoot);
+      return {
+        type: "message",
+        message: [
+        "LinkClaw status",
+        `home: ${resolveLinkClawHome(options.home, config)}`,
+        "state: not initialized",
+        ...formatHealthSection(health),
+        "Next:",
+        "- run /linkclaw-setup --canonical-id <did:key|did:web> --display-name <name>",
+      ].join("\n"),
+      };
+    }
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw status", error),
+    };
+  }
+}
+
 export async function runShareCommand(
   config: LinkClawPluginConfig,
   rawArgs: string,
@@ -99,12 +351,34 @@ export async function runShareCommand(
     };
   }
 
+  if (options.card) {
+    try {
+      const envelope = await runLinkClaw(
+        config,
+        {
+          command: "card_export",
+          home: options.home,
+        },
+        pluginRoot,
+      );
+      return {
+        type: "message",
+        message: formatShareCardMessage(envelope.result),
+      };
+    } catch (error) {
+      return {
+        type: "message",
+        message: formatCommandError("linkclaw share", error),
+      };
+    }
+  }
+
   const origin = options.origin ?? config.publishOrigin;
   if (!origin) {
     return {
       type: "message",
       message:
-        "Set plugins.entries.linkclaw.config.publishOrigin or pass /linkclaw-share --origin https://agent.example.",
+        "Set plugins.entries.linkclaw.config.publishOrigin, pass /linkclaw-share --origin https://agent.example, or use /linkclaw-share --card.",
     };
   }
 
@@ -160,12 +434,13 @@ export async function runConnectCommand(
   }
 
   try {
+    const normalizedInput = await normalizeConnectInput(options.input);
     const envelope = await runLinkClaw(
       config,
       {
         command: "card_import",
         home: options.home,
-        input: options.input,
+        input: normalizedInput,
       },
       pluginRoot,
     );
@@ -177,6 +452,131 @@ export async function runConnectCommand(
     return {
       type: "message",
       message: formatCommandError("linkclaw connect", error),
+    };
+  }
+}
+
+export async function runFindCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: FindOptions;
+  try {
+    options = parseFindCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw find command failed: ${(error as Error).message}`,
+    };
+  }
+
+  if (options.query === "") {
+    return {
+      type: "message",
+      message: "Usage: /linkclaw-find [--home /path/to/home] <query>",
+    };
+  }
+
+  try {
+    const contacts = await loadKnownContacts(config, options.home, pluginRoot);
+    return {
+      type: "message",
+      message: formatFindResults(options.query, filterContactsByQuery(contacts, options.query)),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw find", error),
+    };
+  }
+}
+
+export async function runContactsCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: ContactsOptions;
+  try {
+    options = parseContactsCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw contacts command failed: ${(error as Error).message}`,
+    };
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "known_ls",
+        home: options.home,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatContacts(envelope.result, options.query),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw contacts", error),
+    };
+  }
+}
+
+export async function runThreadCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: ThreadOptions;
+  try {
+    options = parseThreadCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw thread command failed: ${(error as Error).message}`,
+    };
+  }
+
+  if (options.identifier === "") {
+    return {
+      type: "message",
+      message: "Usage: /linkclaw-thread [--home /path/to/home] [--limit 20] <contact>",
+    };
+  }
+
+  try {
+    const resolvedIdentifier = await resolveContactIdentifier(
+      config,
+      options.home,
+      options.identifier,
+      pluginRoot,
+      { command: "thread" },
+    );
+    rememberReplyContext(config, options.home, resolvedIdentifier);
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "message_thread",
+        home: options.home,
+        identifier: resolvedIdentifier,
+        limit: options.limit,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatThread(envelope.result),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw thread", error),
     };
   }
 }
@@ -199,17 +599,70 @@ export async function runMessageCommand(
   if (options.identifier === "" || options.body === "") {
     return {
       type: "message",
-      message: "Usage: /linkclaw-message [--home /path/to/home] <contact> <message>",
+      message: 'Usage: /linkclaw-message [--home /path/to/home] <contact> <message>\nTip: quote contact names with spaces, for example /linkclaw-message "Alice Example" hello',
+    };
+  }
+
+  return sendMessageCommand(config, options, pluginRoot, "linkclaw message");
+}
+
+export async function runReplyCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: MessageOptions;
+  try {
+    options = parseReplyCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw reply command failed: ${(error as Error).message}`,
+    };
+  }
+
+  if (options.body === "") {
+    return {
+      type: "message",
+      message: 'Usage: /linkclaw-reply [--home /path/to/home] [<contact>] <message>\nTip: quote contact names with spaces, for example /linkclaw-reply "Alice Example" hello\nTip: omit <contact> to reply to your most recent known conversation.',
     };
   }
 
   try {
+    const resolvedOptions = await resolveReplyOptions(config, options, pluginRoot);
+    return await sendMessageCommand(config, resolvedOptions, pluginRoot, "linkclaw reply");
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw reply", error),
+    };
+  }
+}
+
+async function sendMessageCommand(
+  config: LinkClawPluginConfig,
+  options: MessageOptions,
+  pluginRoot: string,
+  errorPrefix: string,
+): Promise<CommandResult> {
+  try {
+    const resolvedIdentifier = await resolveContactIdentifier(
+      config,
+      options.home,
+      options.identifier,
+      pluginRoot,
+      {
+        command: errorPrefix === "linkclaw reply" ? "reply" : "message",
+        body: options.body,
+      },
+    );
+    rememberReplyContext(config, options.home, resolvedIdentifier);
     const envelope = await runLinkClaw(
       config,
       {
         command: "message_send",
         home: options.home,
-        identifier: options.identifier,
+        identifier: resolvedIdentifier,
         body: options.body,
       },
       pluginRoot,
@@ -221,7 +674,7 @@ export async function runMessageCommand(
   } catch (error) {
     return {
       type: "message",
-      message: formatCommandError("linkclaw message", error),
+      message: formatCommandError(errorPrefix, error),
     };
   }
 }
@@ -231,9 +684,9 @@ export async function runInboxCommand(
   rawArgs: string,
   pluginRoot: string,
 ): Promise<CommandResult> {
-  let home: string | undefined;
+  let options: InboxOptions;
   try {
-    home = parseOptionalHome(rawArgs, "inbox");
+    options = parseInboxCommand(rawArgs);
   } catch (error) {
     return {
       type: "message",
@@ -245,13 +698,13 @@ export async function runInboxCommand(
       config,
       {
         command: "message_inbox",
-        home,
+        home: options.home,
       },
       pluginRoot,
     );
     return {
       type: "message",
-      message: formatInbox(envelope.result),
+      message: formatInbox(envelope.result, options.query),
     };
   } catch (error) {
     return {
@@ -294,6 +747,52 @@ export async function runSyncCommand(
       message: formatCommandError("linkclaw sync", error),
     };
   }
+}
+
+export function parseSetupCommand(rawArgs: string): SetupOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  const options: SetupOptions = {};
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      options.home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--canonical-id") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --canonical-id");
+      }
+      options.canonicalId = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--display-name") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --display-name");
+      }
+      options.displayName = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--check-only") {
+      options.checkOnly = true;
+      continue;
+    }
+    throw new Error(`unsupported setup argument: ${token}`);
+  }
+
+  return options;
+}
+
+export function parseStatusCommand(rawArgs: string): StatusOptions {
+  return {
+    home: parseOptionalHome(rawArgs, "status"),
+  };
 }
 
 export function parseImportCommand(rawArgs: string): ImportOptions {
@@ -344,6 +843,18 @@ export function parseShareCommand(rawArgs: string): ShareOptions {
 
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      options.home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--card") {
+      options.card = true;
+      continue;
+    }
     if (token === "--origin") {
       if (index + 1 >= tokens.length) {
         throw new Error("missing value for --origin");
@@ -359,6 +870,11 @@ export function parseShareCommand(rawArgs: string): ShareOptions {
 }
 
 export function parseConnectCommand(rawArgs: string): ConnectOptions {
+  const directPayload = parseDirectConnectPayload(rawArgs);
+  if (directPayload) {
+    return directPayload;
+  }
+
   const tokens = tokenizeCommand(rawArgs);
   let input = "";
   let home: string | undefined;
@@ -383,6 +899,91 @@ export function parseConnectCommand(rawArgs: string): ConnectOptions {
   }
 
   return { input, home };
+}
+
+function parseDirectConnectPayload(rawArgs: string): ConnectOptions | undefined {
+  const trimmed = rawArgs.trim();
+  if (trimmed === "") {
+    return undefined;
+  }
+
+  const homeMatch = trimmed.match(/^--home\s+(\S+)\s+([\s\S]+)$/);
+  if (homeMatch) {
+    const payload = homeMatch[2]?.trim() ?? "";
+    if (looksLikeInlineCardPayload(payload)) {
+      return {
+        home: homeMatch[1],
+        input: payload,
+      };
+    }
+  }
+
+  if (looksLikeInlineCardPayload(trimmed)) {
+    return { input: trimmed };
+  }
+
+  return undefined;
+}
+
+function looksLikeInlineCardPayload(value: string): boolean {
+  return (
+    (/^```(?:json)?[\s\S]*```$/i.test(value) ||
+      (value.startsWith("{") && value.endsWith("}")))
+  );
+}
+
+export function parseFindCommand(rawArgs: string): FindOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  const positional: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported find argument: ${token}`);
+    }
+    positional.push(token);
+  }
+
+  return {
+    home,
+    query: positional.join(" ").trim(),
+  };
+}
+
+export function parseContactsCommand(rawArgs: string): ContactsOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  const positional: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported contacts argument: ${token}`);
+    }
+    positional.push(token);
+  }
+
+  return {
+    home,
+    query: positional.join(" ").trim() || undefined,
+  };
 }
 
 export function parseMessageCommand(rawArgs: string): MessageOptions {
@@ -410,6 +1011,114 @@ export function parseMessageCommand(rawArgs: string): MessageOptions {
     home,
     identifier: positional[0] ?? "",
     body: positional.slice(1).join(" ").trim(),
+  };
+}
+
+export function parseReplyCommand(rawArgs: string): MessageOptions {
+  const parsed = parseMessageCommand(rawArgs);
+  if (parsed.identifier !== "" && parsed.body !== "") {
+    return parsed;
+  }
+
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  const positional: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported reply argument: ${token}`);
+    }
+    positional.push(token);
+  }
+
+  if (positional.length === 0) {
+    return { home, identifier: "", body: "" };
+  }
+  if (positional.length === 1) {
+    return { home, identifier: "", body: positional[0] };
+  }
+
+  return {
+    home,
+    identifier: positional[0] ?? "",
+    body: positional.slice(1).join(" ").trim(),
+  };
+}
+
+export function parseThreadCommand(rawArgs: string): ThreadOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  let limit: number | undefined;
+  const positional: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--limit") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --limit");
+      }
+      const parsed = Number.parseInt(tokens[index + 1] ?? "", 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error("invalid value for --limit");
+      }
+      limit = parsed;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported thread argument: ${token}`);
+    }
+    positional.push(token);
+  }
+
+  return {
+    home,
+    limit,
+    identifier: positional[0] ?? "",
+  };
+}
+
+export function parseInboxCommand(rawArgs: string): InboxOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  const positional: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported inbox argument: ${token}`);
+    }
+    positional.push(token);
+  }
+
+  return {
+    home,
+    query: positional.join(" ").trim() || undefined,
   };
 }
 
@@ -458,25 +1167,40 @@ function formatImportMessage(value: unknown): string {
 function formatConnectMessage(value: unknown): string {
   const record = asObject(value);
   const card = asObject(record?.card);
-  const lines = ["Contact added to your LinkClaw contacts."];
+  const displayName =
+    typeof card?.display_name === "string" && card.display_name.trim() !== ""
+      ? card.display_name
+      : undefined;
+  const canonicalId =
+    typeof card?.id === "string" && card.id.trim() !== "" ? card.id : undefined;
+  const lines = ["LinkClaw contact saved."];
   if (typeof record?.contact_id === "string" && record.contact_id.trim() !== "") {
     lines.push(`contact: ${record.contact_id}`);
   }
-  if (typeof card?.display_name === "string" && card.display_name.trim() !== "") {
-    lines.push(`name: ${card.display_name}`);
+  if (displayName) {
+    lines.push(`name: ${displayName}`);
   }
-  if (typeof card?.id === "string" && card.id.trim() !== "") {
-    lines.push(`canonical id: ${card.id}`);
+  if (canonicalId) {
+    lines.push(`canonical id: ${canonicalId}`);
   }
   if (typeof record?.created === "boolean") {
     lines.push(`created: ${record.created ? "yes" : "no"}`);
   }
+  lines.push(
+    ...formatMarkedSection("contact-summary", [
+      ...(typeof record?.contact_id === "string" && record.contact_id.trim() !== ""
+        ? [`contact: ${record.contact_id}`]
+        : []),
+      ...(displayName ? [`name: ${displayName}`] : []),
+      ...(canonicalId ? [`canonical id: ${canonicalId}`] : []),
+      ...(typeof record?.created === "boolean" ? [`created: ${record.created ? "yes" : "no"}`] : []),
+    ]),
+  );
   lines.push("Next:");
-  if (typeof card?.display_name === "string" && card.display_name.trim() !== "") {
-    lines.push(`- send a message with /linkclaw-message ${card.display_name} <text>`);
-  } else {
-    lines.push("- send a message with /linkclaw-message <contact> <text>");
-  }
+  const target = canonicalId ?? displayName ?? "<contact>";
+  lines.push(`- send a message with /linkclaw-message ${target} <text>`);
+  lines.push(`- open the conversation with /linkclaw-thread ${target}`);
+  lines.push("- if they do not have your card yet, share back with /linkclaw-share --card");
   lines.push("- or run /linkclaw-inbox to review existing conversations");
   return lines.join("\n");
 }
@@ -484,26 +1208,170 @@ function formatConnectMessage(value: unknown): string {
 function formatMessageSend(value: unknown): string {
   const record = asObject(value);
   const message = asObject(record?.message);
-  const lines = ["Message queued for relay delivery."];
+  const conversation = asObject(record?.conversation);
+  const lines = ["LinkClaw message queued."];
+  if (typeof conversation?.conversation_id === "string") {
+    lines.push(`conversation: ${conversation.conversation_id}`);
+  }
   if (typeof message?.message_id === "string") {
     lines.push(`message: ${message.message_id}`);
   }
   if (typeof message?.status === "string") {
     lines.push(`status: ${message.status}`);
+    if (message.status === "failed") {
+      lines.push("delivery: failed before relay acceptance");
+    }
   }
   if (typeof message?.preview === "string") {
     lines.push(`preview: ${message.preview}`);
   }
   lines.push("Next:");
-  lines.push("- the recipient needs to run /linkclaw-sync to receive it");
-  lines.push("- use /linkclaw-inbox to review local conversation state");
+  if (message?.status === "failed") {
+    lines.push("- run /linkclaw-setup to verify your local identity and relay config");
+    lines.push("- confirm the contact was imported from a full identity card, not a partial profile");
+  } else {
+    lines.push("- the recipient needs to run /linkclaw-sync to receive it");
+  }
+  lines.push("- use /linkclaw-thread <contact> to review this conversation");
   return lines.join("\n");
 }
 
-function formatInbox(value: unknown): string {
+function formatContacts(value: unknown, query?: string): string {
   const record = asObject(value);
-  const conversations = Array.isArray(record?.conversations) ? record.conversations : [];
+  const rawContacts = Array.isArray(record?.contacts) ? record.contacts : [];
+  const contacts = filterRawContactsByQuery(rawContacts, query);
+  const lines = ["LinkClaw contacts", `contacts: ${contacts.length}`];
+  if (query && query.trim() !== "") {
+    lines.push(`query: ${query}`);
+  }
+  for (const contact of contacts) {
+    const item = asObject(contact);
+    const name =
+      typeof item?.display_name === "string" && item.display_name.trim() !== ""
+        ? item.display_name
+        : "(unknown)";
+    const canonicalID =
+      typeof item?.canonical_id === "string" ? item.canonical_id : "";
+    const trust = asObject(item?.trust);
+    const trustLevel =
+      typeof trust?.trust_level === "string" && trust.trust_level.trim() !== ""
+        ? trust.trust_level
+        : "unknown";
+    const verification =
+      typeof trust?.verification_state === "string" ? trust.verification_state : "";
+    const notes =
+      typeof item?.note_count === "number" ? item.note_count : 0;
+
+    const summary = [name];
+    if (canonicalID !== "") {
+      summary.push(canonicalID);
+    }
+    summary.push(`trust=${trustLevel}`);
+    if (verification !== "") {
+      summary.push(`verification=${verification}`);
+    }
+    summary.push(`notes=${notes}`);
+    lines.push(`- ${summary.join(" | ")}`);
+  }
+  lines.push(
+    ...formatMarkedSection(
+      "contacts-list",
+      contacts.map((contact) => {
+        const item = asObject(contact);
+        const name =
+          typeof item?.display_name === "string" && item.display_name.trim() !== ""
+            ? item.display_name
+            : "(unknown)";
+        const canonicalID =
+          typeof item?.canonical_id === "string" && item.canonical_id.trim() !== ""
+            ? item.canonical_id
+            : "";
+        const trust = asObject(item?.trust);
+        const trustLevel =
+          typeof trust?.trust_level === "string" && trust.trust_level.trim() !== ""
+            ? trust.trust_level
+            : "unknown";
+        const verification =
+          typeof trust?.verification_state === "string" && trust.verification_state.trim() !== ""
+            ? trust.verification_state
+            : "";
+        const notes = typeof item?.note_count === "number" ? item.note_count : 0;
+        return [
+          `name: ${name}`,
+          ...(canonicalID !== "" ? [`canonical id: ${canonicalID}`] : []),
+          `trust: ${trustLevel}`,
+          ...(verification !== "" ? [`verification: ${verification}`] : []),
+          `notes: ${notes}`,
+        ].join(" | ");
+      }),
+    ),
+  );
+  if (contacts.length > 0) {
+    lines.push("Next:");
+    lines.push("- message someone with /linkclaw-message <contact> <text>");
+    lines.push("- inspect new activity with /linkclaw-inbox");
+  }
+  return lines.join("\n");
+}
+
+function formatFindResults(query: string, contacts: KnownContact[]): string {
+  const lines = ["LinkClaw contact search", `query: ${query}`, `matches: ${contacts.length}`];
+  for (const contact of contacts) {
+    const summary = [
+      contact.displayName ?? "(unknown)",
+      contact.canonicalId ?? contact.contactId ?? "",
+    ].filter((item) => item !== "");
+    lines.push(`- ${summary.join(" | ")}`);
+    if (contact.canonicalId ?? contact.contactId) {
+      const identifier = contact.canonicalId ?? contact.contactId ?? "";
+      lines.push(`  message: /linkclaw-message ${identifier} <text>`);
+      lines.push(`  thread: /linkclaw-thread ${identifier}`);
+    }
+  }
+  if (contacts.length === 0) {
+    lines.push("No saved contacts matched that query.");
+  }
+  return lines.join("\n");
+}
+
+function formatShareCardMessage(value: unknown): string {
+  const record = asObject(value);
+  const card = asObject(record?.card);
+  const displayName =
+    typeof card?.display_name === "string" && card.display_name.trim() !== ""
+      ? card.display_name
+      : "(unknown)";
+  const canonicalId =
+    typeof card?.id === "string" && card.id.trim() !== "" ? card.id : "";
+  const compactCardJSON = JSON.stringify(card ?? value);
+  const lines = ["LinkClaw identity card ready to share."];
+  lines.push(`name: ${displayName}`);
+  if (canonicalId !== "") {
+    lines.push(`canonical id: ${canonicalId}`);
+  }
+  lines.push("card compact:");
+  lines.push("--- card-compact-begin ---");
+  lines.push(compactCardJSON);
+  lines.push("--- card-compact-end ---");
+  lines.push("card:");
+  lines.push(JSON.stringify(card ?? value, null, 2));
+  lines.push("Next:");
+  lines.push("- send this JSON directly to the other side");
+  lines.push("- if they use this plugin, they can run /linkclaw-connect <card-json>");
+  lines.push("--- connect-command-begin ---");
+  lines.push(`/linkclaw-connect '${escapeSingleQuotes(compactCardJSON)}'`);
+  lines.push("--- connect-command-end ---");
+  return lines.join("\n");
+}
+
+function formatInbox(value: unknown, query?: string): string {
+  const record = asObject(value);
+  const rawConversations = Array.isArray(record?.conversations) ? record.conversations : [];
+  const conversations = filterInboxConversations(rawConversations, query);
   const lines = ["LinkClaw inbox", `conversations: ${conversations.length}`];
+  if (query && query.trim() !== "") {
+    lines.push(`query: ${query}`);
+  }
   let hasUnknownSender = false;
   for (const conversation of conversations) {
     const item = asObject(conversation);
@@ -516,15 +1384,116 @@ function formatInbox(value: unknown): string {
     if (status === "discovered") {
       hasUnknownSender = true;
     }
-    lines.push(`- ${name} | ${canonicalID} | ${senderLabel} | unread=${unread} | last=${preview}`);
+    const summary = [name];
+    if (canonicalID !== "") {
+      summary.push(canonicalID);
+    }
+    summary.push(senderLabel);
+    summary.push(`unread=${unread}`);
+    if (preview !== "") {
+      summary.push(`last=${preview}`);
+    }
+    lines.push(`- ${summary.join(" | ")}`);
   }
+  lines.push(
+    ...formatMarkedSection(
+      "inbox-conversations",
+      conversations.map((conversation) => {
+        const item = asObject(conversation);
+        const name =
+          typeof item?.contact_display_name === "string" && item.contact_display_name.trim() !== ""
+            ? item.contact_display_name
+            : "(unknown)";
+        const canonicalID =
+          typeof item?.contact_canonical_id === "string" && item.contact_canonical_id.trim() !== ""
+            ? item.contact_canonical_id
+            : "";
+        const status =
+          typeof item?.contact_status === "string" && item.contact_status.trim() !== ""
+            ? item.contact_status
+            : "known";
+        const unread = typeof item?.unread_count === "number" ? item.unread_count : 0;
+        const preview =
+          typeof item?.last_message_preview === "string" && item.last_message_preview.trim() !== ""
+            ? item.last_message_preview
+            : "";
+        return [
+          `name: ${name}`,
+          ...(canonicalID !== "" ? [`canonical id: ${canonicalID}`] : []),
+          `status: ${status}`,
+          `unread: ${unread}`,
+          ...(preview !== "" ? [`last: ${preview}`] : []),
+        ].join(" | ");
+      }),
+    ),
+  );
   if (hasUnknownSender) {
     lines.push("Next:");
     lines.push("- ask the sender for an identity card");
     lines.push("- then run /linkclaw-connect <card> if you want to keep them");
   } else if (conversations.length > 0) {
     lines.push("Next:");
-    lines.push("- reply with /linkclaw-message <contact> <text>");
+    lines.push("- open one conversation with /linkclaw-thread <contact>");
+    lines.push("- reply with /linkclaw-reply <contact> <text>");
+  }
+  return lines.join("\n");
+}
+
+function formatThread(value: unknown): string {
+  const record = asObject(value);
+  const conversation = asObject(record?.conversation);
+  const name =
+    typeof conversation?.contact_display_name === "string" && conversation.contact_display_name.trim() !== ""
+      ? conversation.contact_display_name
+      : "(unknown)";
+  const canonicalID =
+    typeof conversation?.contact_canonical_id === "string" ? conversation.contact_canonical_id : "";
+  const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+  const lines = ["LinkClaw thread", `contact: ${name}`];
+  if (canonicalID !== "") {
+    lines.push(`canonical id: ${canonicalID}`);
+  }
+  lines.push(`messages: ${messages.length}`);
+  for (const message of messages) {
+    const item = asObject(message);
+    const direction = typeof item?.direction === "string" ? item.direction : "message";
+    const body = typeof item?.body === "string" ? item.body : "";
+    const createdAt = typeof item?.created_at === "string" ? item.created_at : "";
+    const status = typeof item?.status === "string" ? item.status : "";
+    const summary = [`[${direction}]`];
+    if (createdAt !== "") {
+      summary.push(createdAt);
+    }
+    if (status !== "") {
+      summary.push(status);
+    }
+    lines.push(`- ${summary.join(" | ")} | ${body}`);
+  }
+  lines.push(
+    ...formatMarkedSection(
+      "thread-messages",
+      messages.map((message) => {
+        const item = asObject(message);
+        const direction = typeof item?.direction === "string" ? item.direction : "message";
+        const body = typeof item?.body === "string" ? item.body : "";
+        const createdAt = typeof item?.created_at === "string" ? item.created_at : "";
+        const status = typeof item?.status === "string" ? item.status : "";
+        return [
+          `direction: ${direction}`,
+          ...(createdAt !== "" ? [`created_at: ${createdAt}`] : []),
+          ...(status !== "" ? [`status: ${status}`] : []),
+          `body: ${body}`,
+        ].join(" | ");
+      }),
+    ),
+  );
+  if (messages.length === 0) {
+    lines.push("No messages in this thread yet.");
+  }
+  const replyTarget = canonicalID !== "" ? canonicalID : name;
+  if (replyTarget !== "(unknown)") {
+    lines.push("Next:");
+    lines.push(`- reply with /linkclaw-reply ${replyTarget} <text>`);
   }
   return lines.join("\n");
 }
@@ -540,6 +1509,44 @@ function formatSync(value: unknown): string {
   } else {
     lines.push("- no new messages yet; run /linkclaw-message <contact> <text> to start a conversation");
   }
+  return lines.join("\n");
+}
+
+function formatStatus(
+  home: string | undefined,
+  config: LinkClawPluginConfig,
+  health: SetupHealth,
+  knownValue: unknown,
+  inboxValue: unknown,
+): string {
+  const knownRecord = asObject(knownValue);
+  const inboxRecord = asObject(inboxValue);
+  const contacts = Array.isArray(knownRecord?.contacts) ? knownRecord.contacts : [];
+  const conversations = Array.isArray(inboxRecord?.conversations) ? inboxRecord.conversations : [];
+  const unread = conversations.reduce((sum, conversation) => {
+    const item = asObject(conversation);
+    const count = typeof item?.unread_count === "number" ? item.unread_count : 0;
+    return sum + count;
+  }, 0);
+
+  const lines = [
+    "LinkClaw status",
+    `home: ${resolveLinkClawHome(home, config)}`,
+    "state: ready",
+    `contacts: ${contacts.length}`,
+    `conversations: ${conversations.length}`,
+    `unread: ${unread}`,
+    "--- status-summary-begin ---",
+    `contacts: ${contacts.length}`,
+    `conversations: ${conversations.length}`,
+    `unread: ${unread}`,
+    "--- status-summary-end ---",
+    ...formatHealthSection(health),
+    "Next:",
+    "- run /linkclaw-contacts or /linkclaw-find <query> to inspect contacts",
+    "- run /linkclaw-inbox to inspect recent conversations",
+  ];
+
   return lines.join("\n");
 }
 
@@ -563,6 +1570,504 @@ function parseOptionalHome(rawArgs: string, commandName: string): string | undef
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+async function resolveContactIdentifier(
+  config: LinkClawPluginConfig,
+  home: string | undefined,
+  identifier: string,
+  pluginRoot: string,
+  context: ContactResolutionContext,
+): Promise<string> {
+  const trimmed = identifier.trim();
+  if (trimmed === "" || looksLikeStableContactReference(trimmed)) {
+    return trimmed;
+  }
+
+  const contacts = await loadKnownContacts(config, home, pluginRoot);
+  if (contacts.length === 0) {
+    return trimmed;
+  }
+
+  const exactMatches = collectContactMatches(contacts, trimmed, true);
+  if (exactMatches.length === 1) {
+    return exactMatches[0].canonicalId ?? exactMatches[0].contactId ?? trimmed;
+  }
+  if (exactMatches.length > 1) {
+    throw new Error(formatAmbiguousContactMessage(trimmed, exactMatches, context));
+  }
+
+  const fuzzyMatches = collectContactMatches(contacts, trimmed, false);
+  if (fuzzyMatches.length === 1) {
+    return fuzzyMatches[0].canonicalId ?? fuzzyMatches[0].contactId ?? trimmed;
+  }
+  if (fuzzyMatches.length > 1) {
+    throw new Error(formatAmbiguousContactMessage(trimmed, fuzzyMatches, context));
+  }
+
+  return trimmed;
+}
+
+async function resolveReplyOptions(
+  config: LinkClawPluginConfig,
+  options: MessageOptions,
+  pluginRoot: string,
+): Promise<MessageOptions> {
+  const rememberedIdentifier = readReplyContext(config, options.home);
+  if (rememberedIdentifier) {
+    return {
+      ...options,
+      identifier: rememberedIdentifier,
+    };
+  }
+
+  let nextOptions = options;
+  if (options.identifier.trim() !== "") {
+    if (looksLikeStableContactReference(options.identifier)) {
+      return options;
+    }
+    const contacts = await loadKnownContacts(config, options.home, pluginRoot);
+    const exactMatches = collectContactMatches(contacts, options.identifier, true);
+    const fuzzyMatches =
+      exactMatches.length === 0
+        ? collectContactMatches(contacts, options.identifier, false)
+        : exactMatches;
+    if (fuzzyMatches.length > 0) {
+      return options;
+    }
+
+    nextOptions = {
+      ...options,
+      identifier: "",
+      body: [options.identifier, options.body].filter((item) => item.trim() !== "").join(" ").trim(),
+    };
+  }
+
+  const conversation = await loadMostRecentReplyableConversation(config, nextOptions.home, pluginRoot);
+  const identifier = conversation.canonicalId ?? conversation.displayName ?? "";
+  if (identifier === "") {
+    throw new Error("no recent known conversation is available to reply to");
+  }
+
+  return {
+    ...nextOptions,
+    identifier,
+  };
+}
+
+async function loadKnownContacts(
+  config: LinkClawPluginConfig,
+  home: string | undefined,
+  pluginRoot: string,
+): Promise<KnownContact[]> {
+  const envelope = await runLinkClaw(
+    config,
+    {
+      command: "known_ls",
+      home,
+    },
+    pluginRoot,
+  );
+  const result = asObject(envelope.result);
+  const items = Array.isArray(result?.contacts) ? result.contacts : [];
+  return items
+    .map((item) => {
+      const record = asObject(item);
+      return {
+        contactId:
+          typeof record?.contact_id === "string" && record.contact_id.trim() !== ""
+            ? record.contact_id
+            : undefined,
+        canonicalId:
+          typeof record?.canonical_id === "string" && record.canonical_id.trim() !== ""
+            ? record.canonical_id
+            : undefined,
+        displayName:
+          typeof record?.display_name === "string" && record.display_name.trim() !== ""
+            ? record.display_name
+            : undefined,
+      } satisfies KnownContact;
+    })
+    .filter((item) => item.contactId || item.canonicalId || item.displayName);
+}
+
+function filterContactsByQuery(contacts: KnownContact[], query: string): KnownContact[] {
+  const needle = normalizeIdentifier(query);
+  return contacts.filter((contact) => {
+    const fields = [contact.contactId, contact.canonicalId, contact.displayName].filter(
+      (value): value is string => typeof value === "string" && value.trim() !== "",
+    );
+    return fields.some((field) => normalizeIdentifier(field).includes(needle));
+  });
+}
+
+function filterRawContactsByQuery(contacts: unknown[], query: string | undefined): unknown[] {
+  const trimmed = query?.trim() ?? "";
+  if (trimmed === "") {
+    return contacts;
+  }
+
+  const needle = normalizeIdentifier(trimmed);
+  return contacts.filter((contact) => {
+    const item = asObject(contact);
+    const trust = asObject(item?.trust);
+    const fields = [
+      typeof item?.display_name === "string" ? item.display_name : "",
+      typeof item?.canonical_id === "string" ? item.canonical_id : "",
+      typeof trust?.trust_level === "string" ? trust.trust_level : "",
+      typeof trust?.verification_state === "string" ? trust.verification_state : "",
+    ];
+    return fields.some((field) => normalizeIdentifier(field).includes(needle));
+  });
+}
+
+function filterInboxConversations(conversations: unknown[], query: string | undefined): unknown[] {
+  const trimmed = query?.trim() ?? "";
+  if (trimmed === "") {
+    return conversations;
+  }
+
+  const needle = normalizeIdentifier(trimmed);
+  return conversations.filter((conversation) => {
+    const item = asObject(conversation);
+    const fields = [
+      typeof item?.contact_display_name === "string" ? item.contact_display_name : "",
+      typeof item?.contact_canonical_id === "string" ? item.contact_canonical_id : "",
+      typeof item?.last_message_preview === "string" ? item.last_message_preview : "",
+    ];
+    return fields.some((field) => normalizeIdentifier(field).includes(needle));
+  });
+}
+
+async function loadMostRecentReplyableConversation(
+  config: LinkClawPluginConfig,
+  home: string | undefined,
+  pluginRoot: string,
+): Promise<InboxConversation> {
+  const envelope = await runLinkClaw(
+    config,
+    {
+      command: "message_inbox",
+      home,
+    },
+    pluginRoot,
+  );
+  const result = asObject(envelope.result);
+  const items = Array.isArray(result?.conversations) ? result.conversations : [];
+  const conversations = items
+    .map((item) => {
+      const record = asObject(item);
+      return {
+        canonicalId:
+          typeof record?.contact_canonical_id === "string" && record.contact_canonical_id.trim() !== ""
+            ? record.contact_canonical_id
+            : undefined,
+        displayName:
+          typeof record?.contact_display_name === "string" && record.contact_display_name.trim() !== ""
+            ? record.contact_display_name
+            : undefined,
+        status:
+          typeof record?.contact_status === "string" && record.contact_status.trim() !== ""
+            ? record.contact_status
+            : undefined,
+        lastMessageAt:
+          typeof record?.last_message_at === "string" && record.last_message_at.trim() !== ""
+            ? record.last_message_at
+            : undefined,
+      } satisfies InboxConversation;
+    })
+    .filter((item) => item.status !== "discovered");
+
+  if (conversations.length === 0) {
+    throw new Error("no recent known conversation is available; run /linkclaw-inbox or specify a contact");
+  }
+
+  conversations.sort((left, right) =>
+    (right.lastMessageAt ?? "").localeCompare(left.lastMessageAt ?? ""),
+  );
+  return conversations[0];
+}
+
+function looksLikeStableContactReference(identifier: string): boolean {
+  return identifier.startsWith("did:") || identifier.startsWith("contact_");
+}
+
+function collectContactMatches(
+  contacts: KnownContact[],
+  identifier: string,
+  exactOnly: boolean,
+): KnownContact[] {
+  const needle = normalizeIdentifier(identifier);
+  const seen = new Set<string>();
+  const matches: KnownContact[] = [];
+
+  for (const contact of contacts) {
+    const fields = [contact.contactId, contact.canonicalId, contact.displayName].filter(
+      (value): value is string => typeof value === "string" && value.trim() !== "",
+    );
+    const matched = fields.some((field) => {
+      const candidate = normalizeIdentifier(field);
+      if (exactOnly) {
+        return candidate === needle;
+      }
+      return candidate.includes(needle);
+    });
+    if (!matched) {
+      continue;
+    }
+
+    const dedupeKey = contact.canonicalId ?? contact.contactId ?? contact.displayName ?? "";
+    if (dedupeKey === "" || seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    matches.push(contact);
+  }
+
+  return matches;
+}
+
+function normalizeIdentifier(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function formatAmbiguousContactMessage(
+  identifier: string,
+  matches: KnownContact[],
+  context: ContactResolutionContext,
+): string {
+  const lines = [`contact "${identifier}" matched multiple saved contacts:`];
+  for (const match of matches) {
+    const summary = [
+      match.displayName ?? "(unknown)",
+      match.canonicalId ?? match.contactId ?? "",
+    ].filter((item) => item !== "");
+    lines.push(`- ${summary.join(" | ")}`);
+  }
+  lines.push("Try one of these:");
+  for (const match of matches) {
+    const target = match.canonicalId ?? match.contactId;
+    if (!target) {
+      continue;
+    }
+    lines.push(`- ${buildSuggestedCommand(context, target)}`);
+  }
+  return lines.join("\n");
+}
+
+function buildSuggestedCommand(context: ContactResolutionContext, identifier: string): string {
+  switch (context.command) {
+    case "message":
+      return `/linkclaw-message ${identifier} ${context.body?.trim() || "<text>"}`;
+    case "reply":
+      return `/linkclaw-reply ${identifier} ${context.body?.trim() || "<text>"}`;
+    case "thread":
+      return `/linkclaw-thread ${identifier}`;
+    default:
+      return identifier;
+  }
+}
+
+function rememberReplyContext(
+  config: LinkClawPluginConfig,
+  home: string | undefined,
+  identifier: string,
+): void {
+  const trimmed = identifier.trim();
+  if (trimmed === "") {
+    return;
+  }
+  replyContextByHome.set(resolveLinkClawHome(home, config), trimmed);
+}
+
+function readReplyContext(
+  config: LinkClawPluginConfig,
+  home: string | undefined,
+): string | undefined {
+  return replyContextByHome.get(resolveLinkClawHome(home, config));
+}
+
+async function collectSetupHealth(
+  config: LinkClawPluginConfig,
+  home: string | undefined,
+  pluginRoot: string,
+): Promise<SetupHealth> {
+  const binaryPath = await resolveLinkClawBinary(config, pluginRoot);
+  const relayStatus = await checkRelayStatus(config.relayUrl);
+  const publishStatus = await checkPublishOriginStatus(config, pluginRoot);
+  return {
+    binaryPath,
+    relayStatus,
+    publishStatus,
+  };
+}
+
+async function checkRelayStatus(relayUrl: string | undefined): Promise<string> {
+  const trimmed = relayUrl?.trim() ?? "";
+  if (trimmed === "") {
+    return "not configured";
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    try {
+      const response = await fetch(trimmed, {
+        method: "GET",
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      return `ok (${response.status}) ${trimmed}`;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    return `unreachable (${formatRelayError(error)}) ${trimmed}`;
+  }
+}
+
+function formatRelayError(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== "") {
+    return error.message.trim();
+  }
+  return "request failed";
+}
+
+function formatMarkedSection(label: string, lines: string[]): string[] {
+  return [
+    `--- ${label}-begin ---`,
+    ...(lines.length > 0 ? lines : ["(empty)"]),
+    `--- ${label}-end ---`,
+  ];
+}
+
+function formatHealthSection(health: SetupHealth): string[] {
+  return [
+    "Checks:",
+    "--- health-checks-begin ---",
+    `- binary: ok (${health.binaryPath})`,
+    `- relay: ${health.relayStatus}`,
+    `- publish origin: ${health.publishStatus}`,
+    "--- health-checks-end ---",
+  ];
+}
+
+async function checkPublishOriginStatus(
+  config: LinkClawPluginConfig,
+  pluginRoot: string,
+): Promise<string> {
+  const origin = config.publishOrigin?.trim() ?? "";
+  if (origin === "") {
+    return "not configured";
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "inspect",
+        input: origin,
+      },
+      pluginRoot,
+    );
+    const inspection = toInspectResult(envelope.result);
+    if (hasShareableArtifacts(inspection)) {
+      return `ok ${origin}`;
+    }
+    return `configured but bundle missing ${origin}`;
+  } catch (error) {
+    return `unreachable (${formatRelayError(error)}) ${origin}`;
+  }
+}
+
+function escapeSingleQuotes(value: string): string {
+  return value.replace(/'/g, "'\"'\"'");
+}
+
+async function normalizeConnectInput(input: string): Promise<string> {
+  const trimmed = input.trim();
+  if (trimmed === "") {
+    return trimmed;
+  }
+
+  const parsedInline = parseIdentityCardEnvelopeCandidate(trimmed);
+  if (parsedInline) {
+    return JSON.stringify(parsedInline);
+  }
+
+  if (/^https?:\/\//.test(trimmed)) {
+    return trimmed;
+  }
+
+  try {
+    const content = await readFile(trimmed, "utf8");
+    const parsedFile = parseIdentityCardEnvelopeCandidate(content);
+    if (parsedFile) {
+      return JSON.stringify(parsedFile);
+    }
+  } catch {
+    return trimmed;
+  }
+
+  return trimmed;
+}
+
+function parseIdentityCardEnvelopeCandidate(raw: string): unknown | undefined {
+  for (const candidate of extractJSONCandidates(raw)) {
+    const parsed = parseIdentityCardEnvelope(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function parseIdentityCardEnvelope(raw: string): unknown | undefined {
+  try {
+    const parsed = JSON.parse(raw);
+    const record = asObject(parsed);
+    const result = asObject(record?.result);
+    const card = result && "card" in result ? result.card : undefined;
+    const cardRecord = asObject(card);
+    if (cardRecord && typeof cardRecord.signature === "string" && cardRecord.signature.trim() !== "") {
+      return card;
+    }
+    if (record && typeof record.signature === "string" && record.signature.trim() !== "") {
+      return parsed;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function extractJSONCandidates(raw: string): string[] {
+  const candidates = new Set<string>();
+  const trimmed = raw.trim();
+  if (trimmed !== "") {
+    candidates.add(trimmed);
+  }
+
+  const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fencedMatch?.[1]) {
+    candidates.add(fencedMatch[1].trim());
+  }
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.add(trimmed.slice(firstBrace, lastBrace + 1).trim());
+  }
+
+  return [...candidates];
+}
+
+function isStateNotInitialized(error: unknown): boolean {
+  return (
+    error instanceof LinkClawCommandError &&
+    (error.envelope?.error?.code === "state_not_initialized" ||
+      error.message.includes("state db not found"))
+  );
 }
 
 function formatCommandError(action: string, error: unknown): string {

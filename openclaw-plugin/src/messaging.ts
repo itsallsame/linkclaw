@@ -2,6 +2,8 @@ import type { LinkClawPluginConfig } from "./bridge.ts";
 import { runLinkClaw } from "./bridge.ts";
 import { runSyncCommand } from "./commands.ts";
 
+const DEFAULT_BACKGROUND_SYNC_INTERVAL_MS = 30_000;
+
 type InboxConversation = {
   contact_display_name?: string;
   contact_canonical_id?: string;
@@ -12,6 +14,11 @@ type InboxConversation = {
 
 type InboxResult = {
   conversations?: InboxConversation[];
+};
+
+type PluginLogger = {
+  info?: (message: string) => void;
+  warn?: (message: string) => void;
 };
 
 export async function triggerBackgroundSync(
@@ -39,6 +46,68 @@ export async function triggerBackgroundSync(
   } catch {
     return undefined;
   }
+}
+
+export function createBackgroundSyncService(params: {
+  config: LinkClawPluginConfig;
+  pluginRoot: string;
+  logger?: PluginLogger;
+}) {
+  let interval: NodeJS.Timeout | null = null;
+
+  return {
+    id: "linkclaw-background-sync",
+    start: async () => {
+      if (!params.config.binaryPath || !params.config.relayUrl || !params.config.home) {
+        return;
+      }
+
+      const intervalMs = resolveSyncInterval(params.config.syncIntervalMs);
+      const tick = async () => {
+        try {
+          const envelope = await runLinkClaw(
+            params.config,
+            {
+              command: "message_sync",
+            },
+            params.pluginRoot,
+          );
+          const record =
+            typeof envelope.result === "object" && envelope.result !== null
+              ? (envelope.result as Record<string, unknown>)
+              : undefined;
+          const synced = typeof record?.synced === "number" ? record.synced : 0;
+          if (synced > 0) {
+            params.logger?.info?.(`linkclaw: background sync pulled ${synced} new message(s)`);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (
+            message.includes("state db not found") ||
+            message.includes("self messaging profile not found")
+          ) {
+            return;
+          }
+          params.logger?.warn?.(`linkclaw: background sync failed: ${message}`);
+        }
+      };
+
+      await tick();
+      interval = setInterval(() => {
+        tick().catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          params.logger?.warn?.(`linkclaw: background sync failed: ${message}`);
+        });
+      }, intervalMs);
+      interval.unref?.();
+    },
+    stop: async () => {
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+    },
+  };
 }
 
 export function appendSyncMessage(event: unknown, message: string): boolean {
@@ -93,4 +162,11 @@ export function extractUnknownSenders(inbox: InboxResult): InboxConversation[] {
       conversation.contact_status === "discovered" &&
       Number(conversation.unread_count ?? 0) > 0,
   );
+}
+
+function resolveSyncInterval(value: number | undefined): number {
+  if (!Number.isFinite(value) || value === undefined) {
+    return DEFAULT_BACKGROUND_SYNC_INTERVAL_MS;
+  }
+  return Math.max(5000, Math.floor(value));
 }

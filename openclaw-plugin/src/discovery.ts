@@ -278,7 +278,10 @@ export function formatShareMessage(inspection: InspectResult, origin: string): s
   if (profileURL) {
     lines.push(`profile: ${profileURL}`);
   }
-  lines.push("Share the agent card and did.json links together.");
+  lines.push("Next:");
+  lines.push("- send the agent card link to the other side");
+  lines.push("- if they use this plugin, they can run /linkclaw-import <agent-card-url>");
+  lines.push("- share the did.json link together if you want the full identity surface");
   return lines.join("\n");
 }
 

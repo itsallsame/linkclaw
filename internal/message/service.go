@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -42,6 +43,13 @@ type SyncOptions struct {
 
 type ListOptions struct {
 	Home string
+}
+
+type ThreadOptions struct {
+	Home       string
+	ContactRef string
+	Limit      int
+	MarkRead   bool
 }
 
 type MessageRecord struct {
@@ -94,6 +102,12 @@ type SyncResult struct {
 	Synced     int    `json:"synced"`
 	RelayCalls int    `json:"relay_calls"`
 	SyncedAt   string `json:"synced_at"`
+}
+
+type ThreadResult struct {
+	Home         string       `json:"home"`
+	Conversation Conversation `json:"conversation"`
+	ListedAt     string       `json:"listed_at"`
 }
 
 type Service struct {
@@ -226,6 +240,50 @@ func (s *Service) Outbox(ctx context.Context, opts ListOptions) (OutboxResult, e
 		Home:     home,
 		Messages: messages,
 		ListedAt: now.Format(time.RFC3339Nano),
+	}, nil
+}
+
+func (s *Service) Thread(ctx context.Context, opts ThreadOptions) (ThreadResult, error) {
+	now := s.now()
+	db, home, err := openStateDB(ctx, opts.Home, now)
+	if err != nil {
+		return ThreadResult{}, err
+	}
+	defer db.Close()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ThreadResult{}, fmt.Errorf("begin message thread transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	contact, err := resolveContact(ctx, tx, opts.ContactRef)
+	if err != nil {
+		return ThreadResult{}, err
+	}
+	conversation, err := loadConversationByContact(ctx, tx, contact)
+	if err != nil {
+		return ThreadResult{}, err
+	}
+	conversation.Messages, err = listConversationMessages(ctx, tx, conversation.ConversationID, normalizeThreadLimit(opts.Limit))
+	if err != nil {
+		return ThreadResult{}, err
+	}
+	if opts.MarkRead && strings.TrimSpace(conversation.ConversationID) != "" {
+		if err := markConversationRead(ctx, tx, conversation.ConversationID, now); err != nil {
+			return ThreadResult{}, err
+		}
+		conversation.UnreadCount = 0
+	}
+
+	if err := tx.Commit(); err != nil {
+		return ThreadResult{}, fmt.Errorf("commit message thread transaction: %w", err)
+	}
+
+	return ThreadResult{
+		Home:         home,
+		Conversation: conversation,
+		ListedAt:     now.Format(time.RFC3339Nano),
 	}, nil
 }
 
@@ -442,6 +500,35 @@ func ensureConversation(ctx context.Context, tx *sql.Tx, contact contactRecord, 
 		ContactCanonicalID: contact.CanonicalID,
 		ContactStatus:      contact.Status,
 	}, nil
+}
+
+func loadConversationByContact(ctx context.Context, tx *sql.Tx, contact contactRecord) (Conversation, error) {
+	var conversation Conversation
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT conversation_id, last_message_at, last_message_preview, unread_count
+		 FROM conversations
+		 WHERE contact_id = ?
+		 LIMIT 1`,
+		contact.ContactID,
+	).Scan(&conversation.ConversationID, &conversation.LastMessageAt, &conversation.LastMessagePreview, &conversation.UnreadCount)
+	switch {
+	case err == nil:
+		conversation.ContactID = contact.ContactID
+		conversation.ContactDisplayName = contact.DisplayName
+		conversation.ContactCanonicalID = contact.CanonicalID
+		conversation.ContactStatus = contact.Status
+		return conversation, nil
+	case err == sql.ErrNoRows:
+		return Conversation{
+			ContactID:          contact.ContactID,
+			ContactDisplayName: contact.DisplayName,
+			ContactCanonicalID: contact.CanonicalID,
+			ContactStatus:      contact.Status,
+		}, nil
+	default:
+		return Conversation{}, fmt.Errorf("query message thread conversation: %w", err)
+	}
 }
 
 func insertOutgoingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, body string, now time.Time) (MessageRecord, error) {
@@ -862,6 +949,67 @@ func listOutgoingMessages(ctx context.Context, db *sql.DB) ([]MessageRecord, err
 	return messages, nil
 }
 
+func listConversationMessages(ctx context.Context, tx *sql.Tx, conversationID string, limit int) ([]MessageRecord, error) {
+	if strings.TrimSpace(conversationID) == "" {
+		return []MessageRecord{}, nil
+	}
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT message_id, conversation_id, direction, sender_contact_id, recipient_contact_id,
+		        sender_canonical_id, recipient_route_id, plaintext_body, plaintext_preview,
+		        status, created_at
+		 FROM messages
+		 WHERE conversation_id = ?
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		conversationID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query thread messages: %w", err)
+	}
+	defer rows.Close()
+	var messages []MessageRecord
+	for rows.Next() {
+		var record MessageRecord
+		if err := rows.Scan(
+			&record.MessageID,
+			&record.ConversationID,
+			&record.Direction,
+			&record.SenderContactID,
+			&record.RecipientContactID,
+			&record.SenderCanonicalID,
+			&record.RecipientRouteID,
+			&record.Body,
+			&record.Preview,
+			&record.Status,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan thread message: %w", err)
+		}
+		messages = append(messages, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate thread messages: %w", err)
+	}
+	slices.Reverse(messages)
+	return messages, nil
+}
+
+func markConversationRead(ctx context.Context, tx *sql.Tx, conversationID string, now time.Time) error {
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE conversations
+		 SET unread_count = 0, updated_at = ?
+		 WHERE conversation_id = ?`,
+		now.Format(time.RFC3339Nano),
+		conversationID,
+	); err != nil {
+		return fmt.Errorf("mark conversation read: %w", err)
+	}
+	return nil
+}
+
 func marshalSignedPayload(payload signedMessagePayload) ([]byte, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -876,4 +1024,14 @@ func makePreview(body string) string {
 		preview = string([]rune(preview)[:80])
 	}
 	return preview
+}
+
+func normalizeThreadLimit(limit int) int {
+	if limit <= 0 {
+		return 20
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
 }

@@ -179,4 +179,31 @@ func TestSendAndSyncWithRelay(t *testing.T) {
 	if inbox.Conversations[0].LastMessagePreview != "hello from bob" {
 		t.Fatalf("incoming preview = %q", inbox.Conversations[0].LastMessagePreview)
 	}
+
+	thread, err := service.Thread(context.Background(), ThreadOptions{
+		Home:       aliceHome,
+		ContactRef: "did:key:z6MkBob",
+		Limit:      10,
+		MarkRead:   true,
+	})
+	if err != nil {
+		t.Fatalf("load alice thread: %v", err)
+	}
+	if len(thread.Conversation.Messages) != 1 {
+		t.Fatalf("thread messages = %d, want 1", len(thread.Conversation.Messages))
+	}
+	if thread.Conversation.Messages[0].Body != "hello from bob" {
+		t.Fatalf("thread body = %q, want %q", thread.Conversation.Messages[0].Body, "hello from bob")
+	}
+	if thread.Conversation.UnreadCount != 0 {
+		t.Fatalf("thread unread count = %d, want 0", thread.Conversation.UnreadCount)
+	}
+
+	inboxAfterThread, err := service.Inbox(context.Background(), ListOptions{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("load alice inbox after thread: %v", err)
+	}
+	if inboxAfterThread.Conversations[0].UnreadCount != 0 {
+		t.Fatalf("inbox unread after thread = %d, want 0", inboxAfterThread.Conversations[0].UnreadCount)
+	}
 }

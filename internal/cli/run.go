@@ -812,6 +812,45 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 			fmt.Fprintln(out, "- reply with `linkclaw message send <contact> --body \"...\"`")
 		}
 		return 0
+	case "thread":
+		fs := newFlagSet("message thread", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		limit := fs.Int("limit", 20, "maximum number of messages to show")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("thread"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("thread"), "message thread requires exactly one contact reference")
+		}
+		service := message.NewService()
+		result, err := service.Thread(ctx, message.ThreadOptions{
+			Home:       *home,
+			ContactRef: fs.Args()[0],
+			Limit:      *limit,
+			MarkRead:   true,
+		})
+		if err != nil {
+			return writeMessageError[message.ThreadResult](errOut, out, *jsonOutput, "thread", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "thread", result)
+		}
+		fmt.Fprintln(out, "LinkClaw thread")
+		fmt.Fprintf(out, "contact: %s\n", result.Conversation.ContactDisplayName)
+		fmt.Fprintf(out, "canonical id: %s\n", result.Conversation.ContactCanonicalID)
+		fmt.Fprintf(out, "messages: %d\n", len(result.Conversation.Messages))
+		for _, msg := range result.Conversation.Messages {
+			fmt.Fprintf(out, "- [%s] %s | %s\n", msg.Direction, msg.CreatedAt, msg.Body)
+		}
+		if len(result.Conversation.Messages) == 0 {
+			fmt.Fprintln(out, "No messages in this thread yet.")
+		}
+		return 0
 	case "outbox":
 		fs := newFlagSet("message outbox", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
@@ -1399,6 +1438,7 @@ func printMessageUsage(out io.Writer) {
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  send    Queue a message for one imported contact")
 	fmt.Fprintln(out, "  inbox   List local conversations")
+	fmt.Fprintln(out, "  thread  Show recent messages for one contact")
 	fmt.Fprintln(out, "  outbox  List queued outgoing messages")
 	fmt.Fprintln(out, "  sync    Placeholder for relay sync")
 }
