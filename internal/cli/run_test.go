@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/buildinfo"
+	"github.com/xiewanpeng/claw-identity/internal/card"
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
+	"github.com/xiewanpeng/claw-identity/internal/relayserver"
 
 	_ "modernc.org/sqlite"
 )
@@ -281,6 +283,409 @@ func TestRunPublishDeployCloudflareJSON(t *testing.T) {
 	}
 	if lines[0] != "pages" || lines[1] != "deploy" || lines[3] != "--project-name" || lines[4] != "agent-pages" {
 		t.Fatalf("unexpected deploy args: %v", lines)
+	}
+}
+
+func TestRunCardExportAndVerifyJSON(t *testing.T) {
+	t.Parallel()
+
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	initArgs := []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:key:z6MkAlice",
+		"--display-name", "Alice",
+		"--non-interactive",
+		"--json",
+	}
+	initCode, _, initErr := runForTest(t, initArgs, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	exportCode, exportOut, exportErr := runForTest(t, []string{"card", "export", "--home", home, "--json"}, "")
+	if exportCode != 0 {
+		t.Fatalf("card export exit code = %d, stderr = %s", exportCode, exportErr)
+	}
+
+	var exported struct {
+		SchemaVersion string   `json:"schema_version"`
+		Command       string   `json:"command"`
+		Subcommand    *string  `json:"subcommand"`
+		Timestamp     string   `json:"timestamp"`
+		Warnings      []string `json:"warnings"`
+		OK            bool     `json:"ok"`
+		Result        struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
+		t.Fatalf("unmarshal card export output: %v, output=%s", err, exportOut)
+	}
+	assertEnvelopeMetadata(t, exported.SchemaVersion, exported.Command, exported.Subcommand, exported.Timestamp, exported.Warnings, "card", stringPtr("export"))
+	if !exported.OK {
+		t.Fatalf("expected ok=true output")
+	}
+	if exported.Result.Card.ID != "did:key:z6MkAlice" {
+		t.Fatalf("unexpected exported card id: %s", exported.Result.Card.ID)
+	}
+	if exported.Result.Card.Signature == "" {
+		t.Fatalf("expected exported card signature")
+	}
+
+	cardJSON, err := json.Marshal(exported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal exported card for verify: %v", err)
+	}
+
+	verifyCode, verifyOut, verifyErr := runForTest(t, []string{"card", "verify", "--json", string(cardJSON)}, "")
+	if verifyCode != 0 {
+		t.Fatalf("card verify exit code = %d, stderr = %s", verifyCode, verifyErr)
+	}
+
+	var verified struct {
+		SchemaVersion string   `json:"schema_version"`
+		Command       string   `json:"command"`
+		Subcommand    *string  `json:"subcommand"`
+		Timestamp     string   `json:"timestamp"`
+		Warnings      []string `json:"warnings"`
+		OK            bool     `json:"ok"`
+		Result        struct {
+			Verified bool      `json:"verified"`
+			Card     card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(verifyOut), &verified); err != nil {
+		t.Fatalf("unmarshal card verify output: %v, output=%s", err, verifyOut)
+	}
+	assertEnvelopeMetadata(t, verified.SchemaVersion, verified.Command, verified.Subcommand, verified.Timestamp, verified.Warnings, "card", stringPtr("verify"))
+	if !verified.OK {
+		t.Fatalf("expected ok=true output for verify")
+	}
+	if !verified.Result.Verified {
+		t.Fatalf("expected verify result to be true")
+	}
+	if verified.Result.Card.ID != "did:key:z6MkAlice" {
+		t.Fatalf("unexpected verified card id: %s", verified.Result.Card.ID)
+	}
+}
+
+func TestRunCardImportJSON(t *testing.T) {
+	t.Parallel()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	initArgs := []string{
+		"init",
+		"--home", aliceHome,
+		"--canonical-id", "did:key:z6MkAlice",
+		"--display-name", "Alice",
+		"--non-interactive",
+		"--json",
+	}
+	initCode, _, initErr := runForTest(t, initArgs, "")
+	if initCode != 0 {
+		t.Fatalf("alice init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	exportCode, exportOut, exportErr := runForTest(t, []string{"card", "export", "--home", aliceHome, "--json"}, "")
+	if exportCode != 0 {
+		t.Fatalf("card export exit code = %d, stderr = %s", exportCode, exportErr)
+	}
+
+	var exported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
+		t.Fatalf("unmarshal exported card: %v", err)
+	}
+	cardJSON, err := json.Marshal(exported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal exported card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	bobInitCode, _, bobInitErr := runForTest(t, []string{
+		"init",
+		"--home", bobHome,
+		"--canonical-id", "did:key:z6MkBob",
+		"--display-name", "Bob",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if bobInitCode != 0 {
+		t.Fatalf("bob init exit code = %d, stderr = %s", bobInitCode, bobInitErr)
+	}
+
+	importCode, importOut, importErr := runForTest(t, []string{"card", "import", "--home", bobHome, "--json", string(cardJSON)}, "")
+	if importCode != 0 {
+		t.Fatalf("card import exit code = %d, stderr = %s, stdout = %s", importCode, importErr, importOut)
+	}
+
+	var imported struct {
+		SchemaVersion string   `json:"schema_version"`
+		Command       string   `json:"command"`
+		Subcommand    *string  `json:"subcommand"`
+		Timestamp     string   `json:"timestamp"`
+		Warnings      []string `json:"warnings"`
+		OK            bool     `json:"ok"`
+		Result        struct {
+			ContactID string    `json:"contact_id"`
+			Created   bool      `json:"created"`
+			Card      card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(importOut), &imported); err != nil {
+		t.Fatalf("unmarshal imported card output: %v, output=%s", err, importOut)
+	}
+	assertEnvelopeMetadata(t, imported.SchemaVersion, imported.Command, imported.Subcommand, imported.Timestamp, imported.Warnings, "card", stringPtr("import"))
+	if !imported.OK {
+		t.Fatalf("expected ok=true output for import")
+	}
+	if !imported.Result.Created {
+		t.Fatalf("expected imported contact to be created")
+	}
+	if imported.Result.ContactID == "" {
+		t.Fatalf("expected contact id to be populated")
+	}
+	if imported.Result.Card.ID != "did:key:z6MkAlice" {
+		t.Fatalf("unexpected imported card id: %s", imported.Result.Card.ID)
+	}
+}
+
+func TestRunMessageSendAndOutboxJSON(t *testing.T) {
+	t.Parallel()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	aliceInitCode, _, aliceInitErr := runForTest(t, []string{
+		"init",
+		"--home", aliceHome,
+		"--canonical-id", "did:key:z6MkAlice",
+		"--display-name", "Alice",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if aliceInitCode != 0 {
+		t.Fatalf("alice init exit code = %d, stderr = %s", aliceInitCode, aliceInitErr)
+	}
+	exportCode, exportOut, exportErr := runForTest(t, []string{"card", "export", "--home", aliceHome, "--json"}, "")
+	if exportCode != 0 {
+		t.Fatalf("card export exit code = %d, stderr = %s", exportCode, exportErr)
+	}
+	var exported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
+		t.Fatalf("unmarshal exported card: %v", err)
+	}
+	cardJSON, err := json.Marshal(exported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal exported card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	bobInitCode, _, bobInitErr := runForTest(t, []string{
+		"init",
+		"--home", bobHome,
+		"--canonical-id", "did:key:z6MkBob",
+		"--display-name", "Bob",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if bobInitCode != 0 {
+		t.Fatalf("bob init exit code = %d, stderr = %s", bobInitCode, bobInitErr)
+	}
+	importCode, importOut, importErr := runForTest(t, []string{"card", "import", "--home", bobHome, "--json", string(cardJSON)}, "")
+	if importCode != 0 {
+		t.Fatalf("card import exit code = %d, stderr = %s", importCode, importErr)
+	}
+	var imported struct {
+		Result struct {
+			ContactID string `json:"contact_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(importOut), &imported); err != nil {
+		t.Fatalf("unmarshal imported contact: %v", err)
+	}
+
+	sendCode, sendOut, sendErr := runForTest(t, []string{
+		"message", "send",
+		"--home", bobHome,
+		"--body", "hello alice",
+		"--json",
+		imported.Result.ContactID,
+	}, "")
+	if sendCode != 0 {
+		t.Fatalf("message send exit code = %d, stderr = %s, stdout = %s", sendCode, sendErr, sendOut)
+	}
+	var sent struct {
+		SchemaVersion string   `json:"schema_version"`
+		Command       string   `json:"command"`
+		Subcommand    *string  `json:"subcommand"`
+		Timestamp     string   `json:"timestamp"`
+		Warnings      []string `json:"warnings"`
+		OK            bool     `json:"ok"`
+		Result        struct {
+			Message struct {
+				Status string `json:"status"`
+				Body   string `json:"body"`
+			} `json:"message"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(sendOut), &sent); err != nil {
+		t.Fatalf("unmarshal send output: %v", err)
+	}
+	assertEnvelopeMetadata(t, sent.SchemaVersion, sent.Command, sent.Subcommand, sent.Timestamp, sent.Warnings, "message", stringPtr("send"))
+	if !sent.OK {
+		t.Fatalf("expected message send ok=true")
+	}
+	if sent.Result.Message.Status != "pending" {
+		t.Fatalf("message status = %q, want pending", sent.Result.Message.Status)
+	}
+
+	outboxCode, outboxOut, outboxErr := runForTest(t, []string{"message", "outbox", "--home", bobHome, "--json"}, "")
+	if outboxCode != 0 {
+		t.Fatalf("message outbox exit code = %d, stderr = %s", outboxCode, outboxErr)
+	}
+	var outbox struct {
+		SchemaVersion string   `json:"schema_version"`
+		Command       string   `json:"command"`
+		Subcommand    *string  `json:"subcommand"`
+		Timestamp     string   `json:"timestamp"`
+		Warnings      []string `json:"warnings"`
+		OK            bool     `json:"ok"`
+		Result        struct {
+			Messages []struct {
+				Body   string `json:"body"`
+				Status string `json:"status"`
+			} `json:"messages"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(outboxOut), &outbox); err != nil {
+		t.Fatalf("unmarshal outbox output: %v", err)
+	}
+	assertEnvelopeMetadata(t, outbox.SchemaVersion, outbox.Command, outbox.Subcommand, outbox.Timestamp, outbox.Warnings, "message", stringPtr("outbox"))
+	if len(outbox.Result.Messages) != 1 {
+		t.Fatalf("outbox messages = %d, want 1", len(outbox.Result.Messages))
+	}
+	if outbox.Result.Messages[0].Body != "hello alice" {
+		t.Fatalf("outbox body = %q, want hello alice", outbox.Result.Messages[0].Body)
+	}
+}
+
+func TestRunMessageSyncJSONWithRelay(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	aliceInitCode, _, aliceInitErr := runForTest(t, []string{
+		"init",
+		"--home", aliceHome,
+		"--canonical-id", "did:key:z6MkAlice",
+		"--display-name", "Alice",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if aliceInitCode != 0 {
+		t.Fatalf("alice init exit code = %d, stderr = %s", aliceInitCode, aliceInitErr)
+	}
+	aliceExportCode, aliceExportOut, aliceExportErr := runForTest(t, []string{"card", "export", "--home", aliceHome, "--json"}, "")
+	if aliceExportCode != 0 {
+		t.Fatalf("alice card export exit code = %d, stderr = %s", aliceExportCode, aliceExportErr)
+	}
+	var aliceExported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(aliceExportOut), &aliceExported); err != nil {
+		t.Fatalf("unmarshal alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceExported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	bobInitCode, _, bobInitErr := runForTest(t, []string{
+		"init",
+		"--home", bobHome,
+		"--canonical-id", "did:key:z6MkBob",
+		"--display-name", "Bob",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if bobInitCode != 0 {
+		t.Fatalf("bob init exit code = %d, stderr = %s", bobInitCode, bobInitErr)
+	}
+	bobExportCode, bobExportOut, bobExportErr := runForTest(t, []string{"card", "export", "--home", bobHome, "--json"}, "")
+	if bobExportCode != 0 {
+		t.Fatalf("bob card export exit code = %d, stderr = %s", bobExportCode, bobExportErr)
+	}
+	var bobExported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(bobExportOut), &bobExported); err != nil {
+		t.Fatalf("unmarshal bob card: %v", err)
+	}
+	bobCardJSON, err := json.Marshal(bobExported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal bob card: %v", err)
+	}
+
+	importAliceCode, importAliceOut, importAliceErr := runForTest(t, []string{"card", "import", "--home", bobHome, "--json", string(aliceCardJSON)}, "")
+	if importAliceCode != 0 {
+		t.Fatalf("import alice into bob exit code = %d, stderr = %s, stdout = %s", importAliceCode, importAliceErr, importAliceOut)
+	}
+	var importedAlice struct {
+		Result struct {
+			ContactID string `json:"contact_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(importAliceOut), &importedAlice); err != nil {
+		t.Fatalf("unmarshal alice import: %v", err)
+	}
+	importBobCode, importBobOut, importBobErr := runForTest(t, []string{"card", "import", "--home", aliceHome, "--json", string(bobCardJSON)}, "")
+	if importBobCode != 0 {
+		t.Fatalf("import bob into alice exit code = %d, stderr = %s, stdout = %s", importBobCode, importBobErr, importBobOut)
+	}
+
+	sendCode, sendOut, sendErr := runForTest(t, []string{
+		"message", "send",
+		"--home", bobHome,
+		"--body", "hello from bob",
+		"--json",
+		importedAlice.Result.ContactID,
+	}, "")
+	if sendCode != 0 {
+		t.Fatalf("message send exit code = %d, stderr = %s, stdout = %s", sendCode, sendErr, sendOut)
+	}
+
+	syncCode, syncOut, syncErr := runForTest(t, []string{"message", "sync", "--home", aliceHome, "--json"}, "")
+	if syncCode != 0 {
+		t.Fatalf("message sync exit code = %d, stderr = %s, stdout = %s", syncCode, syncErr, syncOut)
+	}
+	var synced struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Synced int `json:"synced"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(syncOut), &synced); err != nil {
+		t.Fatalf("unmarshal sync output: %v", err)
+	}
+	if !synced.OK || synced.Result.Synced != 1 {
+		t.Fatalf("sync result = %+v, want ok with synced=1", synced)
 	}
 }
 

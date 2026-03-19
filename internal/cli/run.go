@@ -11,10 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiewanpeng/claw-identity/internal/card"
 	"github.com/xiewanpeng/claw-identity/internal/importer"
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/known"
+	"github.com/xiewanpeng/claw-identity/internal/message"
 	"github.com/xiewanpeng/claw-identity/internal/publish"
 	"github.com/xiewanpeng/claw-identity/internal/resolver"
 )
@@ -122,6 +124,17 @@ type indexOutput[T any] struct {
 	Error      string `json:"error,omitempty"`
 }
 
+type cardOutput[T any] struct {
+	SchemaVersion string             `json:"schema_version"`
+	Command       string             `json:"command"`
+	Subcommand    *string            `json:"subcommand"`
+	OK            bool               `json:"ok"`
+	Timestamp     string             `json:"timestamp"`
+	Warnings      []string           `json:"warnings"`
+	Result        T                  `json:"result"`
+	Error         *jsonEnvelopeError `json:"error,omitempty"`
+}
+
 func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		printUsage(out)
@@ -144,6 +157,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return runInspect(ctx, args[1:], out, errOut)
 	case "import":
 		return runImport(ctx, args[1:], out, errOut)
+	case "card":
+		return runCard(ctx, args[1:], out, errOut)
+	case "message":
+		return runMessage(ctx, args[1:], out, errOut)
 	case "index":
 		return runIndex(ctx, args[1:], out, errOut)
 	case "known":
@@ -704,6 +721,289 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 }
 
+func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
+	jsonRequested := hasJSONFlag(args)
+	if len(args) == 0 {
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "message", nil, "message requires a subcommand")
+		}
+		printMessageUsage(out)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		printMessageUsage(out)
+		return 0
+	case "send":
+		fs := newFlagSet("message send", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		body := fs.String("body", "", "message body")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("send"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("send"), "message send requires exactly one contact reference")
+		}
+		service := message.NewService()
+		result, err := service.Send(ctx, message.SendOptions{
+			Home:       *home,
+			ContactRef: fs.Args()[0],
+			Body:       *body,
+		})
+		if err != nil {
+			return writeMessageError[message.SendResult](errOut, out, *jsonOutput, "send", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "send", result)
+		}
+		fmt.Fprintln(out, "Message queued for relay delivery.")
+		fmt.Fprintf(out, "conversation: %s\n", result.Conversation.ConversationID)
+		fmt.Fprintf(out, "message: %s\n", result.Message.MessageID)
+		fmt.Fprintf(out, "status: %s\n", result.Message.Status)
+		fmt.Fprintln(out, "Next:")
+		fmt.Fprintln(out, "- the recipient needs to run `linkclaw message sync` to receive it")
+		fmt.Fprintln(out, "- run `linkclaw message inbox` to review local conversation state")
+		return 0
+	case "inbox":
+		fs := newFlagSet("message inbox", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("inbox"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("inbox"), "message inbox does not accept positional arguments")
+		}
+		service := message.NewService()
+		result, err := service.Inbox(ctx, message.ListOptions{Home: *home})
+		if err != nil {
+			return writeMessageError[message.InboxResult](errOut, out, *jsonOutput, "inbox", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "inbox", result)
+		}
+		fmt.Fprintln(out, "LinkClaw inbox")
+		fmt.Fprintf(out, "conversations: %d\n", len(result.Conversations))
+		hasUnknownSender := false
+		for _, conversation := range result.Conversations {
+			label := "known"
+			if strings.TrimSpace(conversation.ContactStatus) == "discovered" {
+				label = "new sender"
+				hasUnknownSender = true
+			}
+			fmt.Fprintf(out, "- %s | %s | %s | unread=%d | last=%s\n", conversation.ContactDisplayName, conversation.ContactCanonicalID, label, conversation.UnreadCount, conversation.LastMessagePreview)
+		}
+		if hasUnknownSender {
+			fmt.Fprintln(out, "Next:")
+			fmt.Fprintln(out, "- ask the sender for an identity card")
+			fmt.Fprintln(out, "- then run `linkclaw card import <card>` if you want to keep them")
+		} else if len(result.Conversations) > 0 {
+			fmt.Fprintln(out, "Next:")
+			fmt.Fprintln(out, "- reply with `linkclaw message send <contact> --body \"...\"`")
+		}
+		return 0
+	case "outbox":
+		fs := newFlagSet("message outbox", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("outbox"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("outbox"), "message outbox does not accept positional arguments")
+		}
+		service := message.NewService()
+		result, err := service.Outbox(ctx, message.ListOptions{Home: *home})
+		if err != nil {
+			return writeMessageError[message.OutboxResult](errOut, out, *jsonOutput, "outbox", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "outbox", result)
+		}
+		fmt.Fprintln(out, "LinkClaw outbox")
+		fmt.Fprintf(out, "messages: %d\n", len(result.Messages))
+		for _, msg := range result.Messages {
+			fmt.Fprintf(out, "- %s | %s | %s\n", msg.MessageID, msg.Status, msg.Preview)
+		}
+		if len(result.Messages) > 0 {
+			fmt.Fprintln(out, "Next:")
+			fmt.Fprintln(out, "- wait for the recipient to run `linkclaw message sync`")
+		}
+		return 0
+	case "sync":
+		fs := newFlagSet("message sync", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("sync"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("sync"), "message sync does not accept positional arguments")
+		}
+		service := message.NewService()
+		result, err := service.Sync(ctx, message.SyncOptions{Home: *home})
+		if err != nil {
+			return writeMessageError[message.SyncResult](errOut, out, *jsonOutput, "sync", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "sync", result)
+		}
+		fmt.Fprintln(out, "LinkClaw sync completed")
+		fmt.Fprintf(out, "synced: %d\n", result.Synced)
+		fmt.Fprintf(out, "relay calls: %d\n", result.RelayCalls)
+		fmt.Fprintln(out, "Next:")
+		if result.Synced > 0 {
+			fmt.Fprintln(out, "- run `linkclaw message inbox` to read new messages")
+		} else {
+			fmt.Fprintln(out, "- no new messages yet; run `linkclaw message send <contact> --body \"...\"` to start a conversation")
+		}
+		return 0
+	default:
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "message", stringPtr(args[0]), fmt.Sprintf("unknown message subcommand %q", args[0]))
+		}
+		fmt.Fprintf(errOut, "unknown message subcommand %q\n", args[0])
+		printMessageUsage(errOut)
+		return 1
+	}
+}
+
+func runCard(ctx context.Context, args []string, out, errOut io.Writer) int {
+	jsonRequested := hasJSONFlag(args)
+	if len(args) == 0 {
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "card", nil, "card requires a subcommand")
+		}
+		printCardUsage(out)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		printCardUsage(out)
+		return 0
+	case "export":
+		fs := newFlagSet("card export", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "card", stringPtr("export"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "card", stringPtr("export"), "card export does not accept positional arguments")
+		}
+		service := card.NewService()
+		result, err := service.Export(ctx, card.Options{Home: *home})
+		if err != nil {
+			return writeCardError[card.ExportResult](errOut, out, *jsonOutput, "export", err)
+		}
+		if *jsonOutput {
+			return writeCardJSON(errOut, out, "export", result)
+		}
+		encoded, err := json.MarshalIndent(result.Card, "", "  ")
+		if err != nil {
+			fmt.Fprintf(errOut, "encode card export output: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(out, string(encoded))
+		return 0
+	case "verify":
+		fs := newFlagSet("card verify", errOut, jsonRequested)
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "card", stringPtr("verify"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "card", stringPtr("verify"), "card verify requires exactly one input (file path or inline JSON)")
+		}
+		service := card.NewService()
+		result, err := service.Verify(ctx, card.VerifyOptions{Input: fs.Args()[0]})
+		if err != nil {
+			return writeCardError[card.VerifyResult](errOut, out, *jsonOutput, "verify", err)
+		}
+		if *jsonOutput {
+			return writeCardJSON(errOut, out, "verify", result)
+		}
+		fmt.Fprintln(out, "Identity card verified.")
+		fmt.Fprintf(out, "verified: %t\n", result.Verified)
+		fmt.Fprintf(out, "source: %s\n", result.Source)
+		fmt.Fprintf(out, "id: %s\n", result.Card.ID)
+		fmt.Fprintf(out, "name: %s\n", result.Card.DisplayName)
+		fmt.Fprintf(out, "transport: %s\n", result.Card.Messaging.Transport)
+		fmt.Fprintf(out, "recipient: %s\n", result.Card.Messaging.RecipientID)
+		fmt.Fprintln(out, "Next:")
+		fmt.Fprintln(out, "- import it with `linkclaw card import <card>` if you want to save this contact")
+		return 0
+	case "import":
+		fs := newFlagSet("card import", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "card", stringPtr("import"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "card", stringPtr("import"), "card import requires exactly one input (file path or inline JSON)")
+		}
+		service := card.NewService()
+		result, err := service.Import(ctx, card.ImportOptions{
+			Home:  *home,
+			Input: fs.Args()[0],
+		})
+		if err != nil {
+			return writeCardError[card.ImportResult](errOut, out, *jsonOutput, "import", err)
+		}
+		if *jsonOutput {
+			return writeCardJSON(errOut, out, "import", result)
+		}
+		fmt.Fprintln(out, "Contact added to your LinkClaw contacts.")
+		fmt.Fprintf(out, "contact: %s\n", result.ContactID)
+		fmt.Fprintf(out, "created: %t\n", result.Created)
+		fmt.Fprintf(out, "id: %s\n", result.Card.ID)
+		fmt.Fprintf(out, "name: %s\n", result.Card.DisplayName)
+		fmt.Fprintln(out, "Next:")
+		fmt.Fprintln(out, "- send a message with `linkclaw message send <contact> --body \"...\"`")
+		fmt.Fprintln(out, "- or run `linkclaw message inbox` to review conversations")
+		return 0
+	default:
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "card", stringPtr(args[0]), fmt.Sprintf("unknown card subcommand %q", args[0]))
+		}
+		fmt.Fprintf(errOut, "unknown card subcommand %q\n", args[0])
+		printCardUsage(errOut)
+		return 1
+	}
+}
+
 func writeInitError(errOut, out io.Writer, jsonOutput bool, err error) int {
 	if jsonOutput {
 		return writeJSONCommandError(errOut, out, "init", nil, newCommandError(err))
@@ -745,6 +1045,30 @@ func writeKnownError[T any](errOut, out io.Writer, jsonOutput bool, subcommand s
 		return writeJSONCommandError(errOut, out, "known", stringPtr(subcommand), newCommandError(err))
 	}
 	fmt.Fprintf(errOut, "known %s failed: %v\n", subcommand, err)
+	return 1
+}
+
+func writeCardJSON[T any](errOut, out io.Writer, subcommand string, result T) int {
+	return writeJSONCommandResult(errOut, out, "card", stringPtr(subcommand), nil, result)
+}
+
+func writeCardError[T any](errOut, out io.Writer, jsonOutput bool, subcommand string, err error) int {
+	if jsonOutput {
+		return writeJSONCommandError(errOut, out, "card", stringPtr(subcommand), newCommandError(err))
+	}
+	fmt.Fprintf(errOut, "card %s failed: %v\n", subcommand, err)
+	return 1
+}
+
+func writeMessageJSON[T any](errOut, out io.Writer, subcommand string, result T) int {
+	return writeJSONCommandResult(errOut, out, "message", stringPtr(subcommand), nil, result)
+}
+
+func writeMessageError[T any](errOut, out io.Writer, jsonOutput bool, subcommand string, err error) int {
+	if jsonOutput {
+		return writeJSONCommandError(errOut, out, "message", stringPtr(subcommand), newCommandError(err))
+	}
+	fmt.Fprintf(errOut, "message %s failed: %v\n", subcommand, err)
 	return 1
 }
 
@@ -1022,6 +1346,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  publish Compile and bundle publishable identity artifacts")
 	fmt.Fprintln(out, "  inspect Resolve and verify public identity artifacts")
 	fmt.Fprintln(out, "  import  Resolve, verify, and persist a public identity")
+	fmt.Fprintln(out, "  card    Export and verify local identity cards")
+	fmt.Fprintln(out, "  message Queue and inspect local direct messages")
 	fmt.Fprintln(out, "  index   Crawl and search the local read-only public index")
 	fmt.Fprintln(out, "  known   Read and manage the local trust book")
 }
@@ -1050,4 +1376,29 @@ func printIndexUsage(out io.Writer) {
 	fmt.Fprintln(out, "Subcommands:")
 	fmt.Fprintln(out, "  crawl   Crawl one public identity surface into the local read-only index")
 	fmt.Fprintln(out, "  search  Search index records and show freshness/conflict/source urls")
+}
+
+func printCardUsage(out io.Writer) {
+	fmt.Fprintln(out, "LinkClaw card")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  linkclaw card <subcommand> [flags] [input]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  export  Export the local signed identity card")
+	fmt.Fprintln(out, "  import  Import a verified identity card as a local contact")
+	fmt.Fprintln(out, "  verify  Verify an identity card from a file path or inline JSON")
+}
+
+func printMessageUsage(out io.Writer) {
+	fmt.Fprintln(out, "LinkClaw message")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  linkclaw message <subcommand> [flags] [contact]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  send    Queue a message for one imported contact")
+	fmt.Fprintln(out, "  inbox   List local conversations")
+	fmt.Fprintln(out, "  outbox  List queued outgoing messages")
+	fmt.Fprintln(out, "  sync    Placeholder for relay sync")
 }

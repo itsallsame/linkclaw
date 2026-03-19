@@ -13,6 +13,10 @@
         "type": "string",
         "description": "Default LINKCLAW_HOME passed to commands that support --home."
       },
+      "relayUrl": {
+        "type": "string",
+        "description": "Default LinkClaw relay base URL for direct messaging."
+      },
       "publishOrigin": {
         "type": "string",
         "description": "Default public origin used by the publishing skill when --origin is omitted."
@@ -37,6 +41,10 @@
     "home": {
       "label": "LinkClaw Home",
       "placeholder": "/absolute/path/to/.linkclaw"
+    },
+    "relayUrl": {
+      "label": "Default Relay URL",
+      "placeholder": "http://127.0.0.1:8788"
     },
     "publishOrigin": {
       "label": "Default Publish Origin",

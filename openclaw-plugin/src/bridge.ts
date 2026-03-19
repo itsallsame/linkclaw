@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 export type LinkClawPluginConfig = {
   binaryPath?: string;
   home?: string;
+  relayUrl?: string;
   publishOrigin?: string;
   publishOutput?: string;
   publishTier?: "minimum" | "recommended" | "full";
@@ -19,6 +20,12 @@ export type LinkClawCommand =
   | "publish"
   | "inspect"
   | "import"
+  | "card_export"
+  | "card_import"
+  | "message_send"
+  | "message_inbox"
+  | "message_outbox"
+  | "message_sync"
   | "known_ls"
   | "known_show"
   | "known_trust"
@@ -36,6 +43,7 @@ export type LinkClawBridgeRequest = {
   tier?: string;
   input?: string;
   identifier?: string;
+  body?: string;
   trustLevel?: string;
   riskFlags?: string[];
   clearRiskFlags?: boolean;
@@ -116,6 +124,7 @@ export async function runLinkClaw(
       env: {
         ...process.env,
         LINKCLAW_HOME: prepared.home,
+        ...(config.relayUrl ? { LINKCLAW_RELAY_URL: config.relayUrl } : {}),
       },
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024,
@@ -260,6 +269,30 @@ export function buildLinkClawArgs(
       }
       args.push(request.input);
       return args;
+    case "card_export":
+      return ["card", "export", "--home", home, "--json"];
+    case "card_import":
+      requireField(request.input, "input");
+      return ["card", "import", "--home", home, "--json", request.input];
+    case "message_send":
+      requireField(request.identifier, "identifier");
+      requireField(request.body, "body");
+      return [
+        "message",
+        "send",
+        "--home",
+        home,
+        "--body",
+        request.body,
+        "--json",
+        request.identifier,
+      ];
+    case "message_inbox":
+      return ["message", "inbox", "--home", home, "--json"];
+    case "message_outbox":
+      return ["message", "outbox", "--home", home, "--json"];
+    case "message_sync":
+      return ["message", "sync", "--home", home, "--json"];
     case "known_ls":
       return ["known", "ls", "--home", home, "--json"];
     case "known_show":
@@ -398,6 +431,12 @@ function normalizeCommand(raw: string): LinkClawCommand {
     case "publish":
     case "inspect":
     case "import":
+    case "card_export":
+    case "card_import":
+    case "message_send":
+    case "message_inbox":
+    case "message_outbox":
+    case "message_sync":
     case "known_ls":
     case "known_show":
     case "known_trust":

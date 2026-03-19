@@ -13,7 +13,8 @@ This plugin keeps OpenClaw on the safe side of the LinkClaw boundary:
 - `index.ts`: OpenClaw entrypoint
 - `src/bridge.ts`: binary discovery, command mapping, JSON parsing, error propagation
 - `src/discovery.ts`: passive discovery, known-contact dedupe, and share helpers
-- `src/commands.ts`: slash commands for import/share flows
+- `src/commands.ts`: slash commands for import/share/message flows
+- `src/messaging.ts`: background sync and unknown-sender prompts
 - `src/publish-skill.ts`: publish skill adapter and manifest fallback
 - `skills/linkclaw-publish/SKILL.md`: user-invocable publishing skill
 
@@ -43,6 +44,7 @@ pnpm add linkclaw-openclaw-plugin
         "config": {
           "binaryPath": "/absolute/path/to/linkclaw",
           "home": "/absolute/path/to/.linkclaw",
+          "relayUrl": "http://127.0.0.1:8788",
           "publishOrigin": "https://agent.example",
           "publishOutput": "/absolute/path/to/publish",
           "publishTier": "recommended"
@@ -61,6 +63,7 @@ Configure under `plugins.entries.linkclaw.config`:
 {
   "binaryPath": "/absolute/path/to/linkclaw",
   "home": "/absolute/path/to/.linkclaw",
+  "relayUrl": "http://127.0.0.1:8788",
   "publishOrigin": "https://agent.example",
   "publishOutput": "/absolute/path/to/publish",
   "publishTier": "recommended"
@@ -73,6 +76,7 @@ Config notes:
 
 - `binaryPath`: preferred; use it when the OpenClaw host is not running inside this repository.
 - `home`: default `LINKCLAW_HOME` for `init`, `publish`, `import`, and `known_*`.
+- `relayUrl`: default `LINKCLAW_RELAY_URL` for card export, message send, and message sync.
 - `publishOrigin`: default public origin for `/linkclaw-share` and `/linkclaw-publish`.
 - `publishOutput`: default publish directory; falls back to `<home>/publish`.
 - `publishTier`: default publish tier for the publish skill.
@@ -89,8 +93,18 @@ Config notes:
   - imports a discovered `did.json` or `agent-card.json` link into the local known contacts book
 - Command: `/linkclaw-share`
   - returns the published agent-card and did.json links for the configured origin
+- Command: `/linkclaw-connect`
+  - imports a local identity card into contacts
+- Command: `/linkclaw-message`
+  - sends a direct message to an imported contact
+- Command: `/linkclaw-inbox`
+  - lists local conversations and flags unknown senders
+- Command: `/linkclaw-sync`
+  - syncs relay-backed messages into the local inbox
 - Hook: `message:preprocessed`
   - watches inbound messages for explicit `did.json` or `agent-card.json` URLs, runs `linkclaw inspect`, and prompts for import unless the identity is already known
+
+If your OpenClaw runtime exposes lifecycle events, the plugin also runs background sync on session start and inbound message receive. When new relay messages arrive from an unknown sender, the plugin adds a prompt telling the user to open `/linkclaw-inbox` and request an identity card before saving the sender as a contact.
 
 ## Passive Discovery
 
@@ -111,6 +125,16 @@ By default the import command keeps LinkClaw's core safety checks: discovered or
 - `/.well-known/did.json`
 
 If your OpenClaw runtime exposes the lifecycle hook API, outbound messages that already contain the configured agent-card URL will have the matching `did.json` URL appended automatically.
+
+## Direct Messaging Flow
+
+1. Install the plugin and configure `binaryPath`, `home`, and `relayUrl`.
+2. Initialize LinkClaw once with `linkclaw init`.
+3. Share a signed identity card with `/linkclaw-share` or `linkclaw card export`.
+4. Import the other side with `/linkclaw-connect <card>`.
+5. Send a message with `/linkclaw-message <contact> <text>`.
+6. Use `/linkclaw-sync` or let the lifecycle hook sync automatically.
+7. Review conversations with `/linkclaw-inbox`.
 
 ## FAQ
 
