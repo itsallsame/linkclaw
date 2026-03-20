@@ -20,6 +20,9 @@
   "homepage": "https://github.com/wanpengxie/claw-identity/tree/main/openclaw-plugin",
   "license": "UNLICENSED",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "files": [
     "README.md",
     "index.ts",
@@ -31,6 +34,8 @@
     "extensions": ["./index.ts"]
   },
   "scripts": {
-    "test": "node --test test/**/*.test.ts"
+    "test": "node --test test/**/*.test.ts",
+    "pack:plugin": "npm pack",
+    "pack:plugin:tgz": "npm pack"
   }
 }

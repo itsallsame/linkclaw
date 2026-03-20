@@ -120,13 +120,25 @@ The CLI prefers a global `wrangler` binary and falls back to `npx wrangler@lates
 
 The OpenClaw integration lives in [`openclaw-plugin`](openclaw-plugin/README.md).
 
-From an OpenClaw workspace:
+Supported install paths follow normal OpenClaw plugin delivery:
+
+- development checkout:
 
 ```bash
-pnpm add linkclaw-openclaw-plugin
+openclaw plugins install -l /path/to/linkclaw/openclaw-plugin
+```
+
+- packaged tarball:
+
+```bash
+cd /path/to/linkclaw/openclaw-plugin
+npm run pack:plugin:tgz
+openclaw plugins install ./linkclaw-0.1.0.tgz
 ```
 
 The package README covers plugin registration, `binaryPath` / `home` / `publishOrigin` config, passive discovery, and the `/linkclaw-import` plus `/linkclaw-share` commands.
+
+For a first-time end-user install and first-run flow, see [OpenClaw User Manual (ZH)](docs/OPENCLAW_USER_MANUAL_ZH.md).
 
 ## Docs
 
@@ -134,4 +146,9 @@ Current milestone validation for the OpenClaw natural-language messaging MVP is 
 
 - [Quickstart](docs/quickstart.md)
 - [Cloudflare Pages Deployment](docs/deploy-cloudflare.md)
+- [OpenClaw User Manual (ZH)](docs/OPENCLAW_USER_MANUAL_ZH.md)
+- [OpenClaw Minimal Acceptance (ZH)](docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
+- [OpenClaw Minimal Plugin Config](docs/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json)
+- [OpenClaw Plugin Release Checklist](docs/OPENCLAW_PLUGIN_RELEASE_CHECKLIST.md)
 - [V0 Messaging Plan](docs/v0-messaging-plan.md)
+- [Agent-Social Runtime Design Index](docs/agent-social-runtime-index.md)

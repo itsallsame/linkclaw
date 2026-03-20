@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +17,8 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 	"github.com/xiewanpeng/claw-identity/internal/migrate"
 	"github.com/xiewanpeng/claw-identity/internal/relayclient"
+	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
 
 	_ "modernc.org/sqlite"
 )
@@ -104,6 +105,30 @@ type SyncResult struct {
 	SyncedAt   string `json:"synced_at"`
 }
 
+type StatusResult struct {
+	Home                   string   `json:"home"`
+	SelfID                 string   `json:"self_id,omitempty"`
+	DisplayName            string   `json:"display_name,omitempty"`
+	PeerID                 string   `json:"peer_id,omitempty"`
+	TransportCapabilities  []string `json:"transport_capabilities,omitempty"`
+	Contacts               int      `json:"contacts"`
+	Conversations          int      `json:"conversations"`
+	Unread                 int      `json:"unread"`
+	PendingOutbox          int      `json:"pending_outbox"`
+	PresenceEntries        int      `json:"presence_entries"`
+	ReachablePresence      int      `json:"reachable_presence"`
+	StoreForwardRoutes     int      `json:"store_forward_routes"`
+	LastStoreForwardSyncAt string   `json:"last_store_forward_sync_at,omitempty"`
+	LastStoreForwardResult string   `json:"last_store_forward_result,omitempty"`
+	LastStoreForwardError  string   `json:"last_store_forward_error,omitempty"`
+	LastRecoveredCount     int      `json:"last_recovered_count"`
+	LastAnnounceAt         string   `json:"last_announce_at,omitempty"`
+	RuntimeMode            string   `json:"runtime_mode,omitempty"`
+	BackgroundRuntime      bool     `json:"background_runtime"`
+	DirectEnabled          bool     `json:"direct_enabled"`
+	StatusAt               string   `json:"status_at"`
+}
+
 type ThreadResult struct {
 	Home         string       `json:"home"`
 	Conversation Conversation `json:"conversation"`
@@ -165,6 +190,10 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 		return SendResult{}, err
 	}
 	defer db.Close()
+	selfProfile, err := loadSelfMessagingProfile(ctx, db, home)
+	if err != nil {
+		return SendResult{}, err
+	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -191,10 +220,18 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 	if err := tx.Commit(); err != nil {
 		return SendResult{}, fmt.Errorf("commit message send transaction: %w", err)
 	}
-	if contact.RelayURL != "" {
-		record, err = s.deliverOutgoing(ctx, home, record, contact, now)
+	if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
+		return SendResult{}, err
+	}
+	if contact.RelayURL != "" || directTransportEnabled() {
+		runtimeResult, err := s.sendThroughRuntime(ctx, home, selfProfile, contact, record, now)
 		if err != nil {
 			record.Status = StatusFailed
+		} else {
+			record.Status = runtimeResult.Status
+			if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
+				return SendResult{}, err
+			}
 		}
 	}
 	return SendResult{
@@ -207,13 +244,11 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 
 func (s *Service) Inbox(ctx context.Context, opts ListOptions) (InboxResult, error) {
 	now := s.now()
-	db, home, err := openStateDB(ctx, opts.Home, now)
+	_, home, err := openStateDB(ctx, opts.Home, now)
 	if err != nil {
 		return InboxResult{}, err
 	}
-	defer db.Close()
-
-	conversations, err := listConversations(ctx, db)
+	conversations, err := loadRuntimeInbox(ctx, home, now)
 	if err != nil {
 		return InboxResult{}, err
 	}
@@ -226,13 +261,11 @@ func (s *Service) Inbox(ctx context.Context, opts ListOptions) (InboxResult, err
 
 func (s *Service) Outbox(ctx context.Context, opts ListOptions) (OutboxResult, error) {
 	now := s.now()
-	db, home, err := openStateDB(ctx, opts.Home, now)
+	_, home, err := openStateDB(ctx, opts.Home, now)
 	if err != nil {
 		return OutboxResult{}, err
 	}
-	defer db.Close()
-
-	messages, err := listOutgoingMessages(ctx, db)
+	messages, err := loadRuntimeOutbox(ctx, home, now)
 	if err != nil {
 		return OutboxResult{}, err
 	}
@@ -250,34 +283,22 @@ func (s *Service) Thread(ctx context.Context, opts ThreadOptions) (ThreadResult,
 		return ThreadResult{}, err
 	}
 	defer db.Close()
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return ThreadResult{}, fmt.Errorf("begin message thread transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	contact, err := resolveContact(ctx, tx, opts.ContactRef)
-	if err != nil {
-		return ThreadResult{}, err
-	}
-	conversation, err := loadConversationByContact(ctx, tx, contact)
-	if err != nil {
-		return ThreadResult{}, err
-	}
-	conversation.Messages, err = listConversationMessages(ctx, tx, conversation.ConversationID, normalizeThreadLimit(opts.Limit))
+	conversation, err := loadRuntimeThread(ctx, home, opts.ContactRef, normalizeThreadLimit(opts.Limit), opts.MarkRead, now)
 	if err != nil {
 		return ThreadResult{}, err
 	}
 	if opts.MarkRead && strings.TrimSpace(conversation.ConversationID) != "" {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return ThreadResult{}, fmt.Errorf("begin message thread read-mark transaction: %w", err)
+		}
 		if err := markConversationRead(ctx, tx, conversation.ConversationID, now); err != nil {
+			tx.Rollback()
 			return ThreadResult{}, err
 		}
-		conversation.UnreadCount = 0
-	}
-
-	if err := tx.Commit(); err != nil {
-		return ThreadResult{}, fmt.Errorf("commit message thread transaction: %w", err)
+		if err := tx.Commit(); err != nil {
+			return ThreadResult{}, fmt.Errorf("commit message thread read-mark transaction: %w", err)
+		}
 	}
 
 	return ThreadResult{
@@ -306,61 +327,62 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error
 			return SyncResult{Home: home, Synced: 0, RelayCalls: 0, SyncedAt: now.Format(time.RFC3339Nano)}, nil
 		}
 	}
-
-	cursor, err := loadSyncCursor(ctx, db, selfProfile.SelfID, relayURL)
+	syncResult, err := s.syncThroughRuntime(ctx, home, selfProfile, relayURL, now)
 	if err != nil {
-		return SyncResult{}, err
-	}
-	pulled, err := s.relayClient().Pull(ctx, relayURL, selfProfile.RecipientID, cursor)
-	if err != nil {
-		return SyncResult{}, err
-	}
-	if len(pulled.Messages) == 0 {
-		return SyncResult{Home: home, Synced: 0, RelayCalls: 1, SyncedAt: now.Format(time.RFC3339Nano)}, nil
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return SyncResult{}, fmt.Errorf("begin message sync transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	synced := 0
-	for _, pulledMessage := range pulled.Messages {
-		plaintext, preview, err := decryptIncomingMessage(selfProfile, pulledMessage)
-		if err != nil {
-			return SyncResult{}, err
-		}
-		contact, err := ensureIncomingContact(ctx, tx, pulledMessage, now)
-		if err != nil {
-			return SyncResult{}, err
-		}
-		conversation, err := ensureConversation(ctx, tx, contact, now)
-		if err != nil {
-			return SyncResult{}, err
-		}
-		if err := insertIncomingMessage(ctx, tx, conversation, contact, pulledMessage, plaintext, preview, now); err != nil {
-			return SyncResult{}, err
-		}
-		synced++
-	}
-	if err := saveSyncCursor(ctx, tx, selfProfile.SelfID, relayURL, pulled.NextCursor, now); err != nil {
-		return SyncResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return SyncResult{}, fmt.Errorf("commit message sync transaction: %w", err)
-	}
-	if err := s.relayClient().Ack(ctx, relayURL, relayclient.AckRequest{
-		RecipientID: selfProfile.RecipientID,
-		Cursor:      pulled.NextCursor,
-	}); err != nil {
 		return SyncResult{}, err
 	}
 	return SyncResult{
 		Home:       home,
-		Synced:     synced,
-		RelayCalls: 1,
+		Synced:     syncResult.Synced,
+		RelayCalls: len(syncResult.RoutesUsed),
 		SyncedAt:   now.Format(time.RFC3339Nano),
+	}, nil
+}
+
+func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, error) {
+	now := s.now()
+	db, home, err := openStateDB(ctx, opts.Home, now)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	defer db.Close()
+
+	store := agentruntime.NewStoreWithDB(db, now)
+	if err := syncRuntimeSelfIdentity(ctx, db, store); err != nil {
+		return StatusResult{}, err
+	}
+	if selfProfile, err := loadSelfMessagingProfile(ctx, db, home); err == nil {
+		if err := s.ensureDirectRuntimeRegistration(ctx, home, selfProfile, now); err != nil {
+			return StatusResult{}, err
+		}
+	}
+	summary, err := store.LoadStatusSummary(ctx)
+	if err != nil {
+		return StatusResult{}, err
+	}
+
+	return StatusResult{
+		Home:                   home,
+		SelfID:                 summary.SelfID,
+		DisplayName:            summary.DisplayName,
+		PeerID:                 summary.PeerID,
+		TransportCapabilities:  summary.TransportCapabilities,
+		Contacts:               summary.Contacts,
+		Conversations:          summary.Conversations,
+		Unread:                 summary.Unread,
+		PendingOutbox:          summary.PendingOutbox,
+		PresenceEntries:        summary.PresenceEntries,
+		ReachablePresence:      summary.ReachablePresence,
+		StoreForwardRoutes:     summary.StoreForwardRoutes,
+		LastStoreForwardSyncAt: summary.LastStoreForwardSyncAt,
+		LastStoreForwardResult: summary.LastStoreForwardResult,
+		LastStoreForwardError:  summary.LastStoreForwardError,
+		LastRecoveredCount:     summary.LastStoreForwardRecover,
+		LastAnnounceAt:         summary.LastAnnounceAt,
+		RuntimeMode:            agentruntime.RuntimeMode(),
+		BackgroundRuntime:      agentruntime.BackgroundRuntimeEnabled(),
+		DirectEnabled:          directTransportEnabled(),
+		StatusAt:               now.Format(time.RFC3339Nano),
 	}, nil
 }
 
@@ -500,35 +522,6 @@ func ensureConversation(ctx context.Context, tx *sql.Tx, contact contactRecord, 
 		ContactCanonicalID: contact.CanonicalID,
 		ContactStatus:      contact.Status,
 	}, nil
-}
-
-func loadConversationByContact(ctx context.Context, tx *sql.Tx, contact contactRecord) (Conversation, error) {
-	var conversation Conversation
-	err := tx.QueryRowContext(
-		ctx,
-		`SELECT conversation_id, last_message_at, last_message_preview, unread_count
-		 FROM conversations
-		 WHERE contact_id = ?
-		 LIMIT 1`,
-		contact.ContactID,
-	).Scan(&conversation.ConversationID, &conversation.LastMessageAt, &conversation.LastMessagePreview, &conversation.UnreadCount)
-	switch {
-	case err == nil:
-		conversation.ContactID = contact.ContactID
-		conversation.ContactDisplayName = contact.DisplayName
-		conversation.ContactCanonicalID = contact.CanonicalID
-		conversation.ContactStatus = contact.Status
-		return conversation, nil
-	case err == sql.ErrNoRows:
-		return Conversation{
-			ContactID:          contact.ContactID,
-			ContactDisplayName: contact.DisplayName,
-			ContactCanonicalID: contact.CanonicalID,
-			ContactStatus:      contact.Status,
-		}, nil
-	default:
-		return Conversation{}, fmt.Errorf("query message thread conversation: %w", err)
-	}
 }
 
 func insertOutgoingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, body string, now time.Time) (MessageRecord, error) {
@@ -802,6 +795,46 @@ func ensureIncomingContact(ctx context.Context, tx *sql.Tx, msg relayclient.Pull
 	}, nil
 }
 
+func ensureDirectIncomingContact(ctx context.Context, tx *sql.Tx, env transport.Envelope, now time.Time) (contactRecord, error) {
+	var contact contactRecord
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, status
+		 FROM contacts
+		 WHERE canonical_id = ?
+		 LIMIT 1`,
+		env.SenderID,
+	).Scan(&contact.ContactID, &contact.CanonicalID, &contact.DisplayName, &contact.RecipientID, &contact.SigningPublicKey, &contact.EncryptionPublicKey, &contact.RelayURL, &contact.Status)
+	switch {
+	case err == nil:
+		return contact, nil
+	case err != sql.ErrNoRows:
+		return contactRecord{}, fmt.Errorf("query incoming direct sender contact: %w", err)
+	}
+	contactID, err := ids.New("contact")
+	if err != nil {
+		return contactRecord{}, err
+	}
+	stamp := now.Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO contacts (contact_id, canonical_id, display_name, status, created_at)
+		 VALUES (?, ?, ?, 'discovered', ?)`,
+		contactID,
+		env.SenderID,
+		env.SenderID,
+		stamp,
+	); err != nil {
+		return contactRecord{}, fmt.Errorf("insert discovered direct sender: %w", err)
+	}
+	return contactRecord{
+		ContactID:   contactID,
+		CanonicalID: env.SenderID,
+		DisplayName: env.SenderID,
+		Status:      "discovered",
+	}, nil
+}
+
 func decryptIncomingMessage(selfProfile selfMessagingProfile, msg relayclient.PullMessage) (string, string, error) {
 	payload := signedMessagePayload{
 		MessageID:          msg.MessageID,
@@ -872,128 +905,43 @@ func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Convers
 	return nil
 }
 
-func listConversations(ctx context.Context, db *sql.DB) ([]Conversation, error) {
-	rows, err := db.QueryContext(
+func insertDirectIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, selfProfile selfMessagingProfile, env transport.Envelope, now time.Time) error {
+	createdAt := now.Format(time.RFC3339Nano)
+	preview := makePreview(env.Plaintext)
+	if _, err := tx.ExecContext(
 		ctx,
-		`SELECT c.conversation_id, c.contact_id, ct.display_name, ct.canonical_id, ct.status,
-		        c.last_message_at, c.last_message_preview, c.unread_count
-		 FROM conversations c
-		 JOIN contacts ct ON ct.contact_id = c.contact_id
-		 ORDER BY c.updated_at DESC, c.created_at DESC`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query conversations: %w", err)
+		`INSERT OR IGNORE INTO messages (
+			message_id, conversation_id, direction, sender_contact_id,
+			sender_canonical_id, recipient_route_id, plaintext_body, plaintext_preview,
+			status, created_at, synced_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		env.MessageID,
+		conversation.ConversationID,
+		DirectionIncoming,
+		contact.ContactID,
+		env.SenderID,
+		selfProfile.RecipientID,
+		env.Plaintext,
+		preview,
+		StatusQueued,
+		createdAt,
+		createdAt,
+	); err != nil {
+		return fmt.Errorf("insert direct incoming message: %w", err)
 	}
-	defer rows.Close()
-	var conversations []Conversation
-	for rows.Next() {
-		var conversation Conversation
-		if err := rows.Scan(
-			&conversation.ConversationID,
-			&conversation.ContactID,
-			&conversation.ContactDisplayName,
-			&conversation.ContactCanonicalID,
-			&conversation.ContactStatus,
-			&conversation.LastMessageAt,
-			&conversation.LastMessagePreview,
-			&conversation.UnreadCount,
-		); err != nil {
-			return nil, fmt.Errorf("scan conversation: %w", err)
-		}
-		conversations = append(conversations, conversation)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate conversations: %w", err)
-	}
-	return conversations, nil
-}
-
-func listOutgoingMessages(ctx context.Context, db *sql.DB) ([]MessageRecord, error) {
-	rows, err := db.QueryContext(
+	if _, err := tx.ExecContext(
 		ctx,
-		`SELECT message_id, conversation_id, direction, sender_contact_id, recipient_contact_id,
-		        sender_canonical_id, recipient_route_id, plaintext_body, plaintext_preview,
-		        status, created_at
-		 FROM messages
-		 WHERE direction = ?
-		 ORDER BY created_at DESC`,
-		DirectionOutgoing,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query outgoing messages: %w", err)
+		`UPDATE conversations
+		 SET last_message_at = ?, last_message_preview = ?, unread_count = unread_count + 1, updated_at = ?
+		 WHERE conversation_id = ?`,
+		createdAt,
+		preview,
+		createdAt,
+		conversation.ConversationID,
+	); err != nil {
+		return fmt.Errorf("update conversation for direct incoming message: %w", err)
 	}
-	defer rows.Close()
-	var messages []MessageRecord
-	for rows.Next() {
-		var record MessageRecord
-		if err := rows.Scan(
-			&record.MessageID,
-			&record.ConversationID,
-			&record.Direction,
-			&record.SenderContactID,
-			&record.RecipientContactID,
-			&record.SenderCanonicalID,
-			&record.RecipientRouteID,
-			&record.Body,
-			&record.Preview,
-			&record.Status,
-			&record.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan outgoing message: %w", err)
-		}
-		messages = append(messages, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate outgoing messages: %w", err)
-	}
-	return messages, nil
-}
-
-func listConversationMessages(ctx context.Context, tx *sql.Tx, conversationID string, limit int) ([]MessageRecord, error) {
-	if strings.TrimSpace(conversationID) == "" {
-		return []MessageRecord{}, nil
-	}
-	rows, err := tx.QueryContext(
-		ctx,
-		`SELECT message_id, conversation_id, direction, sender_contact_id, recipient_contact_id,
-		        sender_canonical_id, recipient_route_id, plaintext_body, plaintext_preview,
-		        status, created_at
-		 FROM messages
-		 WHERE conversation_id = ?
-		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		conversationID,
-		limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query thread messages: %w", err)
-	}
-	defer rows.Close()
-	var messages []MessageRecord
-	for rows.Next() {
-		var record MessageRecord
-		if err := rows.Scan(
-			&record.MessageID,
-			&record.ConversationID,
-			&record.Direction,
-			&record.SenderContactID,
-			&record.RecipientContactID,
-			&record.SenderCanonicalID,
-			&record.RecipientRouteID,
-			&record.Body,
-			&record.Preview,
-			&record.Status,
-			&record.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan thread message: %w", err)
-		}
-		messages = append(messages, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate thread messages: %w", err)
-	}
-	slices.Reverse(messages)
-	return messages, nil
+	return nil
 }
 
 func markConversationRead(ctx context.Context, tx *sql.Tx, conversationID string, now time.Time) error {

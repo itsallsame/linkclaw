@@ -20,6 +20,43 @@ This plugin keeps OpenClaw on the safe side of the LinkClaw boundary:
 
 ## Install
 
+If you want the shortest user-facing path first, start with [OpenClaw User Manual (ZH)](../docs/OPENCLAW_USER_MANUAL_ZH.md).
+
+For the shortest go/no-go validation on a clean host, use [OpenClaw Minimal Acceptance (ZH)](../docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md) and [OpenClaw Minimal Plugin Config](../docs/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json).
+
+### Zero-config baseline
+
+If the OpenClaw host can already find `linkclaw` on `PATH`, the plugin now works with a much smaller config:
+
+```json
+{
+  "plugins": {
+    "allow": ["linkclaw"],
+    "entries": {
+      "linkclaw": {
+        "enabled": true,
+        "config": {
+          "relayUrl": "http://127.0.0.1:8788"
+        }
+      }
+    }
+  }
+}
+```
+
+Defaults:
+
+- `binaryPath`: optional when `linkclaw` is already discoverable via `LINKCLAW_BINARY`, repo-local candidates, or `PATH`
+- `home`: defaults to `~/.linkclaw`
+- `relayUrl`: defaults to `http://127.0.0.1:8788`, and can still be overridden by config or `LINKCLAW_RELAY_URL`
+
+For most local installs, the fastest path is:
+
+1. install `linkclaw` somewhere on `PATH`
+2. install the plugin
+3. start a relay on `http://127.0.0.1:8788` or override it with `relayUrl`
+4. run `/linkclaw-onboarding`
+
 ### Development checkout
 
 1. Build the LinkClaw core binary.
@@ -75,7 +112,7 @@ Expected signals:
 
 If the host is not initialized yet, `state: not initialized` is expected at this point.
 
-### Published package
+### Packaged plugin (`.tgz`)
 
 1. Install or build the LinkClaw core binary.
 
@@ -84,13 +121,20 @@ go install github.com/xiewanpeng/claw-identity/cmd/linkclaw@latest
 linkclaw version
 ```
 
-2. Add the plugin to your OpenClaw workspace.
+2. Build an installable plugin tarball.
 
 ```bash
-pnpm add linkclaw-openclaw-plugin
+cd openclaw-plugin
+npm run pack:plugin:tgz
 ```
 
-3. Register it in your OpenClaw config.
+3. Add the plugin to your OpenClaw workspace.
+
+```bash
+openclaw plugins install ./linkclaw-<version>.tgz
+```
+
+4. Register it in your OpenClaw config.
 
 ```json
 {
@@ -114,13 +158,25 @@ pnpm add linkclaw-openclaw-plugin
 }
 ```
 
-4. Validate the plugin before first use.
+5. Validate the plugin before first use.
 
 ```text
 /linkclaw-setup --check-only
 ```
 
 `plugins.allow` is recommended on real hosts. Without it, OpenClaw can still load the plugin, but it will warn that non-bundled plugins may auto-load.
+
+### Future npm package
+
+This repository is now aligned for directory installs and `.tgz` installs.
+
+The intended final end-user install command, once the plugin is published to npm, is:
+
+```bash
+openclaw plugins install <npm-package-spec>
+```
+
+Until that publish path is in place, treat `.tgz` as the release artifact for non-developer installs.
 
 ## Config
 
@@ -144,7 +200,7 @@ Config notes:
 
 - `binaryPath`: preferred; use it when the OpenClaw host is not running inside this repository.
 - `home`: default `LINKCLAW_HOME` for `init`, `publish`, `import`, and `known_*`.
-- `relayUrl`: default `LINKCLAW_RELAY_URL` for card export, message send, and message sync.
+- `relayUrl`: default `LINKCLAW_RELAY_URL` for card export, message send, and message sync. If omitted, the plugin uses the built-in local preset `http://127.0.0.1:8788`, and still allows `LINKCLAW_RELAY_URL` from the host environment to override it.
 - `publishOrigin`: default public origin for `/linkclaw-share` and `/linkclaw-publish`.
 - `publishOutput`: default publish directory; falls back to `<home>/publish`.
 - `publishTier`: default publish tier for the publish skill.
@@ -171,8 +227,12 @@ Before trying A/B messaging, verify these host-level conditions:
   - generic bridge for `init`, `publish`, `inspect`, `import`, and `known_*`
 - Tool: `linkclaw_publish`
   - publishing skill adapter with manifest fallback
+- Tool: `linkclaw_onboarding`
+  - first-run readiness check and identity bootstrap for normal OpenClaw users
 - Skill: `/linkclaw-publish`
   - dispatches raw args directly to `linkclaw_publish`
+- Command: `/linkclaw-onboarding`
+  - first-run entrypoint that defaults to a readiness check, then upgrades to full setup when you provide a display name
 - Command: `/linkclaw-import`
   - imports a discovered `did.json` or `agent-card.json` link into the local known contacts book
 - Command: `/linkclaw-status`
@@ -204,19 +264,30 @@ If your OpenClaw runtime exposes lifecycle events, the plugin also runs backgrou
 
 ## First Use
 
-1. Configure `binaryPath`, `home`, and `relayUrl`.
-2. Run `/linkclaw-setup --canonical-id <did:key|did:web> --display-name <name>`.
+Shortest path:
+
+1. Make sure `linkclaw` is either on `PATH` or configured via `binaryPath`.
+2. Make sure one relay URL is available through `relayUrl` config or `LINKCLAW_RELAY_URL`.
+3. Run `/linkclaw-onboarding`.
+4. Run `/linkclaw-onboarding --display-name <name>`.
+5. Run `/linkclaw-share --card`.
+
+Extended path:
+
+1. Make sure `linkclaw` is either on `PATH` or configured via `binaryPath`.
+2. Make sure one relay URL is available through `relayUrl` config or `LINKCLAW_RELAY_URL`.
+3. Run `/linkclaw-setup --display-name <name>`.
    It now reports lightweight setup checks for the resolved binary path, relay reachability, and publish-origin readiness.
    If you only want to validate the environment first, run `/linkclaw-setup --check-only`.
    You can also run `/linkclaw-status` at any time to review readiness, contacts, and inbox state in one place.
-3. Run `/linkclaw-share` after you have published a bundle, or `/linkclaw-share --card` if you want to exchange a raw signed identity card directly.
-4. On the other side, run `/linkclaw-connect <card-or-url>`.
+4. Run `/linkclaw-share` after you have published a bundle, or `/linkclaw-share --card` if you want to exchange a raw signed identity card directly.
+5. On the other side, run `/linkclaw-connect <card-or-url>`.
    A successful import now prints copy-ready follow-up commands for `/linkclaw-message`, `/linkclaw-thread`, and `/linkclaw-share --card`.
-5. Review saved contacts with `/linkclaw-contacts` or filter with `/linkclaw-contacts <query>`.
-6. Search saved contacts quickly with `/linkclaw-find <query>`.
-7. Start messaging with `/linkclaw-message <contact> <text>`.
-8. Review one conversation with `/linkclaw-thread <contact>`.
-9. Reply in-place with `/linkclaw-reply <contact> <text>`.
+6. Review saved contacts with `/linkclaw-contacts` or filter with `/linkclaw-contacts <query>`.
+7. Search saved contacts quickly with `/linkclaw-find <query>`.
+8. Start messaging with `/linkclaw-message <contact> <text>`.
+9. Review one conversation with `/linkclaw-thread <contact>`.
+10. Reply in-place with `/linkclaw-reply <contact> <text>`.
 
 ## Verification Checklist
 
@@ -237,7 +308,7 @@ After installation, this is the fastest way to verify the plugin is wired correc
 
 For a host-level go/no-go check, this is the shortest acceptance sequence:
 
-1. Install the plugin with `openclaw plugins install -l /path/to/linkclaw/openclaw-plugin`.
+1. Install the plugin with either `openclaw plugins install -l /path/to/linkclaw/openclaw-plugin` or `openclaw plugins install ./linkclaw-<version>.tgz`.
 2. Ensure `plugins.allow` contains `linkclaw`.
 3. Run `/linkclaw-setup --check-only`.
 4. Run `/linkclaw-status`.
@@ -432,15 +503,22 @@ When the plugin source changes:
 3. Run `/linkclaw-setup --check-only` again.
 4. Run through the A/B walkthrough if you changed messaging or identity flows.
 
-### Published package
+### Packaged release update
 
-When a new package version is released:
+When a new `.tgz` package is released:
+
+1. Install the new archive with `openclaw plugins install ./linkclaw-<version>.tgz`
+2. Restart or reload the OpenClaw host
+3. Run `/linkclaw-onboarding`
+4. Run `/linkclaw-status`
+
+### Future npm package update
+
+After the plugin is published to npm, update instructions should use your final package spec:
 
 ```bash
-pnpm up linkclaw
+openclaw plugins install <npm-package-spec>
 ```
-
-Then re-open the OpenClaw host and run `/linkclaw-setup --check-only`.
 
 ## FAQ
 

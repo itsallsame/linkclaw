@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xiewanpeng/claw-identity/internal/card"
+	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/relayserver"
 )
@@ -205,5 +206,309 @@ func TestSendAndSyncWithRelay(t *testing.T) {
 	}
 	if inboxAfterThread.Conversations[0].UnreadCount != 0 {
 		t.Fatalf("inbox unread after thread = %d, want 0", inboxAfterThread.Conversations[0].UnreadCount)
+	}
+}
+
+func TestSendAndSyncWithRelayAndExperimentalDirectFallback(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	initService := initflow.NewService()
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAlice",
+		DisplayName: "Alice",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	cardService := card.NewService()
+	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBob",
+		DisplayName: "Bob",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
+	if err != nil {
+		t.Fatalf("export bob card: %v", err)
+	}
+	bobCardJSON, err := json.Marshal(bobCard.Card)
+	if err != nil {
+		t.Fatalf("marshal bob card: %v", err)
+	}
+
+	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice into bob: %v", err)
+	}
+	if _, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  aliceHome,
+		Input: string(bobCardJSON),
+	}); err != nil {
+		t.Fatalf("import bob into alice: %v", err)
+	}
+
+	service := NewService()
+	sent, err := service.Send(context.Background(), SendOptions{
+		Home:       bobHome,
+		ContactRef: aliceImportedIntoBob.ContactID,
+		Body:       "hello from bob with direct fallback",
+	})
+	if err != nil {
+		t.Fatalf("send message through relay with direct fallback: %v", err)
+	}
+	if sent.Message.Status != StatusQueued {
+		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
+	}
+
+	synced, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("sync alice inbox: %v", err)
+	}
+	if synced.Synced != 1 {
+		t.Fatalf("synced count = %d, want 1", synced.Synced)
+	}
+}
+
+func TestStatusSummary(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+
+	home := filepath.Join(t.TempDir(), "status-home")
+	initService := initflow.NewService()
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        home,
+		CanonicalID: "did:key:z6MkStatusSummary",
+		DisplayName: "StatusSummary",
+	}); err != nil {
+		t.Fatalf("init home: %v", err)
+	}
+
+	service := NewService()
+	result, err := service.Status(context.Background(), ListOptions{Home: home})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if result.DisplayName != "StatusSummary" {
+		t.Fatalf("display name = %q, want StatusSummary", result.DisplayName)
+	}
+	if result.StoreForwardRoutes != 0 {
+		t.Fatalf("store forward routes = %d, want 0", result.StoreForwardRoutes)
+	}
+	if result.Contacts != 0 || result.Conversations != 0 || result.Unread != 0 {
+		t.Fatalf("unexpected counts: %+v", result)
+	}
+	if len(result.TransportCapabilities) == 0 {
+		t.Fatalf("expected transport capabilities, got none")
+	}
+}
+
+func TestStatusSummaryTracksRecoveryState(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAliceStatusRecovery",
+		DisplayName: "Alice Status Recovery",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobStatusRecovery",
+		DisplayName: "Bob Status Recovery",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
+	if err != nil {
+		t.Fatalf("export bob card: %v", err)
+	}
+	bobCardJSON, err := json.Marshal(bobCard.Card)
+	if err != nil {
+		t.Fatalf("marshal bob card: %v", err)
+	}
+
+	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice into bob: %v", err)
+	}
+	if _, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  aliceHome,
+		Input: string(bobCardJSON),
+	}); err != nil {
+		t.Fatalf("import bob into alice: %v", err)
+	}
+
+	service := NewService()
+	if _, err := service.Send(context.Background(), SendOptions{
+		Home:       bobHome,
+		ContactRef: aliceImportedIntoBob.ContactID,
+		Body:       "hello with recovery state",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	status, err := service.Status(context.Background(), ListOptions{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Conversations != 1 || status.Unread != 1 {
+		t.Fatalf("unexpected conversation counters: %+v", status)
+	}
+	if status.StoreForwardRoutes != 1 {
+		t.Fatalf("store forward routes = %d, want 1", status.StoreForwardRoutes)
+	}
+	if status.LastRecoveredCount != 1 {
+		t.Fatalf("last recovered count = %d, want 1", status.LastRecoveredCount)
+	}
+	if status.LastStoreForwardResult != "success" {
+		t.Fatalf("last store-forward result = %q, want success", status.LastStoreForwardResult)
+	}
+}
+
+func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
+
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAliceDirect",
+		DisplayName: "Alice Direct",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobDirect",
+		DisplayName: "Bob Direct",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
+	if err != nil {
+		t.Fatalf("export bob card: %v", err)
+	}
+	bobCardJSON, err := json.Marshal(bobCard.Card)
+	if err != nil {
+		t.Fatalf("marshal bob card: %v", err)
+	}
+
+	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice into bob: %v", err)
+	}
+	if _, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  aliceHome,
+		Input: string(bobCardJSON),
+	}); err != nil {
+		t.Fatalf("import bob into alice: %v", err)
+	}
+
+	aliceService := NewService()
+	if _, err := aliceService.Status(context.Background(), ListOptions{Home: aliceHome}); err != nil {
+		t.Fatalf("prime alice direct runtime: %v", err)
+	}
+
+	bobService := NewService()
+	sent, err := bobService.Send(context.Background(), SendOptions{
+		Home:       bobHome,
+		ContactRef: aliceImportedIntoBob.ContactID,
+		Body:       "hello direct online",
+	})
+	if err != nil {
+		t.Fatalf("direct send: %v", err)
+	}
+	if sent.Message.Status != StatusQueued {
+		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
+	}
+
+	inbox, err := aliceService.Inbox(context.Background(), ListOptions{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("alice inbox: %v", err)
+	}
+	if len(inbox.Conversations) != 1 {
+		t.Fatalf("inbox conversations = %d, want 1", len(inbox.Conversations))
+	}
+	if inbox.Conversations[0].LastMessagePreview != "hello direct online" {
+		t.Fatalf("preview = %q, want %q", inbox.Conversations[0].LastMessagePreview, "hello direct online")
+	}
+	if inbox.Conversations[0].UnreadCount != 1 {
+		t.Fatalf("unread = %d, want 1", inbox.Conversations[0].UnreadCount)
 	}
 }

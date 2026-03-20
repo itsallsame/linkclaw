@@ -729,6 +729,51 @@ func TestRunMessageSyncJSONWithRelay(t *testing.T) {
 	}
 }
 
+func TestRunMessageStatusJSON(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "linkclaw-status-home")
+	initCode, _, initErr := runForTest(t, []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:key:z6MkMessageStatus",
+		"--display-name", "MessageStatus",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	statusCode, statusOut, statusErr := runForTest(t, []string{"message", "status", "--home", home, "--json"}, "")
+	if statusCode != 0 {
+		t.Fatalf("message status exit code = %d, stderr = %s, stdout = %s", statusCode, statusErr, statusOut)
+	}
+	var out struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			DisplayName        string `json:"display_name"`
+			Contacts           int    `json:"contacts"`
+			Conversations      int    `json:"conversations"`
+			PendingOutbox      int    `json:"pending_outbox"`
+			StoreForwardRoutes int    `json:"store_forward_routes"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(statusOut), &out); err != nil {
+		t.Fatalf("unmarshal status output: %v", err)
+	}
+	if !out.OK {
+		t.Fatalf("expected message status ok=true")
+	}
+	if out.Result.DisplayName != "MessageStatus" {
+		t.Fatalf("display name = %q, want MessageStatus", out.Result.DisplayName)
+	}
+	if out.Result.Contacts != 0 || out.Result.Conversations != 0 || out.Result.PendingOutbox != 0 {
+		t.Fatalf("unexpected status counts: %+v", out.Result)
+	}
+	if out.Result.StoreForwardRoutes != 0 {
+		t.Fatalf("store forward routes = %d, want 0", out.Result.StoreForwardRoutes)
+	}
+}
+
 func TestRunVersionJSON(t *testing.T) {
 	previousVersion := buildinfo.Version
 	previousCommit := buildinfo.Commit

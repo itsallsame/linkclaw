@@ -52,9 +52,9 @@ test("formatBackgroundSyncNotice adds explicit guidance for unknown senders", ()
   assert.match(message, /\/linkclaw-connect <card>/);
 });
 
-test("createBackgroundSyncService no-ops when required config is missing", async () => {
+test("createBackgroundSyncService no-ops when relay sync is explicitly disabled", async () => {
   const service = createBackgroundSyncService({
-    config: {},
+    config: { relayUrl: "" },
     pluginRoot: "/tmp/plugin-root",
     logger: {
       info() {

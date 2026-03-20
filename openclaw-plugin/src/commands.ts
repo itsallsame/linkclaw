@@ -5,6 +5,7 @@ import {
   type LinkClawPluginConfig,
   resolveLinkClawBinary,
   resolveLinkClawHome,
+  resolveRelayUrl,
   runLinkClaw,
 } from "./bridge.ts";
 import {
@@ -163,14 +164,6 @@ export async function runSetupCommand(
     };
   }
 
-  if (!config.binaryPath) {
-    return {
-      type: "message",
-      message:
-        "LinkClaw is not configured yet. Set plugins.entries.linkclaw.config.binaryPath to the local linkclaw binary first.",
-    };
-  }
-
   const health = await collectSetupHealth(config, options.home, pluginRoot);
 
   try {
@@ -264,6 +257,20 @@ export async function runSetupCommand(
   }
 }
 
+export async function runOnboardingCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  const trimmed = rawArgs.trim();
+  const delegatedArgs = trimmed === "" ? "--check-only" : rawArgs;
+  const result = await runSetupCommand(config, delegatedArgs, pluginRoot);
+  return {
+    type: "message",
+    message: ["LinkClaw onboarding", result.message].join("\n"),
+  };
+}
+
 function describeMessagingReadiness(result: Record<string, unknown> | undefined): string[] {
   const messaging = asObject(result?.messaging);
   if (!messaging) {
@@ -305,28 +312,12 @@ export async function runStatusCommand(
     };
   }
 
-  if (!config.binaryPath) {
-    return {
-      type: "message",
-      message:
-        "LinkClaw is not configured yet. Set plugins.entries.linkclaw.config.binaryPath to the local linkclaw binary first.",
-    };
-  }
-
   try {
     const health = await collectSetupHealth(config, options.home, pluginRoot);
-    const knownEnvelope = await runLinkClaw(
+    const statusEnvelope = await runLinkClaw(
       config,
       {
-        command: "known_ls",
-        home: options.home,
-      },
-      pluginRoot,
-    );
-    const inboxEnvelope = await runLinkClaw(
-      config,
-      {
-        command: "message_inbox",
+        command: "message_status",
         home: options.home,
       },
       pluginRoot,
@@ -337,8 +328,7 @@ export async function runStatusCommand(
         options.home,
         config,
         health,
-        knownEnvelope.result,
-        inboxEnvelope.result,
+        statusEnvelope.result,
       ),
     };
   } catch (error) {
@@ -1543,35 +1533,64 @@ function formatStatus(
   home: string | undefined,
   config: LinkClawPluginConfig,
   health: SetupHealth,
-  knownValue: unknown,
-  inboxValue: unknown,
+  statusValue: unknown,
 ): string {
-  const knownRecord = asObject(knownValue);
-  const inboxRecord = asObject(inboxValue);
-  const contacts = Array.isArray(knownRecord?.contacts) ? knownRecord.contacts : [];
-  const conversations = Array.isArray(inboxRecord?.conversations) ? inboxRecord.conversations : [];
-  const unread = conversations.reduce((sum, conversation) => {
-    const item = asObject(conversation);
-    const count = typeof item?.unread_count === "number" ? item.unread_count : 0;
-    return sum + count;
-  }, 0);
+  const record = asObject(statusValue);
+  const identity = readString(record?.display_name) ?? "(not initialized)";
+  const selfId = readString(record?.self_id);
+  const peerId = readString(record?.peer_id);
+  const contacts = typeof record?.contacts === "number" ? record.contacts : 0;
+  const conversations = typeof record?.conversations === "number" ? record.conversations : 0;
+  const unread = typeof record?.unread === "number" ? record.unread : 0;
+  const pendingOutbox = typeof record?.pending_outbox === "number" ? record.pending_outbox : 0;
+  const presenceEntries = typeof record?.presence_entries === "number" ? record.presence_entries : 0;
+  const reachablePresence = typeof record?.reachable_presence === "number" ? record.reachable_presence : 0;
+  const storeForwardRoutes = typeof record?.store_forward_routes === "number" ? record.store_forward_routes : 0;
+  const directEnabled = typeof record?.direct_enabled === "boolean" ? record.direct_enabled : false;
+  const backgroundRuntime = typeof record?.background_runtime === "boolean" ? record.background_runtime : false;
+  const runtimeMode = readString(record?.runtime_mode) ?? "host-managed";
+  const lastStoreForwardSyncAt = readString(record?.last_store_forward_sync_at);
+  const lastStoreForwardResult = readString(record?.last_store_forward_result);
+  const lastRecoveredCount = typeof record?.last_recovered_count === "number" ? record.last_recovered_count : 0;
+  const lastAnnounceAt = readString(record?.last_announce_at);
+  const messagingReady = selfId !== undefined && selfId !== "";
+  const recoveryStatus =
+    storeForwardRoutes > 0 ? `ready (${storeForwardRoutes} path${storeForwardRoutes === 1 ? "" : "s"})` : "not configured";
+  const directStatus = directEnabled ? "experimental on" : "experimental off";
+  const summaryLines = [
+    `identity: ${identity}`,
+    ...(selfId ? [`self id: ${selfId}`] : []),
+    ...(peerId ? [`peer id: ${peerId}`] : []),
+    `messaging: ${messagingReady ? "ready" : "not ready"}`,
+    `contacts: ${contacts}`,
+    `conversations: ${conversations}`,
+    `unread: ${unread}`,
+    `queued outgoing: ${pendingOutbox}`,
+    `offline recovery: ${recoveryStatus}`,
+    `presence cache: ${presenceEntries} (${reachablePresence} reachable)`,
+    `runtime mode: ${runtimeMode}${backgroundRuntime ? " (experimental)" : ""}`,
+    `direct transport: ${directStatus}`,
+    ...(lastAnnounceAt ? [`last announce: ${lastAnnounceAt}`] : []),
+    ...(lastStoreForwardSyncAt
+      ? [
+          `last recovery: ${lastStoreForwardSyncAt}${lastStoreForwardResult ? ` | result=${lastStoreForwardResult}` : ""} | recovered=${lastRecoveredCount}`,
+        ]
+      : []),
+  ];
 
   const lines = [
     "LinkClaw status",
     `home: ${resolveLinkClawHome(home, config)}`,
     "state: ready",
-    `contacts: ${contacts.length}`,
-    `conversations: ${conversations.length}`,
-    `unread: ${unread}`,
+    ...summaryLines,
     "--- status-summary-begin ---",
-    `contacts: ${contacts.length}`,
-    `conversations: ${conversations.length}`,
-    `unread: ${unread}`,
+    ...summaryLines,
     "--- status-summary-end ---",
     ...formatHealthSection(health),
     "Next:",
     "- run /linkclaw-contacts or /linkclaw-find <query> to inspect contacts",
     "- run /linkclaw-inbox to inspect recent conversations",
+    "- run /linkclaw-sync to recover new messages",
   ];
 
   return lines.join("\n");
@@ -1920,7 +1939,7 @@ async function collectSetupHealth(
   pluginRoot: string,
 ): Promise<SetupHealth> {
   const binaryPath = await resolveLinkClawBinary(config, pluginRoot);
-  const relayStatus = await checkRelayStatus(config.relayUrl);
+  const relayStatus = await checkRelayStatus(resolveRelayUrl(config));
   const publishStatus = await checkPublishOriginStatus(config, pluginRoot);
   return {
     binaryPath,

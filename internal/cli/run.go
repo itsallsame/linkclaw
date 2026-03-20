@@ -909,6 +909,55 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 			fmt.Fprintln(out, "- no new messages yet; run `linkclaw message send <contact> --body \"...\"` to start a conversation")
 		}
 		return 0
+	case "status":
+		fs := newFlagSet("message status", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("status"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("status"), "message status does not accept positional arguments")
+		}
+		service := message.NewService()
+		result, err := service.Status(ctx, message.ListOptions{Home: *home})
+		if err != nil {
+			return writeMessageError[message.StatusResult](errOut, out, *jsonOutput, "status", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "status", result)
+		}
+		fmt.Fprintln(out, "LinkClaw message status")
+		if result.DisplayName != "" {
+			fmt.Fprintf(out, "identity: %s\n", result.DisplayName)
+		}
+		if result.SelfID != "" {
+			fmt.Fprintf(out, "self id: %s\n", result.SelfID)
+		}
+		if result.PeerID != "" {
+			fmt.Fprintf(out, "peer id: %s\n", result.PeerID)
+		}
+		fmt.Fprintf(out, "contacts: %d\n", result.Contacts)
+		fmt.Fprintf(out, "conversations: %d\n", result.Conversations)
+		fmt.Fprintf(out, "unread: %d\n", result.Unread)
+		fmt.Fprintf(out, "pending outbox: %d\n", result.PendingOutbox)
+		fmt.Fprintf(out, "presence cache: %d\n", result.PresenceEntries)
+		fmt.Fprintf(out, "store-forward routes: %d\n", result.StoreForwardRoutes)
+		fmt.Fprintf(out, "direct enabled: %t\n", result.DirectEnabled)
+		if result.LastStoreForwardSyncAt != "" {
+			fmt.Fprintf(out, "last store-forward sync: %s | result=%s | recovered=%d\n", result.LastStoreForwardSyncAt, result.LastStoreForwardResult, result.LastRecoveredCount)
+		}
+		if result.LastStoreForwardError != "" {
+			fmt.Fprintf(out, "last store-forward error: %s\n", result.LastStoreForwardError)
+		}
+		fmt.Fprintln(out, "Next:")
+		fmt.Fprintln(out, "- run `linkclaw message inbox` to inspect recent conversations")
+		fmt.Fprintln(out, "- run `linkclaw message sync` to recover new messages")
+		return 0
 	default:
 		if jsonRequested {
 			return writeValidationFailure(errOut, out, true, "message", stringPtr(args[0]), fmt.Sprintf("unknown message subcommand %q", args[0]))
@@ -1434,5 +1483,6 @@ func printMessageUsage(out io.Writer) {
 	fmt.Fprintln(out, "  inbox   List local conversations")
 	fmt.Fprintln(out, "  thread  Show recent messages for one contact")
 	fmt.Fprintln(out, "  outbox  List queued outgoing messages")
-	fmt.Fprintln(out, "  sync    Placeholder for relay sync")
+	fmt.Fprintln(out, "  sync    Recover new messages through the runtime")
+	fmt.Fprintln(out, "  status  Show runtime messaging readiness and counters")
 }

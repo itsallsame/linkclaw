@@ -35,6 +35,7 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
   assert.deepEqual(tools, [
     { name: "linkclaw_core", optional: true },
     { name: "linkclaw_publish", optional: true },
+    { name: "linkclaw_onboarding", optional: true },
     { name: "linkclaw_setup", optional: true },
     { name: "linkclaw_status", optional: true },
     { name: "linkclaw_share_card", optional: true },
@@ -45,6 +46,7 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
   assert.deepEqual(
     commands.map((command) => command.name),
     [
+      "linkclaw-onboarding",
       "linkclaw-setup",
       "linkclaw-status",
       "linkclaw-import",

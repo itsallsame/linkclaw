@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+export const DEFAULT_RELAY_URL = "http://127.0.0.1:8788";
+
 export type LinkClawPluginConfig = {
   binaryPath?: string;
   home?: string;
@@ -28,6 +30,7 @@ export type LinkClawCommand =
   | "message_thread"
   | "message_outbox"
   | "message_sync"
+  | "message_status"
   | "known_ls"
   | "known_show"
   | "known_trust"
@@ -121,13 +124,14 @@ export async function runLinkClaw(
   pluginRoot: string,
 ): Promise<LinkClawEnvelope> {
   const prepared = await prepareLinkClawCommand(config, request, pluginRoot);
+  const relayUrl = resolveRelayUrl(config);
   try {
     const { stdout } = await execFileAsync(prepared.binaryPath, prepared.args, {
       cwd: dirname(pluginRoot),
       env: {
         ...process.env,
         LINKCLAW_HOME: prepared.home,
-        ...(config.relayUrl ? { LINKCLAW_RELAY_URL: config.relayUrl } : {}),
+        ...(relayUrl ? { LINKCLAW_RELAY_URL: relayUrl } : {}),
       },
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024,
@@ -195,6 +199,15 @@ export function resolveLinkClawHome(
 ): string {
   const raw = overrideHome ?? config.home ?? process.env.LINKCLAW_HOME ?? join(homedir(), ".linkclaw");
   return resolve(raw);
+}
+
+export function resolveRelayUrl(config: LinkClawPluginConfig): string | undefined {
+  const raw = config.relayUrl ?? process.env.LINKCLAW_RELAY_URL ?? DEFAULT_RELAY_URL;
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
 }
 
 export function resolvePublishOutput(
@@ -298,6 +311,8 @@ export function buildLinkClawArgs(
       return ["message", "outbox", "--home", home, "--json"];
     case "message_sync":
       return ["message", "sync", "--home", home, "--json"];
+    case "message_status":
+      return ["message", "status", "--home", home, "--json"];
     case "known_ls":
       return ["known", "ls", "--home", home, "--json"];
     case "known_show":
@@ -443,6 +458,7 @@ function normalizeCommand(raw: string): LinkClawCommand {
     case "message_thread":
     case "message_outbox":
     case "message_sync":
+    case "message_status":
     case "known_ls":
     case "known_show":
     case "known_trust":

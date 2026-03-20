@@ -14,6 +14,7 @@ import {
   runImportCommand,
   runInboxCommand,
   runMessageCommand,
+  runOnboardingCommand,
   runReplyCommand,
   runSetupCommand,
   runShareCommand,
@@ -149,6 +150,38 @@ test("runShareCommand can emit a signed identity card directly", async () => {
   assert.match(result.message, /--- connect-command-begin ---/);
   assert.match(result.message, /--- connect-command-end ---/);
   assert.match(result.message, /\/linkclaw-connect '/);
+});
+
+test("runShareCommand falls back to LINKCLAW_RELAY_URL when relayUrl config is omitted", async () => {
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-share-card-relay-home-"));
+  await runLinkClaw(
+    { binaryPath, home },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkShareRelay",
+      displayName: "Share Relay",
+    },
+    pluginRoot,
+  );
+
+  const previousRelay = process.env.LINKCLAW_RELAY_URL;
+  process.env.LINKCLAW_RELAY_URL = "http://127.0.0.1:8788";
+  try {
+    const result = await runShareCommand(
+      { binaryPath, home },
+      "--card",
+      pluginRoot,
+    );
+
+    assert.equal(result.type, "message");
+    assert.match(result.message, /"relay_url":"http:\/\/127\.0\.0\.1:8788"/);
+  } finally {
+    if (previousRelay === undefined) {
+      delete process.env.LINKCLAW_RELAY_URL;
+    } else {
+      process.env.LINKCLAW_RELAY_URL = previousRelay;
+    }
+  }
 });
 
 test("runShareCommand requires an origin when publishOrigin is not configured", async () => {
@@ -499,8 +532,47 @@ test("runSetupCommand initializes an uninitialized home", async () => {
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: ok/);
-  assert.match(result.message, /relay: not configured/);
+  assert.match(result.message, /relay: (ok|unreachable) .*127\.0\.0\.1:8788/);
   assert.match(result.message, /publish origin: not configured/);
+});
+
+test("runOnboardingCommand defaults to a readiness check when no args are provided", async () => {
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-onboarding-home-"));
+
+  const result = await runOnboardingCommand(
+    { binaryPath, home },
+    "",
+    pluginRoot,
+  );
+
+  assert.equal(result.type, "message");
+  assert.match(result.message, /LinkClaw onboarding/);
+  assert.match(result.message, /LinkClaw setup check completed/);
+  assert.match(result.message, /state: not initialized/);
+  assert.match(result.message, /relay: (ok|unreachable) .*127\.0\.0\.1:8788/);
+});
+
+test("runSetupCommand can locate the binary through LINKCLAW_BINARY", async () => {
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-setup-env-binary-home-"));
+  const previousBinary = process.env.LINKCLAW_BINARY;
+  process.env.LINKCLAW_BINARY = binaryPath;
+  try {
+    const result = await runSetupCommand(
+      { home },
+      "--display-name EnvBinary",
+      pluginRoot,
+    );
+
+    assert.equal(result.type, "message");
+    assert.match(result.message, /LinkClaw setup completed/);
+    assert.match(result.message, /binary: ok/);
+  } finally {
+    if (previousBinary === undefined) {
+      delete process.env.LINKCLAW_BINARY;
+    } else {
+      process.env.LINKCLAW_BINARY = previousBinary;
+    }
+  }
 });
 
 test("runSetupCommand supports check-only mode before initialization", async () => {
@@ -518,7 +590,7 @@ test("runSetupCommand supports check-only mode before initialization", async () 
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: ok/);
-  assert.match(result.message, /relay: not configured/);
+  assert.match(result.message, /relay: (ok|unreachable) .*127\.0\.0\.1:8788/);
   assert.match(result.message, /run \/linkclaw-setup --display-name <name>/);
 });
 
@@ -630,6 +702,10 @@ test("runStatusCommand summarizes health and local state after initialization", 
     assert.match(result.message, /contacts: 0/);
     assert.match(result.message, /conversations: 0/);
     assert.match(result.message, /unread: 0/);
+    assert.match(result.message, /messaging: ready/);
+    assert.match(result.message, /queued outgoing: 0/);
+    assert.match(result.message, /offline recovery: not configured/);
+    assert.match(result.message, /runtime mode: host-managed/);
     assert.match(result.message, /relay: ok \(404\) http:\/\/127\.0\.0\.1:/);
   } finally {
     relayProc.kill();
@@ -774,6 +850,89 @@ test("runMessageCommand and inbox/sync summarize messaging workflows", async () 
       pluginRoot,
     );
     assert.match(inboxAfterThread.message, /unread=0/);
+  } finally {
+    relayProc.kill();
+  }
+});
+
+test("runStatusCommand reflects offline recovery state after sync", async () => {
+  const relayPort = await reservePort();
+  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
+  const relayDb = join(relayDir, "relay.db");
+  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
+    cwd: resolve(pluginRoot, ".."),
+    env: { ...process.env },
+  });
+
+  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-status-home-"));
+  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-status-home-"));
+
+  try {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
+
+    await runLinkClaw(
+      { ...relayConfig, home: aliceHome },
+      { command: "init", canonicalId: "did:key:z6MkAliceStatusFlow", displayName: "Alice Status Flow" },
+      pluginRoot,
+    );
+    await runLinkClaw(
+      { ...relayConfig, home: bobHome },
+      { command: "init", canonicalId: "did:key:z6MkBobStatusFlow", displayName: "Bob Status Flow" },
+      pluginRoot,
+    );
+
+    const aliceCard = await runLinkClaw(
+      { ...relayConfig, home: aliceHome },
+      { command: "card_export" },
+      pluginRoot,
+    );
+    const bobCard = await runLinkClaw(
+      { ...relayConfig, home: bobHome },
+      { command: "card_export" },
+      pluginRoot,
+    );
+    const aliceCardPath = join(bobHome, "alice-status.card.json");
+    const bobCardPath = join(aliceHome, "bob-status.card.json");
+    await writeFile(aliceCardPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
+    await writeFile(bobCardPath, JSON.stringify((bobCard.result as { card: unknown }).card, null, 2), "utf8");
+
+    const bobImportsAlice = await runConnectCommand(
+      { ...relayConfig, home: bobHome },
+      aliceCardPath,
+      pluginRoot,
+    );
+    const contactMatch = bobImportsAlice.message.match(/contact: ([^\n]+)/);
+    assert.ok(contactMatch);
+    await runConnectCommand(
+      { ...relayConfig, home: aliceHome },
+      bobCardPath,
+      pluginRoot,
+    );
+
+    await runMessageCommand(
+      { ...relayConfig, home: bobHome },
+      `${contactMatch[1]} hello for status`,
+      pluginRoot,
+    );
+    await runSyncCommand(
+      { ...relayConfig, home: aliceHome },
+      "",
+      pluginRoot,
+    );
+
+    const statusResult = await runStatusCommand(
+      { ...relayConfig, home: aliceHome },
+      "",
+      pluginRoot,
+    );
+    assert.equal(statusResult.type, "message");
+    assert.match(statusResult.message, /LinkClaw status/);
+    assert.match(statusResult.message, /conversations: 1/);
+    assert.match(statusResult.message, /unread: 1/);
+    assert.match(statusResult.message, /offline recovery: ready \(1 path\)/);
+    assert.match(statusResult.message, /runtime mode: host-managed/);
+    assert.match(statusResult.message, /last recovery: .*recovered=1/);
   } finally {
     relayProc.kill();
   }

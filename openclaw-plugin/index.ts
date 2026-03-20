@@ -12,6 +12,7 @@ import {
   runImportCommand,
   runInboxCommand,
   runMessageCommand,
+  runOnboardingCommand,
   runReplyCommand,
   runSetupCommand,
   runShareCommand,
@@ -317,6 +318,40 @@ const plugin = {
     });
 
     api.registerTool({
+      name: "linkclaw_onboarding",
+      description:
+        "Guide first-run LinkClaw setup for OpenClaw users. With no arguments it performs a readiness check; with a display name it initializes or repairs the local identity and messaging profile.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          displayName: { type: "string" },
+          canonicalId: { type: "string" },
+          home: { type: "string" },
+          checkOnly: { type: "boolean" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.checkOnly === "boolean" && params.checkOnly) {
+          args.push("--check-only");
+        }
+        if (typeof params.displayName === "string" && params.displayName.trim() !== "") {
+          args.push("--display-name", params.displayName.trim());
+        }
+        if (typeof params.canonicalId === "string" && params.canonicalId.trim() !== "") {
+          args.push("--canonical-id", params.canonicalId.trim());
+        }
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        const result = await runOnboardingCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
       name: "linkclaw_setup",
       description:
         "Initialize or repair the local LinkClaw identity in the configured home. Use this when a user asks to set up LinkClaw, initialize an identity, or make messaging ready. relayUrl from plugin config is applied automatically.",
@@ -474,6 +509,13 @@ const plugin = {
         return asToolTextResult(`${sync.message}\n\n${inbox.message}`);
       },
     });
+
+    registerPluginCommand(
+      api,
+      "linkclaw-onboarding",
+      "Guide first-run LinkClaw setup and readiness checks for the current OpenClaw host.",
+      async (args) => runOnboardingCommand(loadConfig(api), args, pluginRoot),
+    );
 
     registerPluginCommand(
       api,
