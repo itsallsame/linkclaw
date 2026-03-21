@@ -3,3 +3,4 @@
 .env
 publish/
 linkclaw
+openclaw-plugin/bundled-runtime/

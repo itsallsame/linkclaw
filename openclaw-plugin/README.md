@@ -43,15 +43,15 @@ If the OpenClaw host can already find `linkclaw` on `PATH`, the plugin now works
 
 Defaults:
 
-- `binaryPath`: optional when `linkclaw` is already discoverable via `LINKCLAW_BINARY`, repo-local candidates, or `PATH`
+- `binaryPath`: optional when the packaged plugin already includes a bundled `linkclaw` runtime, or when `linkclaw` is discoverable via `LINKCLAW_BINARY`, repo-local candidates, or `PATH`
 - `home`: defaults to `~/.linkclaw`
 - `relayUrl`: optional compatibility-only legacy HTTP fallback; use it only if you still want the old store-and-forward path
 
 For most local installs, the fastest path is:
 
-1. install `linkclaw` somewhere on `PATH`
-2. install the plugin
-3. run `/linkclaw-onboarding`
+1. install the plugin
+2. run `/linkclaw-onboarding`
+3. only configure `binaryPath` if you want to override the packaged runtime
 4. only configure `relayUrl` if you explicitly want legacy HTTP fallback compatibility
 
 ### Development checkout
@@ -124,6 +124,8 @@ cd openclaw-plugin
 npm run pack:plugin:tgz
 ```
 
+This pack step now stages the current platform's `linkclaw` binary into the plugin archive automatically.
+
 3. Add the plugin to your OpenClaw workspace.
 
 ```bash
@@ -140,7 +142,6 @@ openclaw plugins install ./linkclaw-<version>.tgz
       "linkclaw": {
         "package": "linkclaw",
         "config": {
-          "binaryPath": "/absolute/path/to/linkclaw",
           "home": "/absolute/path/to/.linkclaw",
           "publishOrigin": "https://agent.example",
           "publishOutput": "/absolute/path/to/publish",
@@ -160,6 +161,7 @@ openclaw plugins install ./linkclaw-<version>.tgz
 ```
 
 `plugins.allow` is recommended on real hosts. Without it, OpenClaw can still load the plugin, but it will warn that non-bundled plugins may auto-load.
+For packaged `.tgz` installs, the plugin now prefers the bundled `linkclaw` runtime automatically. Set `binaryPath` only if you want to override that bundled binary.
 
 ### Future npm package
 
@@ -188,7 +190,11 @@ Configure under `plugins.entries.linkclaw.config`:
 }
 ```
 
-`binaryPath` is the safest option. If omitted, the plugin falls back to `LINKCLAW_BINARY`, common repo-local candidates, and finally `PATH`.
+`binaryPath` is the safest override option. If omitted, the plugin falls back to:
+1. the packaged bundled runtime
+2. `LINKCLAW_BINARY`
+3. common repo-local candidates
+4. `PATH`
 
 Config notes:
 

@@ -25,8 +25,10 @@
   },
   "files": [
     "README.md",
+    "bundled-runtime",
     "index.ts",
     "openclaw.plugin.json",
+    "scripts",
     "skills",
     "src"
   ],
@@ -34,6 +36,7 @@
     "extensions": ["./index.ts"]
   },
   "scripts": {
+    "prepack": "node ./scripts/stage-bundled-runtime.mjs",
     "test": "node --test test/**/*.test.ts",
     "pack:plugin": "npm pack",
     "pack:plugin:tgz": "npm pack"

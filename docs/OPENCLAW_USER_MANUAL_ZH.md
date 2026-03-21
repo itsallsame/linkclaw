@@ -74,7 +74,8 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 默认行为：
 
 - `home` 默认是 `~/.linkclaw`
-- `binaryPath` 可以省略，只要宿主能在 `PATH` 或 `LINKCLAW_BINARY` 里找到 `linkclaw`
+- `.tgz` 安装时，插件会优先使用包内自带的 `linkclaw` binary
+- `binaryPath` 可以省略；如果没有显式配置，插件会依次尝试包内 binary、`LINKCLAW_BINARY`、仓库本地候选路径和 `PATH`
 - `relayUrl` 现在是“旧 HTTP fallback 兼容项”，不写也能走当前主路径
 - 只有在你明确要验证旧 HTTP fallback 兼容路径时，才需要写 `relayUrl`，或设置 `LINKCLAW_RELAY_URL`
 

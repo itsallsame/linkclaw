@@ -366,6 +366,7 @@ function candidateBinaryPaths(config: LinkClawPluginConfig, pluginRoot: string):
     .map((value) => resolve(value));
 
   const local = [
+    resolve(pluginRoot, "bundled-runtime", binaryName),
     resolve(pluginRoot, "..", "bin", binaryName),
     resolve(pluginRoot, "..", binaryName),
     resolve(pluginRoot, "bin", binaryName),

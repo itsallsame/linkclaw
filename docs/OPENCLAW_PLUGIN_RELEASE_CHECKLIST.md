@@ -70,7 +70,7 @@ Recommended minimum host config:
 
 Assumptions:
 
-- `linkclaw` is already on `PATH`, or `LINKCLAW_BINARY` is set
+- packaged installs include a bundled `linkclaw` runtime for the current platform
 - no legacy HTTP fallback is required for the normal runtime-backed path
 
 ## 5. First-run acceptance

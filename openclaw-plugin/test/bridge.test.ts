@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   buildLinkClawArgs,
+  resolveLinkClawBinary,
   runLinkClaw,
 } from "../src/bridge.ts";
 import {
@@ -256,4 +257,23 @@ test("bridge covers inspect, import, and known commands against the real binary"
   } finally {
     await fixture.close();
   }
+});
+
+test("resolveLinkClawBinary prefers the bundled runtime packaged with the plugin", async () => {
+  const tempPluginRoot = await mkdtemp(join(tmpdir(), "linkclaw-plugin-root-"));
+  const bundledRuntimeDir = join(tempPluginRoot, "bundled-runtime");
+  const binaryName = process.platform === "win32" ? "linkclaw.exe" : "linkclaw";
+  const binaryPath = join(bundledRuntimeDir, binaryName);
+  await mkdir(bundledRuntimeDir, { recursive: true });
+  await writeFile(
+    binaryPath,
+    process.platform === "win32"
+      ? "@echo off\r\necho bundled\r\n"
+      : "#!/bin/sh\necho bundled\n",
+    "utf8",
+  );
+  await chmod(binaryPath, 0o755);
+
+  const resolved = await resolveLinkClawBinary({}, tempPluginRoot);
+  assert.equal(resolved, binaryPath);
 });
