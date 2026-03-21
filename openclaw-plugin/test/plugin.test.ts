@@ -89,3 +89,24 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
   const statusReply = await statusCommand.handler?.({ args: "" });
   assert.equal(typeof statusReply?.text, "string");
 });
+
+test("plugin commands prefer pluginConfig over root config", async () => {
+  const commands: Array<{
+    name: string;
+    handler?: (ctx: { args?: string }) => Promise<{ text: string }> | { text: string };
+  }> = [];
+
+  linkClawPlugin.register({
+    config: { home: "/wrong-home" },
+    pluginConfig: { home: "/plugin-home" },
+    registerTool() {},
+    registerCommand(command) {
+      commands.push(command);
+    },
+  });
+
+  const onboarding = commands.find((command) => command.name === "linkclaw-onboarding");
+  assert.ok(onboarding?.handler);
+  const reply = await onboarding.handler?.({ args: "--check-only" });
+  assert.match(reply?.text ?? "", /home: \/plugin-home/);
+});

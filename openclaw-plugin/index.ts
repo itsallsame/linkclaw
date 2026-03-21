@@ -77,6 +77,7 @@ function toReplyPayload(result: LegacyCommandResult): { text: string } {
 
 type PluginAPI = {
   config?: LinkClawPluginConfig;
+  pluginConfig?: LinkClawPluginConfig;
   getConfig?: () => LinkClawPluginConfig | undefined;
   registerTool: (tool: ToolRegistration) => void;
   registerCommand?: ((command: CommandRegistration) => void) | ((name: string, description: string, handler: CommandHandler) => void);
@@ -110,7 +111,7 @@ type PluginAPI = {
 const pluginRoot = fileURLToPath(new URL(".", import.meta.url));
 
 function loadConfig(api: PluginAPI): LinkClawPluginConfig {
-  return api.getConfig?.() ?? api.config ?? {};
+  return api.pluginConfig ?? api.getConfig?.() ?? api.config ?? {};
 }
 
 function asBridgeRequest(params: Record<string, unknown>): LinkClawBridgeRequest {
