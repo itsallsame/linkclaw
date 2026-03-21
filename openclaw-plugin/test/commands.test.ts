@@ -532,7 +532,7 @@ test("runSetupCommand initializes an uninitialized home", async () => {
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: ok/);
-  assert.match(result.message, /relay: (ok|unreachable) .*127\.0\.0\.1:8788/);
+  assert.match(result.message, /relay: not configured/);
   assert.match(result.message, /publish origin: not configured/);
 });
 
@@ -549,7 +549,7 @@ test("runOnboardingCommand defaults to a readiness check when no args are provid
   assert.match(result.message, /LinkClaw onboarding/);
   assert.match(result.message, /LinkClaw setup check completed/);
   assert.match(result.message, /state: not initialized/);
-  assert.match(result.message, /relay: (ok|unreachable) .*127\.0\.0\.1:8788/);
+  assert.match(result.message, /relay: not configured/);
 });
 
 test("runSetupCommand can locate the binary through LINKCLAW_BINARY", async () => {
@@ -590,7 +590,7 @@ test("runSetupCommand supports check-only mode before initialization", async () 
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: ok/);
-  assert.match(result.message, /relay: (ok|unreachable) .*127\.0\.0\.1:8788/);
+  assert.match(result.message, /relay: not configured/);
   assert.match(result.message, /run \/linkclaw-setup --display-name <name>/);
 });
 

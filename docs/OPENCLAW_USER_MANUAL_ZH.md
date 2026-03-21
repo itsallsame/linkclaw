@@ -24,7 +24,7 @@
 
 - 一个支持插件的 OpenClaw 宿主
 - 可执行的 `linkclaw` 二进制
-- 一个可访问的 relay 地址
+- 如果你还要兼容旧的 HTTP store-and-forward 流程，再准备一个可访问的 relay 地址
 
 如果你的环境里还没有 `openclaw` 命令，这份文档不适合继续往下做。因为这个仓库本身不提供 `openclaw` 可执行程序。
 
@@ -56,7 +56,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 ## 最小配置
 
-如果 OpenClaw 宿主已经能在 `PATH` 中找到 `linkclaw`，最小配置可以只写 relay：
+如果 OpenClaw 宿主已经能在 `PATH` 中找到 `linkclaw`，最小配置现在可以不写任何插件专属字段：
 
 ```json
 {
@@ -64,10 +64,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
     "allow": ["linkclaw"],
     "entries": {
       "linkclaw": {
-        "enabled": true,
-        "config": {
-          "relayUrl": "http://127.0.0.1:8788"
-        }
+        "enabled": true
       }
     }
   }
@@ -78,8 +75,8 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 - `home` 默认是 `~/.linkclaw`
 - `binaryPath` 可以省略，只要宿主能在 `PATH` 或 `LINKCLAW_BINARY` 里找到 `linkclaw`
-- `relayUrl` 不写时，会默认使用 `http://127.0.0.1:8788`
-- 如果你不用默认值，也可以改为宿主环境变量 `LINKCLAW_RELAY_URL`
+- `relayUrl` 现在是“旧 HTTP fallback 兼容项”，不写也能走当前主路径
+- 只有在你明确要验证旧 HTTP fallback 兼容路径时，才需要写 `relayUrl`，或设置 `LINKCLAW_RELAY_URL`
 
 如果你的宿主找不到 `linkclaw`，再补：
 
@@ -162,7 +159,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 ### 1. `/linkclaw-onboarding`
 
-用途：作为首用入口，默认会先检查插件是否安装正确、binary 是否可执行、relay 是否可达。
+用途：作为首用入口，默认会先检查插件是否安装正确、binary 是否可执行，以及旧 fallback 是否已配置/可达。
 
 ### 2. `/linkclaw-onboarding --display-name <name>`
 
@@ -204,7 +201,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 ### `relay: unreachable`
 
-说明当前机器无法访问 relay。先检查：
+说明当前机器无法访问你显式配置的旧 HTTP fallback。先检查：
 
 - relay 是否真的在运行
 - 端口是否开放
@@ -214,7 +211,8 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 优先确认：
 
-- 你的宿主配置里写了 `relayUrl`
+- 你是否真的还需要旧 HTTP fallback
+- 如果需要，再确认宿主配置里写了 `relayUrl`
 - 或者环境变量 `LINKCLAW_RELAY_URL` 已设置
 - 然后重新运行 `/linkclaw-setup --display-name <name>`
 - 再重新导出卡

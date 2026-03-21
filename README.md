@@ -9,11 +9,11 @@ It is aimed at developers who want a working identity toolchain before they need
 - `linkclaw serve` hosts that bundle locally with the right MIME types.
 - `linkclaw inspect` and `linkclaw import` verify other identity surfaces back into a local trust book.
 
-It also includes a V0 local-direct-messaging stack for OpenClaw users:
+It also includes a local-direct-messaging stack for OpenClaw users:
 
 - `linkclaw card export` and `linkclaw card import` exchange signed identity cards
-- `linkclaw message send`, `sync`, `inbox`, and `outbox` cover one-to-one relay-backed messaging
-- `linkclaw-relay` provides encrypted store-and-forward delivery
+- `linkclaw message send`, `sync`, `inbox`, and `outbox` cover one-to-one runtime-backed messaging
+- legacy HTTP store-and-forward compatibility is now internal to the runtime transition and is no longer exposed as a standalone CLI entrypoint
 
 ## 30-Second Flow
 
@@ -78,9 +78,9 @@ linkclaw card export
 linkclaw message inbox
 ```
 
-## Direct Messaging V0
+## Direct Messaging
 
-LinkClaw V0 supports one-to-one asynchronous messaging for OpenClaw users without requiring a domain.
+LinkClaw supports one-to-one asynchronous messaging for OpenClaw users without requiring a domain.
 
 The loop is:
 
@@ -89,14 +89,14 @@ The loop is:
 3. Share that card with the other user over any existing channel.
 4. The recipient runs `linkclaw card import <path-or-json>` to save you as a contact.
 5. Messages are sent with `linkclaw message send <contact> --body "..."`
-6. Offline messages sit in `linkclaw-relay` until the recipient runs `linkclaw message sync`
+6. Offline recovery runs through the runtime-backed message path; legacy HTTP relay fallback is compatibility-only and no longer the recommended primary route
 
 Minimal local example:
 
 ```bash
 linkclaw init --canonical-id did:key:z6MkAlice --display-name Alice --non-interactive
-LINKCLAW_RELAY_URL=http://127.0.0.1:8788 linkclaw card export --json
-LINKCLAW_RELAY_URL=http://127.0.0.1:8788 linkclaw message inbox --json
+linkclaw card export --json
+linkclaw message inbox --json
 ```
 
 ## Cloudflare Pages

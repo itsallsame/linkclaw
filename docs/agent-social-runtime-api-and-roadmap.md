@@ -478,6 +478,32 @@ TODO:
 - [x] evaluate optional advanced background-runtime mode
 - [x] add hooks for future reputation/payment/penalty layers
 
+### Phase 9: Remove Legacy HTTP Relay
+
+Goal:
+
+- replace `linkclaw-relay` with runtime-owned store-and-forward transport and remove relay-centric product paths
+
+Current status:
+
+- in progress
+- a dedicated `internal/transport/storeforward` adapter now exists and has replaced the inline legacy callback transport in runtime orchestration
+- runtime bridge no longer embeds relay fallback behavior directly; it now delegates through a runtime-owned store-forward transport boundary
+- `message.Service` now depends on a `StoreForwardBackend` contract instead of owning `relayclient.Client` directly; the old HTTP relay path is now only one backend implementation
+- plugin schema, bridge defaults, and end-user docs now treat `relayUrl` as a compatibility-only legacy HTTP fallback instead of the recommended primary path
+- relayclient request/response types have been pulled out of the message main path; `message.Service` and runtime bridge now talk through runtime-owned store-forward request/response types, leaving the HTTP relay shape isolated inside the legacy backend implementation
+- the legacy HTTP fallback implementation itself now lives under `internal/transport/storeforward`, so the `internal/message` package no longer imports `internal/relayclient` directly
+- the standalone `internal/relayclient` package has been deleted; `internal/relayserver` tests and legacy HTTP mailbox logic now both use `internal/transport/storeforward`
+- the standalone `cmd/linkclaw-relay` entrypoint has been removed; relay compatibility is now test-only through `internal/relayserver` and the OpenClaw test shim
+
+TODO:
+
+- [x] introduce a runtime-owned `storeforward` transport package
+- [x] move `message send/sync/ack` relay operations behind a transport/backend contract instead of direct `relayclient` ownership in `message.Service`
+- [x] rebind plugin/docs/default config away from `relayUrl` as the primary path
+- [x] remove `internal/relayclient`
+- [x] remove `cmd/linkclaw-relay`
+
 ## Recommended Immediate Build Sequence
 
 If implementation starts now, the recommended sequence is:

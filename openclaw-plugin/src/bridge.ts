@@ -6,8 +6,6 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const DEFAULT_RELAY_URL = "http://127.0.0.1:8788";
-
 export type LinkClawPluginConfig = {
   binaryPath?: string;
   home?: string;
@@ -202,7 +200,7 @@ export function resolveLinkClawHome(
 }
 
 export function resolveRelayUrl(config: LinkClawPluginConfig): string | undefined {
-  const raw = config.relayUrl ?? process.env.LINKCLAW_RELAY_URL ?? DEFAULT_RELAY_URL;
+  const raw = config.relayUrl ?? process.env.LINKCLAW_RELAY_URL;
   if (typeof raw !== "string") {
     return undefined;
   }

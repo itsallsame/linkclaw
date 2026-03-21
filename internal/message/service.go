@@ -16,9 +16,9 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/layout"
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 	"github.com/xiewanpeng/claw-identity/internal/migrate"
-	"github.com/xiewanpeng/claw-identity/internal/relayclient"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
+	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 
 	_ "modernc.org/sqlite"
 )
@@ -136,8 +136,8 @@ type ThreadResult struct {
 }
 
 type Service struct {
-	Now         func() time.Time
-	RelayClient *relayclient.Client
+	Now                 func() time.Time
+	StoreForwardBackend transportstoreforward.MailboxBackend
 }
 
 type selfMessagingProfile struct {
@@ -174,8 +174,8 @@ type signedMessagePayload struct {
 
 func NewService() *Service {
 	return &Service{
-		Now:         time.Now,
-		RelayClient: relayclient.New(),
+		Now:                 time.Now,
+		StoreForwardBackend: transportstoreforward.LegacyHTTPMailboxBackend{},
 	}
 }
 
@@ -394,11 +394,11 @@ func (s *Service) now() time.Time {
 	return nowFn().UTC()
 }
 
-func (s *Service) relayClient() *relayclient.Client {
-	if s == nil || s.RelayClient == nil {
-		return relayclient.New()
+func (s *Service) storeForwardBackend() transportstoreforward.MailboxBackend {
+	if s == nil || s.StoreForwardBackend == nil {
+		return transportstoreforward.LegacyHTTPMailboxBackend{}
 	}
-	return s.RelayClient
+	return s.StoreForwardBackend
 }
 
 func openStateDB(ctx context.Context, rawHome string, now time.Time) (*sql.DB, string, error) {
@@ -602,7 +602,7 @@ func (s *Service) deliverOutgoing(ctx context.Context, home string, record Messa
 	if err != nil {
 		return record, err
 	}
-	response, err := s.relayClient().Send(ctx, contact.RelayURL, relayclient.SendRequest{
+	response, err := s.storeForwardBackend().Send(ctx, contact.RelayURL, transportstoreforward.MailboxSendRequest{
 		MessageID:          record.MessageID,
 		SenderID:           selfProfile.CanonicalID,
 		SenderSigningKey:   selfProfile.SigningPublicKey,
@@ -617,7 +617,7 @@ func (s *Service) deliverOutgoing(ctx context.Context, home string, record Messa
 		_ = updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusFailed, "", contact.RelayURL, "failed", err.Error(), encrypted.Ciphertext, signature)
 		return record, err
 	}
-	if err := updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusQueued, response.RelayMessageID, contact.RelayURL, "queued", "", encrypted.Ciphertext, signature); err != nil {
+	if err := updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusQueued, response.RemoteMessageID, contact.RelayURL, "queued", "", encrypted.Ciphertext, signature); err != nil {
 		return record, err
 	}
 	record.Status = StatusQueued
@@ -750,7 +750,7 @@ func saveSyncCursor(ctx context.Context, tx *sql.Tx, profileID, relayURL, cursor
 	return nil
 }
 
-func ensureIncomingContact(ctx context.Context, tx *sql.Tx, msg relayclient.PullMessage, now time.Time) (contactRecord, error) {
+func ensureIncomingContact(ctx context.Context, tx *sql.Tx, msg transportstoreforward.MailboxPullMessage, now time.Time) (contactRecord, error) {
 	var contact contactRecord
 	err := tx.QueryRowContext(
 		ctx,
@@ -835,7 +835,7 @@ func ensureDirectIncomingContact(ctx context.Context, tx *sql.Tx, env transport.
 	}, nil
 }
 
-func decryptIncomingMessage(selfProfile selfMessagingProfile, msg relayclient.PullMessage) (string, string, error) {
+func decryptIncomingMessage(selfProfile selfMessagingProfile, msg transportstoreforward.MailboxPullMessage) (string, string, error) {
 	payload := signedMessagePayload{
 		MessageID:          msg.MessageID,
 		SenderID:           msg.SenderID,
@@ -861,7 +861,7 @@ func decryptIncomingMessage(selfProfile selfMessagingProfile, msg relayclient.Pu
 	return body, makePreview(body), nil
 }
 
-func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, msg relayclient.PullMessage, body, preview string, now time.Time) error {
+func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, msg transportstoreforward.MailboxPullMessage, body, preview string, now time.Time) error {
 	createdAt := strings.TrimSpace(msg.SentAt)
 	if createdAt == "" {
 		createdAt = now.Format(time.RFC3339Nano)

@@ -9,11 +9,11 @@ import (
 
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
-	"github.com/xiewanpeng/claw-identity/internal/relayclient"
 	"github.com/xiewanpeng/claw-identity/internal/routing"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 	transportlibp2p "github.com/xiewanpeng/claw-identity/internal/transport/libp2p"
+	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 )
 
 type staticDiscoveryService struct {
@@ -51,29 +51,48 @@ func (s staticPlanner) RecordOutcome(ctx context.Context, outcome routing.RouteO
 	return s.record(ctx, outcome)
 }
 
-type callbackTransport struct {
-	name      string
-	routeType transport.RouteType
-	sendFn    func(context.Context, transport.Envelope, transport.RouteCandidate) (transport.SendResult, error)
-	syncFn    func(context.Context, transport.RouteCandidate) (transport.SyncResult, error)
-	ackFn     func(context.Context, transport.RouteCandidate, string) error
+type legacyStoreForwardBackend struct {
+	service     *Service
+	home        string
+	now         time.Time
+	record      MessageRecord
+	contact     contactRecord
+	selfProfile selfMessagingProfile
 }
 
-func (t callbackTransport) Name() string { return t.name }
-func (t callbackTransport) Supports(route transport.RouteCandidate) bool {
-	return route.Type == t.routeType
+func (b legacyStoreForwardBackend) Send(ctx context.Context, _ transport.Envelope, route transport.RouteCandidate) (transport.SendResult, error) {
+	updated, err := b.service.deliverOutgoing(ctx, b.home, b.record, b.contact, b.now)
+	if err != nil {
+		return transport.SendResult{}, err
+	}
+	return transport.SendResult{
+		Route:       route,
+		Delivered:   updated.Status == StatusQueued,
+		Retryable:   true,
+		Description: updated.Status,
+	}, nil
 }
-func (t callbackTransport) Send(ctx context.Context, env transport.Envelope, route transport.RouteCandidate) (transport.SendResult, error) {
-	return t.sendFn(ctx, env, route)
+
+func (b legacyStoreForwardBackend) Recover(ctx context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
+	count, nextCursor, err := b.service.syncStoreForward(ctx, b.home, b.selfProfile, route.Target, b.now)
+	if err != nil {
+		return transport.SyncResult{}, err
+	}
+	return transport.SyncResult{
+		Route:          route,
+		Recovered:      count,
+		AdvancedCursor: nextCursor,
+	}, nil
 }
-func (t callbackTransport) Sync(ctx context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
-	return t.syncFn(ctx, route)
-}
-func (t callbackTransport) Ack(ctx context.Context, route transport.RouteCandidate, cursor string) error {
-	if t.ackFn == nil {
+
+func (b legacyStoreForwardBackend) Acknowledge(ctx context.Context, route transport.RouteCandidate, cursor string) error {
+	if cursor == "" {
 		return nil
 	}
-	return t.ackFn(ctx, route, cursor)
+	return b.service.storeForwardBackend().Ack(ctx, route.Target, transportstoreforward.MailboxAckRequest{
+		RecipientID: b.selfProfile.RecipientID,
+		Cursor:      cursor,
+	})
 }
 
 type directInboxReceiver struct {
@@ -261,28 +280,13 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 			},
 		},
 		staticDiscoveryService{view: view},
-		callbackTransport{
-			name:      "legacy_store_forward",
-			routeType: transport.RouteTypeStoreForward,
-			sendFn: func(ctx context.Context, _ transport.Envelope, _ transport.RouteCandidate) (transport.SendResult, error) {
-				updated, err := s.deliverOutgoing(ctx, home, record, contact, now)
-				if err != nil {
-					return transport.SendResult{}, err
-				}
-				storeForwardRoute := transport.RouteCandidate{
-					Type:     transport.RouteTypeStoreForward,
-					Label:    contact.RelayURL,
-					Priority: 1,
-					Target:   contact.RelayURL,
-				}
-				return transport.SendResult{
-					Route:       storeForwardRoute,
-					Delivered:   updated.Status == StatusQueued,
-					Retryable:   true,
-					Description: updated.Status,
-				}, nil
-			},
-		},
+		transportstoreforward.New(legacyStoreForwardBackend{
+			service: s,
+			home:    home,
+			now:     now,
+			record:  record,
+			contact: contact,
+		}),
 	)
 	runtimeSvc.Transports = append(extraTransports, runtimeSvc.Transports...)
 	return runtimeSvc.Send(ctx, runtimeContactView(contact), agentruntime.SendRequest{
@@ -412,30 +416,12 @@ func (s *Service) syncThroughRuntime(ctx context.Context, home string, selfProfi
 				FreshUntil:      now.UTC().Add(5 * time.Minute),
 			},
 		},
-		callbackTransport{
-			name:      "legacy_store_forward",
-			routeType: transport.RouteTypeRecovery,
-			syncFn: func(ctx context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
-				count, nextCursor, err := s.syncStoreForward(ctx, home, selfProfile, route.Target, now)
-				if err != nil {
-					return transport.SyncResult{}, err
-				}
-				return transport.SyncResult{
-					Route:          route,
-					Recovered:      count,
-					AdvancedCursor: nextCursor,
-				}, nil
-			},
-			ackFn: func(ctx context.Context, _ transport.RouteCandidate, cursor string) error {
-				if cursor == "" {
-					return nil
-				}
-				return s.relayClient().Ack(ctx, route.Target, relayclient.AckRequest{
-					RecipientID: selfProfile.RecipientID,
-					Cursor:      cursor,
-				})
-			},
-		},
+		transportstoreforward.New(legacyStoreForwardBackend{
+			service:     s,
+			home:        home,
+			now:         now,
+			selfProfile: selfProfile,
+		}),
 	)
 	return runtimeSvc.Sync(ctx, routing.ContactRuntimeView{
 		CanonicalID:           selfProfile.CanonicalID,
@@ -506,7 +492,7 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	if err != nil {
 		return 0, "", err
 	}
-	pulled, err := s.relayClient().Pull(ctx, relayURL, selfProfile.RecipientID, cursor)
+	pulled, err := s.storeForwardBackend().Pull(ctx, relayURL, selfProfile.RecipientID, cursor)
 	if err != nil {
 		return 0, "", err
 	}

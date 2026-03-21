@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
-	"github.com/xiewanpeng/claw-identity/internal/relayclient"
+	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 )
 
 func TestRelaySendPullAck(t *testing.T) {
@@ -19,7 +19,7 @@ func TestRelaySendPullAck(t *testing.T) {
 	}
 	defer server.Shutdown(context.Background())
 
-	client := relayclient.New()
+	client := transportstoreforward.LegacyHTTPMailboxBackend{}
 	publicKey, _, err := messagecrypto.GenerateX25519KeyPair()
 	if err != nil {
 		t.Fatalf("generate x25519 key pair: %v", err)
@@ -28,7 +28,7 @@ func TestRelaySendPullAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt relay payload: %v", err)
 	}
-	sent, err := client.Send(context.Background(), result.URL, relayclient.SendRequest{
+	sent, err := client.Send(context.Background(), result.URL, transportstoreforward.MailboxSendRequest{
 		MessageID:          "msg_1",
 		SenderID:           "did:key:sender",
 		SenderSigningKey:   "c2lnbmluZ19rZXk",
@@ -42,8 +42,8 @@ func TestRelaySendPullAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send relay message: %v", err)
 	}
-	if sent.RelayMessageID == "" || sent.Cursor == "" {
-		t.Fatalf("expected relay message id and cursor")
+	if sent.RemoteMessageID == "" {
+		t.Fatalf("expected relay message id")
 	}
 
 	pulled, err := client.Pull(context.Background(), result.URL, "rcpt_1", "")
@@ -57,7 +57,7 @@ func TestRelaySendPullAck(t *testing.T) {
 		t.Fatalf("expected ciphertext in pulled message")
 	}
 
-	if err := client.Ack(context.Background(), result.URL, relayclient.AckRequest{
+	if err := client.Ack(context.Background(), result.URL, transportstoreforward.MailboxAckRequest{
 		RecipientID: "rcpt_1",
 		Cursor:      pulled.NextCursor,
 	}); err != nil {

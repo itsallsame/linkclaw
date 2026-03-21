@@ -14,7 +14,7 @@ The current communication-related core is concentrated in:
 - [internal/card/service.go](/home/ubuntu/fork_lk/linkclaw/internal/card/service.go)
 - [internal/importer/service.go](/home/ubuntu/fork_lk/linkclaw/internal/importer/service.go)
 - [internal/relayserver/server.go](/home/ubuntu/fork_lk/linkclaw/internal/relayserver/server.go)
-- [internal/relayclient](/home/ubuntu/fork_lk/linkclaw/internal/relayclient)
+- legacy HTTP mailbox client logic, now co-located under [internal/transport/storeforward](/home/ubuntu/fork_lk/linkclaw/internal/transport/storeforward)
 - [internal/messagingprofile](/home/ubuntu/fork_lk/linkclaw/internal/messagingprofile)
 
 The current shape is still V0-oriented:

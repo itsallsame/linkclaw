@@ -61,10 +61,7 @@ Recommended minimum host config:
     "allow": ["linkclaw"],
     "entries": {
       "linkclaw": {
-        "enabled": true,
-        "config": {
-          "relayUrl": "http://127.0.0.1:8788"
-        }
+        "enabled": true
       }
     }
   }
@@ -74,7 +71,7 @@ Recommended minimum host config:
 Assumptions:
 
 - `linkclaw` is already on `PATH`, or `LINKCLAW_BINARY` is set
-- relay is reachable at the configured URL
+- no legacy HTTP fallback is required for the normal runtime-backed path
 
 ## 5. First-run acceptance
 
@@ -88,9 +85,10 @@ After host restart:
 
 Expected result:
 
-- onboarding reports binary and relay health
-- identity card includes `relay_url`
-- messages queue successfully
+- onboarding reports binary health
+- relay may be `not configured` unless you intentionally enable legacy HTTP fallback
+- identity card includes `relay_url` only when that legacy fallback is explicitly configured
+- messages queue or deliver successfully through the current runtime-backed path
 - the second host can sync and read the message
 
 ## 6. Release notes / docs update
@@ -129,4 +127,4 @@ Do not include local runtime artifacts such as:
 - `linkclaw-relay.db`
 - local `~/.linkclaw` state
 - temporary exported cards
-- test relay databases
+- test relay databases or relay shim outputs

@@ -354,7 +354,7 @@ const plugin = {
     api.registerTool({
       name: "linkclaw_setup",
       description:
-        "Initialize or repair the local LinkClaw identity in the configured home. Use this when a user asks to set up LinkClaw, initialize an identity, or make messaging ready. relayUrl from plugin config is applied automatically.",
+        "Initialize or repair the local LinkClaw identity in the configured home. Use this when a user asks to set up LinkClaw, initialize an identity, or make messaging ready. Legacy HTTP fallback is only used when relayUrl is explicitly configured.",
       optional: true,
       parameters: {
         type: "object",
@@ -410,7 +410,7 @@ const plugin = {
     api.registerTool({
       name: "linkclaw_share_card",
       description:
-        "Export the current signed LinkClaw identity card JSON for sharing with another user. relayUrl from plugin config is applied automatically so the card is message-ready.",
+        "Export the current signed LinkClaw identity card JSON for sharing with another user. The card includes legacy HTTP fallback details only when relayUrl is explicitly configured.",
       optional: true,
       parameters: {
         type: "object",
