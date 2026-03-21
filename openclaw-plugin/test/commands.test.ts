@@ -526,12 +526,12 @@ test("runSetupCommand initializes an uninitialized home", async () => {
   );
 
   assert.equal(result.type, "message");
-  assert.match(result.message, /LinkClaw setup completed/);
+  assert.match(result.message, /LinkClaw 初始化完成/);
   assert.match(result.message, /canonical id: did:key:z/);
-  assert.match(result.message, /Checks:/);
+  assert.match(result.message, /检查项：/);
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
-  assert.match(result.message, /binary: ok/);
+  assert.match(result.message, /binary: 正常/);
   assert.match(result.message, /relay: not configured/);
   assert.match(result.message, /publish origin: not configured/);
 });
@@ -546,9 +546,9 @@ test("runOnboardingCommand defaults to a readiness check when no args are provid
   );
 
   assert.equal(result.type, "message");
-  assert.match(result.message, /LinkClaw onboarding/);
-  assert.match(result.message, /LinkClaw setup check completed/);
-  assert.match(result.message, /state: not initialized/);
+  assert.match(result.message, /LinkClaw 首次引导/);
+  assert.match(result.message, /LinkClaw 检查完成/);
+  assert.match(result.message, /状态：未初始化/);
   assert.match(result.message, /relay: not configured/);
 });
 
@@ -564,8 +564,8 @@ test("runSetupCommand can locate the binary through LINKCLAW_BINARY", async () =
     );
 
     assert.equal(result.type, "message");
-    assert.match(result.message, /LinkClaw setup completed/);
-    assert.match(result.message, /binary: ok/);
+    assert.match(result.message, /LinkClaw 初始化完成/);
+    assert.match(result.message, /binary: 正常/);
   } finally {
     if (previousBinary === undefined) {
       delete process.env.LINKCLAW_BINARY;
@@ -585,13 +585,13 @@ test("runSetupCommand supports check-only mode before initialization", async () 
   );
 
   assert.equal(result.type, "message");
-  assert.match(result.message, /LinkClaw setup check completed/);
-  assert.match(result.message, /state: not initialized/);
+  assert.match(result.message, /LinkClaw 检查完成/);
+  assert.match(result.message, /状态：未初始化/);
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
-  assert.match(result.message, /binary: ok/);
+  assert.match(result.message, /binary: 正常/);
   assert.match(result.message, /relay: not configured/);
-  assert.match(result.message, /run \/linkclaw-setup --display-name <name>/);
+  assert.match(result.message, /运行 \/linkclaw-setup --display-name <name>/);
 });
 
 test("runSetupCommand reports relay reachability when configured", async () => {
@@ -613,7 +613,7 @@ test("runSetupCommand reports relay reachability when configured", async () => {
     );
 
     assert.equal(result.type, "message");
-    assert.match(result.message, /LinkClaw setup completed/);
+    assert.match(result.message, /LinkClaw 初始化完成/);
     assert.match(result.message, /relay: ok \(404\) http:\/\/127\.0\.0\.1:/);
     assert.match(result.message, /publish origin: not configured/);
   } finally {
@@ -633,7 +633,7 @@ test("runSetupCommand reports publish origin readiness when configured", async (
     );
 
     assert.equal(result.type, "message");
-    assert.match(result.message, /LinkClaw setup completed/);
+    assert.match(result.message, /LinkClaw 初始化完成/);
     assert.match(result.message, new RegExp(`publish origin: ok ${fixture.origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   } finally {
     await fixture.close();
@@ -660,7 +660,7 @@ test("runSetupCommand reports ready state in check-only mode after initializatio
   );
 
   assert.equal(result.type, "message");
-  assert.match(result.message, /LinkClaw is ready/);
+  assert.match(result.message, /LinkClaw 已就绪/);
   assert.match(result.message, /contacts: 0/);
 });
 
@@ -722,11 +722,11 @@ test("runStatusCommand reports not initialized state", async () => {
   );
 
   assert.equal(result.type, "message");
-  assert.match(result.message, /LinkClaw status/);
-  assert.match(result.message, /state: not initialized/);
+  assert.match(result.message, /LinkClaw 状态/);
+  assert.match(result.message, /状态：未初始化/);
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
-  assert.match(result.message, /binary: ok/);
+  assert.match(result.message, /binary: 正常/);
 });
 
 test("runMessageCommand and inbox/sync summarize messaging workflows", async () => {

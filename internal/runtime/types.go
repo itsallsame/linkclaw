@@ -3,6 +3,7 @@ package runtime
 import "github.com/xiewanpeng/claw-identity/internal/transport"
 
 type SendRequest struct {
+	MessageID   string
 	ContactRef  string
 	SenderID    string
 	RecipientID string

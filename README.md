@@ -118,9 +118,9 @@ The CLI prefers a global `wrangler` binary and falls back to `npx wrangler@lates
 
 ## OpenClaw Plugin
 
-The OpenClaw integration lives in [`openclaw-plugin`](openclaw-plugin/README.md).
+OpenClaw 集成在 [`openclaw-plugin`](openclaw-plugin/README.md)。
 
-Supported install paths follow normal OpenClaw plugin delivery:
+当前支持的安装方式遵循 OpenClaw 标准插件安装路径：
 
 - development checkout:
 
@@ -136,9 +136,10 @@ npm run pack:plugin:tgz
 openclaw plugins install ./linkclaw-0.1.0.tgz
 ```
 
-The package README covers plugin registration, `binaryPath` / `home` / `publishOrigin` config, passive discovery, and the `/linkclaw-import` plus `/linkclaw-share` commands.
+插件 README 会覆盖插件注册、`binaryPath` / `home` / `publishOrigin` 配置、被动发现，以及 `/linkclaw-import` 和 `/linkclaw-share` 的用法。
 
-For a first-time end-user install and first-run flow, see [OpenClaw User Manual (ZH)](docs/OPENCLAW_USER_MANUAL_ZH.md).
+如果按普通用户路径安装和首次使用，优先看：
+- [OpenClaw User Manual (ZH)](docs/OPENCLAW_USER_MANUAL_ZH.md)
 
 ## Docs
 

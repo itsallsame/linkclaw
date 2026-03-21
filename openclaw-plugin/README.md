@@ -1,11 +1,16 @@
-# LinkClaw OpenClaw Plugin
+# LinkClaw OpenClaw 插件
 
-This plugin keeps OpenClaw on the safe side of the LinkClaw boundary:
+如果你是普通用户，先看中文手册：
 
-- OpenClaw calls the local `linkclaw` core binary via `--json`
-- the plugin never reads `state.db` or key files directly
-- the publishing skill formats bundle artifacts and self-checks for agent or slash-command use
-- inbound `did.json` and `agent-card.json` links can be inspected automatically and surfaced as import prompts
+- [OpenClaw 用户安装与使用手册（中文）](../docs/OPENCLAW_USER_MANUAL_ZH.md)
+- [OpenClaw 最小验收步骤（中文）](../docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
+
+这个插件的目标是把 OpenClaw 保持在 LinkClaw 边界之外：
+
+- OpenClaw 通过 `--json` 调本地 `linkclaw` core binary
+- 插件不会直接读取 `state.db` 或密钥文件
+- 发布 skill 会格式化 bundle 并做自检
+- 收到 `did.json` / `agent-card.json` 链接时可自动检查并提示导入
 
 ## Files
 
@@ -20,9 +25,11 @@ This plugin keeps OpenClaw on the safe side of the LinkClaw boundary:
 
 ## Install
 
-If you want the shortest user-facing path first, start with [OpenClaw User Manual (ZH)](../docs/OPENCLAW_USER_MANUAL_ZH.md).
+优先阅读：
 
-For the shortest go/no-go validation on a clean host, use [OpenClaw Minimal Acceptance (ZH)](../docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md) and [OpenClaw Minimal Plugin Config](../docs/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json).
+- [OpenClaw User Manual (ZH)](../docs/OPENCLAW_USER_MANUAL_ZH.md)
+- [OpenClaw Minimal Acceptance (ZH)](../docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
+- [OpenClaw Minimal Plugin Config](../docs/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json)
 
 ### Zero-config baseline
 

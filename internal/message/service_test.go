@@ -494,8 +494,8 @@ func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("direct send: %v", err)
 	}
-	if sent.Message.Status != StatusQueued {
-		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
+	if sent.Message.Status != StatusDelivered {
+		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusDelivered)
 	}
 
 	inbox, err := aliceService.Inbox(context.Background(), ListOptions{Home: aliceHome})
@@ -510,5 +510,113 @@ func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
 	}
 	if inbox.Conversations[0].UnreadCount != 1 {
 		t.Fatalf("unread = %d, want 1", inbox.Conversations[0].UnreadCount)
+	}
+}
+
+func TestDirectDeliveryPreservesMultipleMessages(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
+
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAliceDirectMulti",
+		DisplayName: "Alice Direct Multi",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobDirectMulti",
+		DisplayName: "Bob Direct Multi",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
+	if err != nil {
+		t.Fatalf("export bob card: %v", err)
+	}
+	bobCardJSON, err := json.Marshal(bobCard.Card)
+	if err != nil {
+		t.Fatalf("marshal bob card: %v", err)
+	}
+
+	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice into bob: %v", err)
+	}
+	if _, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  aliceHome,
+		Input: string(bobCardJSON),
+	}); err != nil {
+		t.Fatalf("import bob into alice: %v", err)
+	}
+
+	aliceService := NewService()
+	if _, err := aliceService.Status(context.Background(), ListOptions{Home: aliceHome}); err != nil {
+		t.Fatalf("prime alice direct runtime: %v", err)
+	}
+
+	bobService := NewService()
+	first, err := bobService.Send(context.Background(), SendOptions{
+		Home:       bobHome,
+		ContactRef: aliceImportedIntoBob.ContactID,
+		Body:       "hello direct first",
+	})
+	if err != nil {
+		t.Fatalf("first direct send: %v", err)
+	}
+	second, err := bobService.Send(context.Background(), SendOptions{
+		Home:       bobHome,
+		ContactRef: aliceImportedIntoBob.ContactID,
+		Body:       "hello direct second",
+	})
+	if err != nil {
+		t.Fatalf("second direct send: %v", err)
+	}
+	if first.Message.MessageID == second.Message.MessageID {
+		t.Fatalf("message ids collided: %q", first.Message.MessageID)
+	}
+
+	thread, err := aliceService.Thread(context.Background(), ThreadOptions{
+		Home:       aliceHome,
+		ContactRef: "did:key:z6MkBobDirectMulti",
+		Limit:      10,
+		MarkRead:   false,
+	})
+	if err != nil {
+		t.Fatalf("alice thread: %v", err)
+	}
+	if len(thread.Conversation.Messages) != 2 {
+		t.Fatalf("thread messages = %d, want 2", len(thread.Conversation.Messages))
+	}
+	bodies := map[string]bool{}
+	for _, msg := range thread.Conversation.Messages {
+		bodies[msg.Body] = true
+	}
+	if !bodies["hello direct first"] || !bodies["hello direct second"] {
+		t.Fatalf("thread bodies = %#v", thread.Conversation.Messages)
 	}
 }

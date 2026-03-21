@@ -68,7 +68,7 @@ func (b legacyStoreForwardBackend) Send(ctx context.Context, _ transport.Envelop
 	}
 	return transport.SendResult{
 		Route:       route,
-		Delivered:   updated.Status == StatusQueued,
+		Delivered:   false,
 		Retryable:   true,
 		Description: updated.Status,
 	}, nil
@@ -314,6 +314,7 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 	)
 	runtimeSvc.Transports = append(extraTransports, runtimeSvc.Transports...)
 	return runtimeSvc.Send(ctx, runtimeContactView(contact), agentruntime.SendRequest{
+		MessageID:   record.MessageID,
 		ContactRef:  contact.ContactID,
 		SenderID:    selfProfile.CanonicalID,
 		RecipientID: contact.RecipientID,
@@ -405,8 +406,10 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 		PlaintextBody:     record.Body,
 		PlaintextPreview:  record.Preview,
 		Status:            record.Status,
+		SelectedRoute:     record.SelectedRoute,
 		CiphertextVersion: "v0",
 		CreatedAt:         record.CreatedAt,
+		DeliveredAt:       record.DeliveredAt,
 	})
 }
 
@@ -499,8 +502,9 @@ func (s *Service) receiveDirectEnvelope(ctx context.Context, home string, selfPr
 		RecipientRouteID:  selfProfile.RecipientID,
 		Body:              env.Plaintext,
 		Preview:           makePreview(env.Plaintext),
-		Status:            StatusQueued,
+		Status:            StatusDelivered,
 		CreatedAt:         now.Format(time.RFC3339Nano),
+		DeliveredAt:       now.Format(time.RFC3339Nano),
 	}}, now)
 }
 

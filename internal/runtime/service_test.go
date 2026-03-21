@@ -117,6 +117,9 @@ func TestServiceSendPrefersMatchingTransport(t *testing.T) {
 	if result.Transport != "libp2p_direct" {
 		t.Fatalf("Send() transport = %q, want %q", result.Transport, "libp2p_direct")
 	}
+	if result.Status != "delivered" {
+		t.Fatalf("Send() status = %q, want delivered", result.Status)
+	}
 	if len(planner.outcomes) != 1 || !planner.outcomes[0].Success {
 		t.Fatalf("Send() planner outcomes = %#v, want one successful outcome", planner.outcomes)
 	}

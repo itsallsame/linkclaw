@@ -29,6 +29,7 @@ const (
 
 	StatusPending = "pending"
 	StatusQueued  = "queued"
+	StatusDelivered = "delivered"
 	StatusFailed  = "failed"
 )
 
@@ -70,6 +71,8 @@ type MessageRecord struct {
 	Preview            string `json:"preview"`
 	Status             string `json:"status"`
 	CreatedAt          string `json:"created_at"`
+	DeliveredAt        string `json:"delivered_at,omitempty"`
+	SelectedRoute      transport.RouteCandidate `json:"selected_route,omitempty"`
 }
 
 type Conversation struct {
@@ -238,6 +241,10 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 			record.Status = StatusFailed
 		} else {
 			record.Status = runtimeResult.Status
+			record.SelectedRoute = runtimeResult.SelectedRoute
+			if runtimeResult.Status == StatusDelivered {
+				record.DeliveredAt = now.Format(time.RFC3339Nano)
+			}
 			if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
 				return SendResult{}, err
 			}
@@ -965,7 +972,7 @@ func insertDirectIncomingMessage(ctx context.Context, tx *sql.Tx, conversation C
 		selfProfile.RecipientID,
 		env.Plaintext,
 		preview,
-		StatusQueued,
+		StatusDelivered,
 		createdAt,
 		createdAt,
 	); err != nil {

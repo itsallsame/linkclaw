@@ -42,8 +42,12 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 		return SendResult{}, err
 	}
 	_ = presence
+	messageID := req.MessageID
+	if messageID == "" {
+		messageID = req.SenderID + "->" + req.RecipientID
+	}
 	envelope := transport.Envelope{
-		MessageID:   req.SenderID + "->" + req.RecipientID,
+		MessageID:   messageID,
 		SenderID:    req.SenderID,
 		RecipientID: req.RecipientID,
 		Plaintext:   req.Plaintext,
@@ -75,9 +79,13 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 			Delivered: sendResult.Delivered,
 			Retryable: sendResult.Retryable,
 		})
+		status := "queued"
+		if sendResult.Delivered {
+			status = "delivered"
+		}
 		return SendResult{
 			MessageID:     envelope.MessageID,
-			Status:        "queued",
+			Status:        status,
 			SelectedRoute: route,
 			Transport:     adapter.Name(),
 		}, nil

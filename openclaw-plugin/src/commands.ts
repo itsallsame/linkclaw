@@ -180,14 +180,14 @@ export async function runSetupCommand(
     return {
       type: "message",
       message: [
-        "LinkClaw is ready.",
+        "LinkClaw 已就绪。",
         `home: ${resolveLinkClawHome(options.home, config)}`,
         `contacts: ${contacts}`,
         ...formatHealthSection(health),
-        "Next:",
-        "- run /linkclaw-share to share your identity surface",
-        "- run /linkclaw-connect <card-or-url> to add a contact",
-        "- run /linkclaw-message <contact> <text> to send a message",
+        "下一步：",
+        "- 运行 /linkclaw-share 分享你的身份卡",
+        "- 运行 /linkclaw-connect <card-or-url> 添加联系人",
+        "- 运行 /linkclaw-message <contact> <text> 发送消息",
       ].join("\n"),
     };
   } catch (error) {
@@ -203,12 +203,12 @@ export async function runSetupCommand(
     return {
       type: "message",
       message: [
-        "LinkClaw setup check completed.",
+        "LinkClaw 检查完成。",
         `home: ${resolveLinkClawHome(options.home, config)}`,
-        "state: not initialized",
+        "状态：未初始化",
         ...formatHealthSection(health),
-        "Next:",
-        "- run /linkclaw-setup --display-name <name> to initialize this home",
+        "下一步：",
+        "- 运行 /linkclaw-setup --display-name <name> 初始化当前 home",
       ].join("\n"),
     };
   }
@@ -217,9 +217,9 @@ export async function runSetupCommand(
     return {
       type: "message",
       message: [
-        "LinkClaw home is not initialized yet.",
-        "Usage: /linkclaw-setup [--check-only] [--display-name <name>] [--canonical-id <did:key|did:web>]",
-        "Example: /linkclaw-setup --display-name Alice",
+        "LinkClaw 当前 home 还没有初始化。",
+        "用法：/linkclaw-setup [--check-only] [--display-name <name>] [--canonical-id <did:key|did:web>]",
+        "示例：/linkclaw-setup --display-name Alice",
       ].join("\n"),
     };
   }
@@ -239,14 +239,14 @@ export async function runSetupCommand(
     return {
       type: "message",
       message: [
-        "LinkClaw setup completed.",
+        "LinkClaw 初始化完成。",
         `home: ${String(result?.home ?? options.home ?? config.home ?? "")}`,
         `canonical id: ${String(result?.identity && asObject(result.identity)?.canonical_id ? asObject(result.identity)?.canonical_id : options.canonicalId)}`,
         ...(describeMessagingReadiness(result).length > 0 ? describeMessagingReadiness(result) : []),
         ...formatHealthSection(health),
-        "Next:",
-        "- run /linkclaw-share to publish or share your identity",
-        "- run /linkclaw-connect <card-or-url> after the other side shares theirs",
+        "下一步：",
+        "- 运行 /linkclaw-share 发布或分享你的身份卡",
+        "- 对方分享后，运行 /linkclaw-connect <card-or-url> 导入联系人",
       ].join("\n"),
     };
   } catch (error) {
@@ -267,7 +267,7 @@ export async function runOnboardingCommand(
   const result = await runSetupCommand(config, delegatedArgs, pluginRoot);
   return {
     type: "message",
-    message: ["LinkClaw onboarding", result.message].join("\n"),
+    message: ["LinkClaw 首次引导", result.message].join("\n"),
   };
 }
 
@@ -337,12 +337,12 @@ export async function runStatusCommand(
       return {
         type: "message",
         message: [
-        "LinkClaw status",
+        "LinkClaw 状态",
         `home: ${resolveLinkClawHome(options.home, config)}`,
-        "state: not initialized",
+        "状态：未初始化",
         ...formatHealthSection(health),
-        "Next:",
-        "- run /linkclaw-setup --display-name <name>",
+        "下一步：",
+        "- 运行 /linkclaw-setup --display-name <name>",
       ].join("\n"),
       };
     }
@@ -1226,16 +1226,19 @@ function formatMessageSend(value: unknown): string {
   const record = asObject(value);
   const message = asObject(record?.message);
   const conversation = asObject(record?.conversation);
-  const lines = ["LinkClaw message queued."];
+  const status = typeof message?.status === "string" ? message.status : "";
+  const headline =
+    status === "delivered" ? "LinkClaw message delivered." : "LinkClaw message queued.";
+  const lines = [headline];
   if (typeof conversation?.conversation_id === "string") {
     lines.push(`conversation: ${conversation.conversation_id}`);
   }
   if (typeof message?.message_id === "string") {
     lines.push(`message: ${message.message_id}`);
   }
-  if (typeof message?.status === "string") {
-    lines.push(`status: ${message.status}`);
-    if (message.status === "failed") {
+  if (status) {
+    lines.push(`status: ${status}`);
+    if (status === "failed") {
       lines.push("delivery: failed before relay acceptance");
     }
   }
@@ -1243,9 +1246,12 @@ function formatMessageSend(value: unknown): string {
     lines.push(`preview: ${message.preview}`);
   }
   lines.push("Next:");
-  if (message?.status === "failed") {
+  if (status === "failed") {
     lines.push("- run /linkclaw-setup to verify your local identity and relay config");
     lines.push("- confirm the contact was imported from a full identity card, not a partial profile");
+  } else if (status === "delivered") {
+    lines.push("- the recipient can open /linkclaw-thread <contact> to refresh the conversation");
+    lines.push("- if the UI has not refreshed yet, they can run /linkclaw-sync once");
   } else {
     lines.push("- the recipient needs to run /linkclaw-sync to receive it");
   }
@@ -1989,9 +1995,9 @@ function formatMarkedSection(label: string, lines: string[]): string[] {
 
 function formatHealthSection(health: SetupHealth): string[] {
   return [
-    "Checks:",
+    "检查项：",
     "--- health-checks-begin ---",
-    `- binary: ok (${health.binaryPath})`,
+    `- binary: 正常 (${health.binaryPath})`,
     `- relay: ${health.relayStatus}`,
     `- publish origin: ${health.publishStatus}`,
     "--- health-checks-end ---",
