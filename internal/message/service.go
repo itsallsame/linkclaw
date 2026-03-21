@@ -38,6 +38,11 @@ type SendOptions struct {
 	Body       string
 }
 
+type ReceiveDirectOptions struct {
+	Home    string
+	Payload string
+}
+
 type SyncOptions struct {
 	Home string
 }
@@ -145,6 +150,8 @@ type selfMessagingProfile struct {
 	CanonicalID              string
 	RecipientID              string
 	RelayURL                 string
+	DirectURL                string
+	DirectToken              string
 	SigningPublicKey         string
 	SigningPrivateKeyPath    string
 	EncryptionPrivateKeyPath string
@@ -158,6 +165,8 @@ type contactRecord struct {
 	SigningPublicKey    string
 	EncryptionPublicKey string
 	RelayURL            string
+	DirectURL           string
+	DirectToken         string
 	Status              string
 }
 
@@ -223,7 +232,7 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 	if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
 		return SendResult{}, err
 	}
-	if contact.RelayURL != "" || directTransportEnabled() {
+	if contact.RelayURL != "" || strings.TrimSpace(contact.DirectURL) != "" || directTransportEnabled() {
 		runtimeResult, err := s.sendThroughRuntime(ctx, home, selfProfile, contact, record, now)
 		if err != nil {
 			record.Status = StatusFailed
@@ -240,6 +249,29 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 		Message:      record,
 		SentAt:       now.Format(time.RFC3339Nano),
 	}, nil
+}
+
+func (s *Service) ReceiveDirect(ctx context.Context, opts ReceiveDirectOptions) error {
+	payload := strings.TrimSpace(opts.Payload)
+	if payload == "" {
+		return fmt.Errorf("direct envelope payload is required")
+	}
+	now := s.now()
+	db, home, err := openStateDB(ctx, opts.Home, now)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	selfProfile, err := loadSelfMessagingProfile(ctx, db, home)
+	if err != nil {
+		return err
+	}
+	var env transport.Envelope
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		return fmt.Errorf("decode direct envelope: %w", err)
+	}
+	return s.receiveDirectEnvelope(ctx, home, selfProfile, env, now)
 }
 
 func (s *Service) Inbox(ctx context.Context, opts ListOptions) (InboxResult, error) {
@@ -438,7 +470,7 @@ func resolveContact(ctx context.Context, tx *sql.Tx, ref string) (contactRecord,
 	}
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, status
+		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, status
 		 FROM contacts
 		 WHERE contact_id = ? OR canonical_id = ? OR display_name = ?
 		 ORDER BY created_at ASC`,
@@ -454,7 +486,7 @@ func resolveContact(ctx context.Context, tx *sql.Tx, ref string) (contactRecord,
 	var matches []contactRecord
 	for rows.Next() {
 		var record contactRecord
-		if err := rows.Scan(&record.ContactID, &record.CanonicalID, &record.DisplayName, &record.RecipientID, &record.SigningPublicKey, &record.EncryptionPublicKey, &record.RelayURL, &record.Status); err != nil {
+		if err := rows.Scan(&record.ContactID, &record.CanonicalID, &record.DisplayName, &record.RecipientID, &record.SigningPublicKey, &record.EncryptionPublicKey, &record.RelayURL, &record.DirectURL, &record.DirectToken, &record.Status); err != nil {
 			return contactRecord{}, fmt.Errorf("scan contact for message send: %w", err)
 		}
 		matches = append(matches, record)
@@ -628,14 +660,24 @@ func loadSelfMessagingProfile(ctx context.Context, db *sql.DB, home string) (sel
 	var profile selfMessagingProfile
 	err := db.QueryRowContext(
 		ctx,
-		`SELECT s.self_id, s.canonical_id, p.recipient_id, p.relay_url,
+		`SELECT s.self_id, s.canonical_id, p.recipient_id, p.relay_url, p.direct_url, p.direct_token,
 		        k.public_key, k.private_key_ref, p.encryption_private_key_ref
 		 FROM self_identities s
 		 JOIN self_messaging_profiles p ON p.self_id = s.self_id
 		 JOIN keys k ON k.owner_type = 'self' AND k.owner_id = s.self_id AND k.status = 'active'
 		 ORDER BY s.created_at ASC
 		 LIMIT 1`,
-	).Scan(&profile.SelfID, &profile.CanonicalID, &profile.RecipientID, &profile.RelayURL, &profile.SigningPublicKey, &profile.SigningPrivateKeyPath, &profile.EncryptionPrivateKeyPath)
+	).Scan(
+		&profile.SelfID,
+		&profile.CanonicalID,
+		&profile.RecipientID,
+		&profile.RelayURL,
+		&profile.DirectURL,
+		&profile.DirectToken,
+		&profile.SigningPublicKey,
+		&profile.SigningPrivateKeyPath,
+		&profile.EncryptionPrivateKeyPath,
+	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return selfMessagingProfile{}, fmt.Errorf("self messaging profile not found; export a card first")
@@ -754,12 +796,12 @@ func ensureIncomingContact(ctx context.Context, tx *sql.Tx, msg transportstorefo
 	var contact contactRecord
 	err := tx.QueryRowContext(
 		ctx,
-		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, status
+		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, status
 		 FROM contacts
 		 WHERE canonical_id = ?
 		 LIMIT 1`,
 		msg.SenderID,
-	).Scan(&contact.ContactID, &contact.CanonicalID, &contact.DisplayName, &contact.RecipientID, &contact.SigningPublicKey, &contact.EncryptionPublicKey, &contact.RelayURL, &contact.Status)
+	).Scan(&contact.ContactID, &contact.CanonicalID, &contact.DisplayName, &contact.RecipientID, &contact.SigningPublicKey, &contact.EncryptionPublicKey, &contact.RelayURL, &contact.DirectURL, &contact.DirectToken, &contact.Status)
 	switch {
 	case err == nil:
 		if contact.SigningPublicKey != "" && contact.SigningPublicKey != msg.SenderSigningKey {
@@ -799,12 +841,12 @@ func ensureDirectIncomingContact(ctx context.Context, tx *sql.Tx, env transport.
 	var contact contactRecord
 	err := tx.QueryRowContext(
 		ctx,
-		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, status
+		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, status
 		 FROM contacts
 		 WHERE canonical_id = ?
 		 LIMIT 1`,
 		env.SenderID,
-	).Scan(&contact.ContactID, &contact.CanonicalID, &contact.DisplayName, &contact.RecipientID, &contact.SigningPublicKey, &contact.EncryptionPublicKey, &contact.RelayURL, &contact.Status)
+	).Scan(&contact.ContactID, &contact.CanonicalID, &contact.DisplayName, &contact.RecipientID, &contact.SigningPublicKey, &contact.EncryptionPublicKey, &contact.RelayURL, &contact.DirectURL, &contact.DirectToken, &contact.Status)
 	switch {
 	case err == nil:
 		return contact, nil

@@ -1,8 +1,11 @@
 package libp2p
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -81,12 +84,42 @@ func BootSession(cfg SessionConfig) (*Session, error) {
 	}, nil
 }
 
-func (s *Session) SendDirect(context.Context, transport.Envelope, transport.RouteCandidate) (transport.SendResult, error) {
+func (s *Session) SendDirect(ctx context.Context, env transport.Envelope, route transport.RouteCandidate) (transport.SendResult, error) {
 	if s == nil || !s.Enabled {
 		return transport.SendResult{}, fmt.Errorf("libp2p direct session is disabled")
 	}
 	RegisterSession(s)
-	return transport.SendResult{}, fmt.Errorf("libp2p direct session is not connected")
+	target := strings.TrimSpace(route.Target)
+	if target == "" {
+		return transport.SendResult{}, fmt.Errorf("direct route target is required")
+	}
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		return transport.SendResult{}, fmt.Errorf("libp2p direct session is not connected")
+	}
+	body, err := json.Marshal(env)
+	if err != nil {
+		return transport.SendResult{}, fmt.Errorf("encode direct envelope: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return transport.SendResult{}, fmt.Errorf("build direct request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return transport.SendResult{}, fmt.Errorf("send direct request: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return transport.SendResult{}, fmt.Errorf("direct endpoint returned http %d", res.StatusCode)
+	}
+	return transport.SendResult{
+		Route:       route,
+		RemoteID:    env.MessageID,
+		Delivered:   true,
+		Retryable:   false,
+		Description: "direct delivered",
+	}, nil
 }
 
 func RegisterSession(session *Session) {

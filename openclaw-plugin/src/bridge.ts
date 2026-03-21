@@ -10,6 +10,8 @@ export type LinkClawPluginConfig = {
   binaryPath?: string;
   home?: string;
   relayUrl?: string;
+  directUrl?: string;
+  directToken?: string;
   publishOrigin?: string;
   publishOutput?: string;
   publishTier?: "minimum" | "recommended" | "full";
@@ -29,6 +31,7 @@ export type LinkClawCommand =
   | "message_outbox"
   | "message_sync"
   | "message_status"
+  | "message_receive_direct"
   | "known_ls"
   | "known_show"
   | "known_trust"
@@ -55,6 +58,7 @@ export type LinkClawBridgeRequest = {
   noteBody?: string;
   allowDiscovered?: boolean;
   allowMismatch?: boolean;
+  payload?: string;
 };
 
 export type LinkClawEnvelopeError = {
@@ -123,6 +127,8 @@ export async function runLinkClaw(
 ): Promise<LinkClawEnvelope> {
   const prepared = await prepareLinkClawCommand(config, request, pluginRoot);
   const relayUrl = resolveRelayUrl(config);
+  const directUrl = resolveDirectUrl(config);
+  const directToken = resolveDirectToken(config);
   try {
     const { stdout } = await execFileAsync(prepared.binaryPath, prepared.args, {
       cwd: dirname(pluginRoot),
@@ -130,6 +136,8 @@ export async function runLinkClaw(
         ...process.env,
         LINKCLAW_HOME: prepared.home,
         ...(relayUrl ? { LINKCLAW_RELAY_URL: relayUrl } : {}),
+        ...(directUrl ? { LINKCLAW_DIRECT_URL: directUrl, LINKCLAW_EXPERIMENTAL_DIRECT: "1" } : {}),
+        ...(directToken ? { LINKCLAW_DIRECT_TOKEN: directToken } : {}),
       },
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024,
@@ -174,6 +182,21 @@ export async function runLinkClaw(
   }
 }
 
+export async function receiveDirectPayload(
+  config: LinkClawPluginConfig,
+  payload: string,
+  pluginRoot: string,
+): Promise<LinkClawEnvelope> {
+  return runLinkClaw(
+    config,
+    {
+      command: "message_receive_direct",
+      payload,
+    },
+    pluginRoot,
+  );
+}
+
 export async function prepareLinkClawCommand(
   config: LinkClawPluginConfig,
   request: LinkClawBridgeRequest,
@@ -201,6 +224,24 @@ export function resolveLinkClawHome(
 
 export function resolveRelayUrl(config: LinkClawPluginConfig): string | undefined {
   const raw = config.relayUrl ?? process.env.LINKCLAW_RELAY_URL;
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+export function resolveDirectUrl(config: LinkClawPluginConfig): string | undefined {
+  const raw = config.directUrl ?? process.env.LINKCLAW_DIRECT_URL;
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+export function resolveDirectToken(config: LinkClawPluginConfig): string | undefined {
+  const raw = config.directToken ?? process.env.LINKCLAW_DIRECT_TOKEN;
   if (typeof raw !== "string") {
     return undefined;
   }
@@ -311,6 +352,9 @@ export function buildLinkClawArgs(
       return ["message", "sync", "--home", home, "--json"];
     case "message_status":
       return ["message", "status", "--home", home, "--json"];
+    case "message_receive_direct":
+      requireField(request.payload, "payload");
+      return ["message", "receive-direct", "--home", home, "--json", "--input", request.payload];
     case "known_ls":
       return ["known", "ls", "--home", home, "--json"];
     case "known_show":
@@ -458,6 +502,7 @@ function normalizeCommand(raw: string): LinkClawCommand {
     case "message_outbox":
     case "message_sync":
     case "message_status":
+    case "message_receive_direct":
     case "known_ls":
     case "known_show":
     case "known_trust":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -164,6 +165,7 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 			if contactPeer, contactErr := derivePeerIdentity(contact.CanonicalID, contact.SigningPublicKey, contact.EncryptionPublicKey); contactErr == nil {
 				directDiscovery := discoverylibp2p.NewService(discoverylibp2p.PresenceConfig{
 					Peer:       contactPeer,
+					DirectAddress: buildDirectRouteTarget(contact.DirectURL, contact.DirectToken),
 					Reachable:  true,
 					ResolvedAt: now.UTC(),
 				})
@@ -201,6 +203,27 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 	return view, transports, routes
 }
 
+func buildDirectRouteTarget(rawURL string, token string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	if strings.TrimSpace(query.Get("token")) == "" {
+		query.Set("token", token)
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String()
+}
+
 func appendIfMissing(values []string, value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -223,6 +246,7 @@ func (s *Service) ensureDirectRuntimeRegistration(ctx context.Context, home stri
 		CanonicalID:         selfProfile.CanonicalID,
 		SigningPublicKey:    selfProfile.SigningPublicKey,
 		EncryptionPublicKey: "",
+		ListenAddress:       buildDirectRouteTarget(selfProfile.DirectURL, selfProfile.DirectToken),
 		Now:                 now,
 		Receiver: directInboxReceiver{
 			service:     s,

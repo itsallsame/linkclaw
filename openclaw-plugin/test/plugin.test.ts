@@ -11,6 +11,7 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
   }> = [];
   const hooks: string[] = [];
   const services: string[] = [];
+  const httpRoutes: string[] = [];
   const lifecycle = new Map<string, (event: unknown) => Promise<void> | void>();
 
   linkClawPlugin.register({
@@ -26,6 +27,9 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
     },
     registerService(service) {
       services.push(service.id);
+    },
+    registerHttpRoute(route) {
+      httpRoutes.push(route.path);
     },
     on(name, handler) {
       lifecycle.set(name, handler);
@@ -63,6 +67,7 @@ test("plugin registers tools, commands, hooks, and lifecycle handlers", async ()
   );
   assert.deepEqual(hooks, ["message:preprocessed"]);
   assert.deepEqual(services, ["linkclaw-background-sync"]);
+  assert.deepEqual(httpRoutes, ["/plugins/linkclaw/direct"]);
   assert.equal(lifecycle.has("message_sending"), true);
   assert.equal(lifecycle.has("session_start"), true);
   assert.equal(lifecycle.has("session_started"), false);

@@ -443,7 +443,7 @@ Current status:
 - onboarding on clean homes is covered by runtime/plugin tests
 - two-host card exchange and message flow are covered by plugin command tests
 - offline recovery now has explicit status-surface validation after sync
-- direct delivery is now validated in-process when both hosts are online and the experimental direct path is enabled
+- direct delivery now has a real cross-host plugin HTTP endpoint path guarded by `directUrl` / `directToken`
 
 TODO:
 

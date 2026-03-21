@@ -958,6 +958,37 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, "- run `linkclaw message inbox` to inspect recent conversations")
 		fmt.Fprintln(out, "- run `linkclaw message sync` to recover new messages")
 		return 0
+	case "receive-direct":
+		fs := newFlagSet("message receive-direct", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		input := fs.String("input", "", "direct envelope JSON payload")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("receive-direct"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("receive-direct"), "message receive-direct does not accept positional arguments")
+		}
+		if strings.TrimSpace(*input) == "" {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("receive-direct"), "message receive-direct requires --input")
+		}
+		service := message.NewService()
+		err := service.ReceiveDirect(ctx, message.ReceiveDirectOptions{
+			Home:    *home,
+			Payload: *input,
+		})
+		if err != nil {
+			return writeMessageError[map[string]any](errOut, out, *jsonOutput, "receive-direct", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "receive-direct", map[string]any{"accepted": true})
+		}
+		fmt.Fprintln(out, "LinkClaw direct message accepted")
+		return 0
 	default:
 		if jsonRequested {
 			return writeValidationFailure(errOut, out, true, "message", stringPtr(args[0]), fmt.Sprintf("unknown message subcommand %q", args[0]))

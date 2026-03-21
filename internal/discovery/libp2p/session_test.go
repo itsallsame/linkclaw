@@ -2,6 +2,8 @@ package libp2p
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -58,5 +60,41 @@ func TestSessionSendDirectReturnsBoundaryError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("SendDirect() error = nil, want boundary error")
+	}
+}
+
+func TestSessionSendDirectPostsEnvelopeToHTTPRoute(t *testing.T) {
+	var method string
+	var contentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		contentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	session, err := BootSession(SessionConfig{
+		Enabled:          true,
+		CanonicalID:      "did:key:z6MkAlice",
+		SigningPublicKey: "alice-signing-key",
+	})
+	if err != nil {
+		t.Fatalf("BootSession() error = %v", err)
+	}
+	result, err := session.SendDirect(context.Background(), transport.Envelope{MessageID: "msg_1"}, transport.RouteCandidate{
+		Type:   transport.RouteTypeDirect,
+		Target: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("SendDirect() error = %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("SendDirect() delivered = false, want true")
+	}
+	if method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", method)
+	}
+	if contentType != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", contentType)
 	}
 }

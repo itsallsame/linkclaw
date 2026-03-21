@@ -17,6 +17,14 @@
         "type": "string",
         "description": "Optional legacy HTTP store-and-forward fallback URL. Omit it for the normal runtime-driven path."
       },
+      "directUrl": {
+        "type": "string",
+        "description": "Optional public direct receive endpoint used for online host-to-host delivery."
+      },
+      "directToken": {
+        "type": "string",
+        "description": "Optional shared secret expected by the direct receive endpoint."
+      },
       "publishOrigin": {
         "type": "string",
         "description": "Default public origin used by the publishing skill when --origin is omitted."
@@ -51,6 +59,14 @@
     "relayUrl": {
       "label": "Legacy Fallback URL",
       "placeholder": "http://127.0.0.1:8788"
+    },
+    "directUrl": {
+      "label": "Direct Receive URL",
+      "placeholder": "http://host:8907/plugins/linkclaw/direct"
+    },
+    "directToken": {
+      "label": "Direct Receive Token",
+      "placeholder": "shared-secret"
     },
     "publishOrigin": {
       "label": "Default Publish Origin",

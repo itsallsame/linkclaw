@@ -292,6 +292,8 @@ func unsignedPayload(card Card) ([]byte, error) {
 		Messaging: MessagingProfile{
 			Transport:   strings.TrimSpace(card.Messaging.Transport),
 			RelayURL:    strings.TrimSpace(card.Messaging.RelayURL),
+			DirectURL:   strings.TrimSpace(card.Messaging.DirectURL),
+			DirectToken: strings.TrimSpace(card.Messaging.DirectToken),
 			RecipientID: strings.TrimSpace(card.Messaging.RecipientID),
 		},
 	}
@@ -363,6 +365,8 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 			     signing_public_key = ?,
 			     encryption_public_key = ?,
 			     relay_url = ?,
+			     direct_url = ?,
+			     direct_token = ?,
 			     recipient_id = ?,
 			     raw_identity_card_json = ?
 			 WHERE contact_id = ?`,
@@ -370,6 +374,8 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 			card.SigningKey,
 			card.EncryptionKey,
 			card.Messaging.RelayURL,
+			card.Messaging.DirectURL,
+			card.Messaging.DirectToken,
 			card.Messaging.RecipientID,
 			rawCard,
 			contactID,
@@ -390,8 +396,8 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 		ctx,
 		`INSERT INTO contacts (
 			contact_id, canonical_id, display_name, status, created_at,
-			signing_public_key, encryption_public_key, relay_url, recipient_id, raw_identity_card_json
-		) VALUES (?, ?, ?, 'imported', ?, ?, ?, ?, ?, ?)`,
+			signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, recipient_id, raw_identity_card_json
+		) VALUES (?, ?, ?, 'imported', ?, ?, ?, ?, ?, ?, ?, ?)`,
 		contactID,
 		card.ID,
 		card.DisplayName,
@@ -399,6 +405,8 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 		card.SigningKey,
 		card.EncryptionKey,
 		card.Messaging.RelayURL,
+		card.Messaging.DirectURL,
+		card.Messaging.DirectToken,
 		card.Messaging.RecipientID,
 		rawCard,
 	); err != nil {

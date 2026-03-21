@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   type LinkClawBridgeRequest,
+  receiveDirectPayload,
   runLinkClaw,
   type LinkClawPluginConfig,
 } from "./src/bridge.ts";
@@ -93,6 +94,12 @@ type PluginAPI = {
     start: () => void | Promise<void>;
     stop?: () => void | Promise<void>;
   }) => void;
+  registerHttpRoute?: (params: {
+    path: string;
+    auth: "plugin" | "gateway";
+    match?: "exact" | "prefix";
+    handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<boolean>;
+  }) => void;
   on?: (name: string, handler: (event: unknown) => Promise<void> | void) => void;
   logger?: {
     info?: (message: string) => void;
@@ -126,6 +133,7 @@ function asBridgeRequest(params: Record<string, unknown>): LinkClawBridgeRequest
     allowMismatch: asOptionalBoolean(params.allowMismatch),
     riskFlags: asOptionalStringArray(params.riskFlags),
     clearRiskFlags: asOptionalBoolean(params.clearRiskFlags),
+    payload: asOptionalString(params.payload),
   };
 }
 
@@ -211,6 +219,14 @@ function registerLifecycleHook(
   }
 }
 
+async function readRequestBody(req: import("node:http").IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 const plugin = {
   id: "linkclaw",
   name: "LinkClaw",
@@ -286,6 +302,44 @@ const plugin = {
         };
       },
     });
+
+    if (api.registerHttpRoute) {
+      api.registerHttpRoute({
+        path: "/plugins/linkclaw/direct",
+        auth: "plugin",
+        match: "exact",
+        handler: async (req, res) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.setHeader("content-type", "text/plain; charset=utf-8");
+            res.end("Method Not Allowed");
+            return true;
+          }
+          const token = new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("token")?.trim() ?? "";
+          const config = loadConfig(api);
+          const expectedToken = (config.directToken ?? process.env.LINKCLAW_DIRECT_TOKEN ?? "").trim();
+          if (expectedToken !== "" && token !== expectedToken) {
+            res.statusCode = 403;
+            res.setHeader("content-type", "text/plain; charset=utf-8");
+            res.end("Forbidden");
+            return true;
+          }
+          const payload = await readRequestBody(req);
+          try {
+            await receiveDirectPayload(config, payload, pluginRoot);
+            res.statusCode = 202;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true }));
+          } catch (error) {
+            api.logger?.warn?.(`linkclaw direct receive failed: ${String(error)}`);
+            res.statusCode = 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: String(error) }));
+          }
+          return true;
+        },
+      });
+    }
 
     api.registerTool({
       name: "linkclaw_publish",

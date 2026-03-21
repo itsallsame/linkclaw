@@ -15,10 +15,14 @@ import (
 )
 
 const EnvRelayURL = "LINKCLAW_RELAY_URL"
+const EnvDirectURL = "LINKCLAW_DIRECT_URL"
+const EnvDirectToken = "LINKCLAW_DIRECT_TOKEN"
 
 type Profile struct {
 	Transport   string `json:"transport"`
 	RelayURL    string `json:"relay_url,omitempty"`
+	DirectURL   string `json:"direct_url,omitempty"`
+	DirectToken string `json:"direct_token,omitempty"`
 	RecipientID string `json:"recipient_id"`
 }
 
@@ -31,32 +35,46 @@ func EnsureSelfProfile(
 	now time.Time,
 ) (Profile, string, error) {
 	envRelayURL := strings.TrimSpace(os.Getenv(EnvRelayURL))
+	envDirectURL := strings.TrimSpace(os.Getenv(EnvDirectURL))
+	envDirectToken := strings.TrimSpace(os.Getenv(EnvDirectToken))
 	var profile Profile
 	var relayURL string
+	var directURL string
+	var directToken string
 	var encryptionPublicKey string
 	var privateKeyRef string
 	err := db.QueryRowContext(
 		ctx,
-		`SELECT recipient_id, relay_url, encryption_public_key, encryption_private_key_ref
+		`SELECT recipient_id, relay_url, direct_url, direct_token, encryption_public_key, encryption_private_key_ref
 		 FROM self_messaging_profiles
 		 WHERE self_id = ?
 		 LIMIT 1`,
 		selfID,
-	).Scan(&profile.RecipientID, &relayURL, &encryptionPublicKey, &privateKeyRef)
+	).Scan(&profile.RecipientID, &relayURL, &directURL, &directToken, &encryptionPublicKey, &privateKeyRef)
 	switch {
 	case err == nil:
-		if relayURL == "" && envRelayURL != "" {
-			relayURL = envRelayURL
+		if (relayURL == "" && envRelayURL != "") || (directURL == "" && envDirectURL != "") || (directToken == "" && envDirectToken != "") {
+			if relayURL == "" && envRelayURL != "" {
+				relayURL = envRelayURL
+			}
+			if directURL == "" && envDirectURL != "" {
+				directURL = envDirectURL
+			}
+			if directToken == "" && envDirectToken != "" {
+				directToken = envDirectToken
+			}
 			if _, err := db.ExecContext(
 				ctx,
 				`UPDATE self_messaging_profiles
-				 SET relay_url = ?, updated_at = ?
+				 SET relay_url = ?, direct_url = ?, direct_token = ?, updated_at = ?
 				 WHERE self_id = ?`,
 				relayURL,
+				directURL,
+				directToken,
 				now.Format(time.RFC3339Nano),
 				selfID,
 			); err != nil {
-				return Profile{}, "", fmt.Errorf("update self messaging relay url: %w", err)
+				return Profile{}, "", fmt.Errorf("update self messaging transport fields: %w", err)
 			}
 		}
 		if encryptionPublicKey == "" || strings.TrimSpace(privateKeyRef) == "" {
@@ -68,6 +86,8 @@ func EnsureSelfProfile(
 		}
 		profile.Transport = "linkclaw-relay"
 		profile.RelayURL = relayURL
+		profile.DirectURL = directURL
+		profile.DirectToken = directToken
 		return profile, encryptionPublicKey, nil
 	case err != sql.ErrNoRows:
 		return Profile{}, "", fmt.Errorf("query self messaging profile: %w", err)
@@ -85,12 +105,14 @@ func EnsureSelfProfile(
 	if _, err := db.ExecContext(
 		ctx,
 		`INSERT INTO self_messaging_profiles (
-			self_id, recipient_id, relay_url, signing_key_id, encryption_public_key,
+			self_id, recipient_id, relay_url, direct_url, direct_token, signing_key_id, encryption_public_key,
 			encryption_private_key_ref, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		selfID,
 		recipientID,
 		envRelayURL,
+		envDirectURL,
+		envDirectToken,
 		signingKeyID,
 		encryptionPublicKey,
 		privateKeyRef,
@@ -102,6 +124,8 @@ func EnsureSelfProfile(
 	return Profile{
 		Transport:   "linkclaw-relay",
 		RelayURL:    envRelayURL,
+		DirectURL:   envDirectURL,
+		DirectToken: envDirectToken,
 		RecipientID: recipientID,
 	}, encryptionPublicKey, nil
 }

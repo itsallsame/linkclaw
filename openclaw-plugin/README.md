@@ -45,6 +45,7 @@ Defaults:
 
 - `binaryPath`: optional when the packaged plugin already includes a bundled `linkclaw` runtime, or when `linkclaw` is discoverable via `LINKCLAW_BINARY`, repo-local candidates, or `PATH`
 - `home`: defaults to `~/.linkclaw`
+- `directUrl` / `directToken`: optional direct host-to-host online delivery endpoint and shared secret
 - `relayUrl`: optional compatibility-only legacy HTTP fallback; use it only if you still want the old store-and-forward path
 
 For most local installs, the fastest path is:
@@ -52,7 +53,8 @@ For most local installs, the fastest path is:
 1. install the plugin
 2. run `/linkclaw-onboarding`
 3. only configure `binaryPath` if you want to override the packaged runtime
-4. only configure `relayUrl` if you explicitly want legacy HTTP fallback compatibility
+4. configure `directUrl` + `directToken` on both hosts if you want online host-to-host delivery
+5. only configure `relayUrl` if you explicitly want legacy HTTP fallback compatibility
 
 ### Development checkout
 
@@ -183,6 +185,8 @@ Configure under `plugins.entries.linkclaw.config`:
 {
   "binaryPath": "/absolute/path/to/linkclaw",
   "home": "/absolute/path/to/.linkclaw",
+  "directUrl": "http://host:8907/plugins/linkclaw/direct",
+  "directToken": "shared-secret",
   "publishOrigin": "https://agent.example",
   "publishOutput": "/absolute/path/to/publish",
   "publishTier": "recommended",
@@ -200,6 +204,8 @@ Config notes:
 
 - `binaryPath`: preferred; use it when the OpenClaw host is not running inside this repository.
 - `home`: default `LINKCLAW_HOME` for `init`, `publish`, `import`, and `known_*`.
+- `directUrl`: optional direct receive endpoint advertised in exported identity cards.
+- `directToken`: optional shared secret required by the direct receive endpoint.
 - `relayUrl`: optional compatibility-only legacy HTTP fallback. If omitted, the plugin does not inject a relay URL at all. `LINKCLAW_RELAY_URL` still works as an environment override when you intentionally want that fallback path.
 - `publishOrigin`: default public origin for `/linkclaw-share` and `/linkclaw-publish`.
 - `publishOutput`: default publish directory; falls back to `<home>/publish`.
