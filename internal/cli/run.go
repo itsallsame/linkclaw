@@ -756,12 +756,28 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		if *jsonOutput {
 			return writeMessageJSON(errOut, out, "send", result)
 		}
-		fmt.Fprintln(out, "Message queued for relay delivery.")
+		headline := "Message queued for relay delivery."
+		switch result.Message.TransportStatus {
+		case message.TransportStatusDirect:
+			headline = "Message delivered via direct transport."
+		case message.TransportStatusDeferred:
+			headline = "Message deferred for recovery delivery."
+		case message.TransportStatusFailed:
+			headline = "Message delivery failed."
+		}
+		fmt.Fprintln(out, headline)
 		fmt.Fprintf(out, "conversation: %s\n", result.Conversation.ConversationID)
 		fmt.Fprintf(out, "message: %s\n", result.Message.MessageID)
 		fmt.Fprintf(out, "status: %s\n", result.Message.Status)
+		if strings.TrimSpace(result.Message.TransportStatus) != "" {
+			fmt.Fprintf(out, "transport status: %s\n", result.Message.TransportStatus)
+		}
 		fmt.Fprintln(out, "Next:")
-		fmt.Fprintln(out, "- the recipient needs to run `linkclaw message sync` to receive it")
+		if result.Message.TransportStatus == message.TransportStatusDirect {
+			fmt.Fprintln(out, "- the recipient can open `linkclaw message thread <contact>` immediately")
+		} else {
+			fmt.Fprintln(out, "- the recipient needs to run `linkclaw message sync` to receive it")
+		}
 		fmt.Fprintln(out, "- run `linkclaw message inbox` to review local conversation state")
 		return 0
 	case "inbox":
@@ -839,6 +855,11 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(out, "canonical id: %s\n", result.Conversation.ContactCanonicalID)
 		fmt.Fprintf(out, "messages: %d\n", len(result.Conversation.Messages))
 		for _, msg := range result.Conversation.Messages {
+			transportStatus := strings.TrimSpace(msg.TransportStatus)
+			if transportStatus != "" {
+				fmt.Fprintf(out, "- [%s] %s | status=%s | transport=%s | %s\n", msg.Direction, msg.CreatedAt, msg.Status, transportStatus, msg.Body)
+				continue
+			}
 			fmt.Fprintf(out, "- [%s] %s | %s\n", msg.Direction, msg.CreatedAt, msg.Body)
 		}
 		if len(result.Conversation.Messages) == 0 {
@@ -870,6 +891,11 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, "LinkClaw outbox")
 		fmt.Fprintf(out, "messages: %d\n", len(result.Messages))
 		for _, msg := range result.Messages {
+			transportStatus := strings.TrimSpace(msg.TransportStatus)
+			if transportStatus != "" {
+				fmt.Fprintf(out, "- %s | %s | transport=%s | %s\n", msg.MessageID, msg.Status, transportStatus, msg.Preview)
+				continue
+			}
 			fmt.Fprintf(out, "- %s | %s | %s\n", msg.MessageID, msg.Status, msg.Preview)
 		}
 		if len(result.Messages) > 0 {
@@ -941,10 +967,14 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		if result.PeerID != "" {
 			fmt.Fprintf(out, "peer id: %s\n", result.PeerID)
 		}
+		fmt.Fprintf(out, "identity ready: %t\n", result.IdentityReady)
+		fmt.Fprintf(out, "transport ready: %t\n", result.TransportReady)
+		fmt.Fprintf(out, "discovery ready: %t\n", result.DiscoveryReady)
 		fmt.Fprintf(out, "contacts: %d\n", result.Contacts)
 		fmt.Fprintf(out, "conversations: %d\n", result.Conversations)
 		fmt.Fprintf(out, "unread: %d\n", result.Unread)
 		fmt.Fprintf(out, "pending outbox: %d\n", result.PendingOutbox)
+		fmt.Fprintf(out, "message transport status: direct=%d deferred=%d recovered=%d\n", result.MessageStatusDirect, result.MessageStatusDeferred, result.MessageStatusRecovered)
 		fmt.Fprintf(out, "presence cache: %d\n", result.PresenceEntries)
 		fmt.Fprintf(out, "store-forward routes: %d\n", result.StoreForwardRoutes)
 		fmt.Fprintf(out, "direct enabled: %t\n", result.DirectEnabled)
@@ -953,6 +983,19 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 		if result.LastStoreForwardError != "" {
 			fmt.Fprintf(out, "last store-forward error: %s\n", result.LastStoreForwardError)
+		}
+		if len(result.RecentRouteOutcomes) > 0 {
+			fmt.Fprintln(out, "recent route outcomes:")
+			for _, item := range result.RecentRouteOutcomes {
+				fmt.Fprintf(out, "- %s | %s | %s", item.RouteType, item.Outcome, item.AttemptedAt)
+				if strings.TrimSpace(item.Cursor) != "" {
+					fmt.Fprintf(out, " | cursor=%s", item.Cursor)
+				}
+				if strings.TrimSpace(item.Error) != "" {
+					fmt.Fprintf(out, " | error=%s", item.Error)
+				}
+				fmt.Fprintln(out)
+			}
 		}
 		fmt.Fprintln(out, "Next:")
 		fmt.Fprintln(out, "- run `linkclaw message inbox` to inspect recent conversations")

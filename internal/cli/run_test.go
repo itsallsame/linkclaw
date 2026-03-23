@@ -570,8 +570,9 @@ func TestRunMessageSendAndOutboxJSON(t *testing.T) {
 		OK            bool     `json:"ok"`
 		Result        struct {
 			Message struct {
-				Status string `json:"status"`
-				Body   string `json:"body"`
+				Status          string `json:"status"`
+				TransportStatus string `json:"transport_status"`
+				Body            string `json:"body"`
 			} `json:"message"`
 		} `json:"result"`
 	}
@@ -584,6 +585,9 @@ func TestRunMessageSendAndOutboxJSON(t *testing.T) {
 	}
 	if sent.Result.Message.Status != "pending" {
 		t.Fatalf("message status = %q, want pending", sent.Result.Message.Status)
+	}
+	if sent.Result.Message.TransportStatus != "deferred" {
+		t.Fatalf("message transport status = %q, want deferred", sent.Result.Message.TransportStatus)
 	}
 
 	outboxCode, outboxOut, outboxErr := runForTest(t, []string{"message", "outbox", "--home", bobHome, "--json"}, "")
@@ -751,9 +755,12 @@ func TestRunMessageStatusJSON(t *testing.T) {
 		OK     bool `json:"ok"`
 		Result struct {
 			DisplayName        string `json:"display_name"`
+			IdentityReady      bool   `json:"identity_ready"`
+			TransportReady     bool   `json:"transport_ready"`
 			Contacts           int    `json:"contacts"`
 			Conversations      int    `json:"conversations"`
 			PendingOutbox      int    `json:"pending_outbox"`
+			MessageDeferred    int    `json:"message_status_deferred"`
 			StoreForwardRoutes int    `json:"store_forward_routes"`
 		} `json:"result"`
 	}
@@ -766,8 +773,14 @@ func TestRunMessageStatusJSON(t *testing.T) {
 	if out.Result.DisplayName != "MessageStatus" {
 		t.Fatalf("display name = %q, want MessageStatus", out.Result.DisplayName)
 	}
+	if !out.Result.IdentityReady || !out.Result.TransportReady {
+		t.Fatalf("expected identity/transport ready, got identity=%t transport=%t", out.Result.IdentityReady, out.Result.TransportReady)
+	}
 	if out.Result.Contacts != 0 || out.Result.Conversations != 0 || out.Result.PendingOutbox != 0 {
 		t.Fatalf("unexpected status counts: %+v", out.Result)
+	}
+	if out.Result.MessageDeferred != 0 {
+		t.Fatalf("message deferred = %d, want 0", out.Result.MessageDeferred)
 	}
 	if out.Result.StoreForwardRoutes != 0 {
 		t.Fatalf("store forward routes = %d, want 0", out.Result.StoreForwardRoutes)

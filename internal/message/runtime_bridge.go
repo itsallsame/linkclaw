@@ -164,10 +164,10 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 		if err == nil && session != nil && session.Enabled {
 			if contactPeer, contactErr := derivePeerIdentity(contact.CanonicalID, contact.SigningPublicKey, contact.EncryptionPublicKey); contactErr == nil {
 				directDiscovery := discoverylibp2p.NewService(discoverylibp2p.PresenceConfig{
-					Peer:       contactPeer,
+					Peer:          contactPeer,
 					DirectAddress: buildDirectRouteTarget(contact.DirectURL, contact.DirectToken),
-					Reachable:  true,
-					ResolvedAt: now.UTC(),
+					Reachable:     true,
+					ResolvedAt:    now.UTC(),
 				})
 				if directView, resolveErr := directDiscovery.ResolvePeer(context.Background(), contact.CanonicalID); resolveErr == nil {
 					view.PeerID = directView.PeerID
@@ -503,8 +503,15 @@ func (s *Service) receiveDirectEnvelope(ctx context.Context, home string, selfPr
 		Body:              env.Plaintext,
 		Preview:           makePreview(env.Plaintext),
 		Status:            StatusDelivered,
-		CreatedAt:         now.Format(time.RFC3339Nano),
-		DeliveredAt:       now.Format(time.RFC3339Nano),
+		TransportStatus:   TransportStatusDirect,
+		SelectedRoute: transport.RouteCandidate{
+			Type:     transport.RouteTypeDirect,
+			Label:    "direct",
+			Priority: 100,
+			Target:   env.SenderID,
+		},
+		CreatedAt:   now.Format(time.RFC3339Nano),
+		DeliveredAt: now.Format(time.RFC3339Nano),
 	}}, now)
 }
 
@@ -548,6 +555,12 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	contacts := make([]contactRecord, 0, len(pulled.Messages))
 	conversations := make([]Conversation, 0, len(pulled.Messages))
 	messages := make([]MessageRecord, 0, len(pulled.Messages))
+	recoveryRoute := transport.RouteCandidate{
+		Type:     transport.RouteTypeRecovery,
+		Label:    relayURL,
+		Priority: 1,
+		Target:   relayURL,
+	}
 	for _, pulledMessage := range pulled.Messages {
 		plaintext, preview, err := decryptIncomingMessage(selfProfile, pulledMessage)
 		if err != nil {
@@ -582,6 +595,8 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 			Body:              plaintext,
 			Preview:           preview,
 			Status:            StatusQueued,
+			TransportStatus:   TransportStatusRecovered,
+			SelectedRoute:     recoveryRoute,
 			CreatedAt:         conversation.LastMessageAt,
 		})
 		synced++
@@ -667,6 +682,7 @@ func syncRuntimeRecoveredState(
 			PlaintextBody:     record.Body,
 			PlaintextPreview:  record.Preview,
 			Status:            record.Status,
+			SelectedRoute:     record.SelectedRoute,
 			CiphertextVersion: "v0",
 			CreatedAt:         record.CreatedAt,
 			DeliveredAt:       now.Format(time.RFC3339Nano),
@@ -764,6 +780,7 @@ func loadRuntimeOutbox(ctx context.Context, home string, now time.Time) ([]Messa
 	}
 	messages := make([]MessageRecord, 0, len(records))
 	for _, record := range records {
+		transportStatus := deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute)
 		messages = append(messages, MessageRecord{
 			MessageID:          record.MessageID,
 			ConversationID:     record.ConversationID,
@@ -773,7 +790,10 @@ func loadRuntimeOutbox(ctx context.Context, home string, now time.Time) ([]Messa
 			Body:               record.PlaintextBody,
 			Preview:            record.PlaintextPreview,
 			Status:             record.Status,
+			TransportStatus:    transportStatus,
+			SelectedRoute:      record.SelectedRoute,
 			CreatedAt:          record.CreatedAt,
+			DeliveredAt:        record.DeliveredAt,
 		})
 	}
 	return messages, nil
@@ -811,6 +831,7 @@ func loadRuntimeThread(ctx context.Context, home string, contactRef string, limi
 		UnreadCount:        record.UnreadCount,
 	}
 	for _, msg := range record.Messages {
+		transportStatus := deriveTransportStatus(msg.Direction, msg.Status, msg.SelectedRoute)
 		conversation.Messages = append(conversation.Messages, MessageRecord{
 			MessageID:          msg.MessageID,
 			ConversationID:     msg.ConversationID,
@@ -820,7 +841,10 @@ func loadRuntimeThread(ctx context.Context, home string, contactRef string, limi
 			Body:               msg.PlaintextBody,
 			Preview:            msg.PlaintextPreview,
 			Status:             msg.Status,
+			TransportStatus:    transportStatus,
+			SelectedRoute:      msg.SelectedRoute,
 			CreatedAt:          msg.CreatedAt,
+			DeliveredAt:        msg.DeliveredAt,
 		})
 	}
 	return conversation, nil

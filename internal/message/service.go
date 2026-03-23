@@ -27,10 +27,15 @@ const (
 	DirectionIncoming = "incoming"
 	DirectionOutgoing = "outgoing"
 
-	StatusPending = "pending"
-	StatusQueued  = "queued"
+	StatusPending   = "pending"
+	StatusQueued    = "queued"
 	StatusDelivered = "delivered"
-	StatusFailed  = "failed"
+	StatusFailed    = "failed"
+
+	TransportStatusDirect    = "direct"
+	TransportStatusDeferred  = "deferred"
+	TransportStatusRecovered = "recovered"
+	TransportStatusFailed    = "failed"
 )
 
 type SendOptions struct {
@@ -60,18 +65,19 @@ type ThreadOptions struct {
 }
 
 type MessageRecord struct {
-	MessageID          string `json:"message_id"`
-	ConversationID     string `json:"conversation_id"`
-	Direction          string `json:"direction"`
-	SenderContactID    string `json:"sender_contact_id,omitempty"`
-	RecipientContactID string `json:"recipient_contact_id,omitempty"`
-	SenderCanonicalID  string `json:"sender_canonical_id,omitempty"`
-	RecipientRouteID   string `json:"recipient_route_id,omitempty"`
-	Body               string `json:"body"`
-	Preview            string `json:"preview"`
-	Status             string `json:"status"`
-	CreatedAt          string `json:"created_at"`
-	DeliveredAt        string `json:"delivered_at,omitempty"`
+	MessageID          string                   `json:"message_id"`
+	ConversationID     string                   `json:"conversation_id"`
+	Direction          string                   `json:"direction"`
+	SenderContactID    string                   `json:"sender_contact_id,omitempty"`
+	RecipientContactID string                   `json:"recipient_contact_id,omitempty"`
+	SenderCanonicalID  string                   `json:"sender_canonical_id,omitempty"`
+	RecipientRouteID   string                   `json:"recipient_route_id,omitempty"`
+	Body               string                   `json:"body"`
+	Preview            string                   `json:"preview"`
+	Status             string                   `json:"status"`
+	TransportStatus    string                   `json:"transport_status,omitempty"`
+	CreatedAt          string                   `json:"created_at"`
+	DeliveredAt        string                   `json:"delivered_at,omitempty"`
 	SelectedRoute      transport.RouteCandidate `json:"selected_route,omitempty"`
 }
 
@@ -113,28 +119,45 @@ type SyncResult struct {
 	SyncedAt   string `json:"synced_at"`
 }
 
+type RouteOutcomeStatus struct {
+	RouteType   string `json:"route_type"`
+	RouteLabel  string `json:"route_label,omitempty"`
+	Outcome     string `json:"outcome"`
+	Retryable   bool   `json:"retryable"`
+	Cursor      string `json:"cursor,omitempty"`
+	Error       string `json:"error,omitempty"`
+	AttemptedAt string `json:"attempted_at"`
+}
+
 type StatusResult struct {
-	Home                   string   `json:"home"`
-	SelfID                 string   `json:"self_id,omitempty"`
-	DisplayName            string   `json:"display_name,omitempty"`
-	PeerID                 string   `json:"peer_id,omitempty"`
-	TransportCapabilities  []string `json:"transport_capabilities,omitempty"`
-	Contacts               int      `json:"contacts"`
-	Conversations          int      `json:"conversations"`
-	Unread                 int      `json:"unread"`
-	PendingOutbox          int      `json:"pending_outbox"`
-	PresenceEntries        int      `json:"presence_entries"`
-	ReachablePresence      int      `json:"reachable_presence"`
-	StoreForwardRoutes     int      `json:"store_forward_routes"`
-	LastStoreForwardSyncAt string   `json:"last_store_forward_sync_at,omitempty"`
-	LastStoreForwardResult string   `json:"last_store_forward_result,omitempty"`
-	LastStoreForwardError  string   `json:"last_store_forward_error,omitempty"`
-	LastRecoveredCount     int      `json:"last_recovered_count"`
-	LastAnnounceAt         string   `json:"last_announce_at,omitempty"`
-	RuntimeMode            string   `json:"runtime_mode,omitempty"`
-	BackgroundRuntime      bool     `json:"background_runtime"`
-	DirectEnabled          bool     `json:"direct_enabled"`
-	StatusAt               string   `json:"status_at"`
+	Home                   string               `json:"home"`
+	SelfID                 string               `json:"self_id,omitempty"`
+	DisplayName            string               `json:"display_name,omitempty"`
+	PeerID                 string               `json:"peer_id,omitempty"`
+	TransportCapabilities  []string             `json:"transport_capabilities,omitempty"`
+	IdentityReady          bool                 `json:"identity_ready"`
+	TransportReady         bool                 `json:"transport_ready"`
+	DiscoveryReady         bool                 `json:"discovery_ready"`
+	Contacts               int                  `json:"contacts"`
+	Conversations          int                  `json:"conversations"`
+	Unread                 int                  `json:"unread"`
+	PendingOutbox          int                  `json:"pending_outbox"`
+	MessageStatusDirect    int                  `json:"message_status_direct"`
+	MessageStatusDeferred  int                  `json:"message_status_deferred"`
+	MessageStatusRecovered int                  `json:"message_status_recovered"`
+	PresenceEntries        int                  `json:"presence_entries"`
+	ReachablePresence      int                  `json:"reachable_presence"`
+	StoreForwardRoutes     int                  `json:"store_forward_routes"`
+	LastStoreForwardSyncAt string               `json:"last_store_forward_sync_at,omitempty"`
+	LastStoreForwardResult string               `json:"last_store_forward_result,omitempty"`
+	LastStoreForwardError  string               `json:"last_store_forward_error,omitempty"`
+	LastRecoveredCount     int                  `json:"last_recovered_count"`
+	LastAnnounceAt         string               `json:"last_announce_at,omitempty"`
+	RuntimeMode            string               `json:"runtime_mode,omitempty"`
+	BackgroundRuntime      bool                 `json:"background_runtime"`
+	DirectEnabled          bool                 `json:"direct_enabled"`
+	RecentRouteOutcomes    []RouteOutcomeStatus `json:"recent_route_outcomes,omitempty"`
+	StatusAt               string               `json:"status_at"`
 }
 
 type ThreadResult struct {
@@ -225,6 +248,7 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 	if err != nil {
 		return SendResult{}, err
 	}
+	record.TransportStatus = deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute)
 	conversation.LastMessageAt = record.CreatedAt
 	conversation.LastMessagePreview = record.Preview
 	conversation.Messages = []MessageRecord{record}
@@ -239,17 +263,23 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 		runtimeResult, err := s.sendThroughRuntime(ctx, home, selfProfile, contact, record, now)
 		if err != nil {
 			record.Status = StatusFailed
+			record.TransportStatus = deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute)
+			if syncErr := syncRuntimeSendState(ctx, home, contact, conversation, record, now); syncErr != nil {
+				return SendResult{}, syncErr
+			}
 		} else {
 			record.Status = runtimeResult.Status
 			record.SelectedRoute = runtimeResult.SelectedRoute
 			if runtimeResult.Status == StatusDelivered {
 				record.DeliveredAt = now.Format(time.RFC3339Nano)
 			}
+			record.TransportStatus = deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute)
 			if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
 				return SendResult{}, err
 			}
 		}
 	}
+	conversation.Messages = []MessageRecord{record}
 	return SendResult{
 		Home:         home,
 		Conversation: conversation,
@@ -399,6 +429,30 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 	if err != nil {
 		return StatusResult{}, err
 	}
+	messages, err := store.ListMessages(ctx)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	directCount, deferredCount, recoveredCount := summarizeTransportStatuses(messages)
+	routeAttempts, err := store.ListRecentRouteAttempts(ctx, 6)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	recentOutcomes := make([]RouteOutcomeStatus, 0, len(routeAttempts))
+	for _, attempt := range routeAttempts {
+		recentOutcomes = append(recentOutcomes, RouteOutcomeStatus{
+			RouteType:   attempt.RouteType,
+			RouteLabel:  attempt.RouteLabel,
+			Outcome:     attempt.Outcome,
+			Retryable:   attempt.Retryable,
+			Cursor:      attempt.CursorValue,
+			Error:       attempt.Error,
+			AttemptedAt: attempt.AttemptedAt,
+		})
+	}
+	identityReady := strings.TrimSpace(summary.SelfID) != ""
+	transportReady := identityReady && len(summary.TransportCapabilities) > 0
+	discoveryReady := summary.PresenceEntries > 0 || summary.ReachablePresence > 0 || directTransportEnabled()
 
 	return StatusResult{
 		Home:                   home,
@@ -406,10 +460,16 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 		DisplayName:            summary.DisplayName,
 		PeerID:                 summary.PeerID,
 		TransportCapabilities:  summary.TransportCapabilities,
+		IdentityReady:          identityReady,
+		TransportReady:         transportReady,
+		DiscoveryReady:         discoveryReady,
 		Contacts:               summary.Contacts,
 		Conversations:          summary.Conversations,
 		Unread:                 summary.Unread,
 		PendingOutbox:          summary.PendingOutbox,
+		MessageStatusDirect:    directCount,
+		MessageStatusDeferred:  deferredCount,
+		MessageStatusRecovered: recoveredCount,
 		PresenceEntries:        summary.PresenceEntries,
 		ReachablePresence:      summary.ReachablePresence,
 		StoreForwardRoutes:     summary.StoreForwardRoutes,
@@ -421,6 +481,7 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 		RuntimeMode:            agentruntime.RuntimeMode(),
 		BackgroundRuntime:      agentruntime.BackgroundRuntimeEnabled(),
 		DirectEnabled:          directTransportEnabled(),
+		RecentRouteOutcomes:    recentOutcomes,
 		StatusAt:               now.Format(time.RFC3339Nano),
 	}, nil
 }
@@ -431,6 +492,48 @@ func (s *Service) now() time.Time {
 		nowFn = time.Now
 	}
 	return nowFn().UTC()
+}
+
+func summarizeTransportStatuses(records []agentruntime.MessageRecord) (direct int, deferred int, recovered int) {
+	for _, record := range records {
+		switch deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute) {
+		case TransportStatusDirect:
+			direct++
+		case TransportStatusDeferred:
+			deferred++
+		case TransportStatusRecovered:
+			recovered++
+		}
+	}
+	return direct, deferred, recovered
+}
+
+func deriveTransportStatus(direction string, status string, selected transport.RouteCandidate) string {
+	if status == StatusFailed {
+		return TransportStatusFailed
+	}
+	switch selected.Type {
+	case transport.RouteTypeDirect:
+		return TransportStatusDirect
+	case transport.RouteTypeStoreForward:
+		return TransportStatusDeferred
+	case transport.RouteTypeRecovery:
+		return TransportStatusRecovered
+	}
+	switch status {
+	case StatusPending, StatusQueued:
+		if direction == DirectionIncoming {
+			return TransportStatusRecovered
+		}
+		return TransportStatusDeferred
+	case StatusDelivered:
+		if direction == DirectionIncoming {
+			return TransportStatusDirect
+		}
+		return TransportStatusDirect
+	default:
+		return ""
+	}
 }
 
 func (s *Service) storeForwardBackend() transportstoreforward.MailboxBackend {

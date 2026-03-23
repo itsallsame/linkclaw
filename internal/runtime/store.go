@@ -82,6 +82,20 @@ type MessageRecord struct {
 	AckedAt           string
 }
 
+type RouteAttemptRecord struct {
+	AttemptID      string
+	MessageID      string
+	ConversationID string
+	RouteType      string
+	RouteLabel     string
+	Priority       int
+	Outcome        string
+	Error          string
+	Retryable      bool
+	CursorValue    string
+	AttemptedAt    string
+}
+
 type ConversationReadModel struct {
 	ConversationID     string
 	ContactID          string
@@ -355,17 +369,31 @@ func (s *Store) ListConversations(ctx context.Context) ([]ConversationReadModel,
 	return conversations, nil
 }
 
+func (s *Store) ListMessages(ctx context.Context) ([]MessageRecord, error) {
+	return s.listMessagesWithQuery(ctx, `
+		SELECT message_id, conversation_id, sender_id, recipient_id, direction, plaintext_body,
+		       plaintext_preview, ciphertext, ciphertext_version, status, selected_route_json,
+		       created_at, delivered_at, acked_at
+		FROM runtime_messages
+		ORDER BY created_at DESC, message_id DESC
+	`, "list runtime messages")
+}
+
 func (s *Store) ListOutgoingMessages(ctx context.Context) ([]MessageRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return s.listMessagesWithQuery(ctx, `
 		SELECT message_id, conversation_id, sender_id, recipient_id, direction, plaintext_body,
 		       plaintext_preview, ciphertext, ciphertext_version, status, selected_route_json,
 		       created_at, delivered_at, acked_at
 		FROM runtime_messages
 		WHERE direction = 'outgoing'
 		ORDER BY created_at DESC, message_id DESC
-	`)
+	`, "list runtime outgoing messages")
+}
+
+func (s *Store) listMessagesWithQuery(ctx context.Context, query string, operation string) ([]MessageRecord, error) {
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("list runtime outgoing messages: %w", err)
+		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
 	defer rows.Close()
 
@@ -389,13 +417,13 @@ func (s *Store) ListOutgoingMessages(ctx context.Context) ([]MessageRecord, erro
 			&record.DeliveredAt,
 			&record.AckedAt,
 		); err != nil {
-			return nil, fmt.Errorf("scan runtime outgoing message: %w", err)
+			return nil, fmt.Errorf("scan runtime message: %w", err)
 		}
 		_ = json.Unmarshal([]byte(routeJSON), &record.SelectedRoute)
 		messages = append(messages, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate runtime outgoing messages: %w", err)
+		return nil, fmt.Errorf("iterate runtime messages: %w", err)
 	}
 	return messages, nil
 }
@@ -541,6 +569,50 @@ func (s *Store) RecordRouteAttempt(ctx context.Context, outcome routing.RouteOut
 		return fmt.Errorf("record runtime route attempt: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) ListRecentRouteAttempts(ctx context.Context, limit int) ([]RouteAttemptRecord, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT attempt_id, message_id, conversation_id, route_type, route_label, priority,
+		       outcome, error, retryable, cursor_value, attempted_at
+		FROM runtime_route_attempts
+		ORDER BY attempted_at DESC, attempt_id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list runtime route attempts: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]RouteAttemptRecord, 0, limit)
+	for rows.Next() {
+		var record RouteAttemptRecord
+		var retryable int
+		if err := rows.Scan(
+			&record.AttemptID,
+			&record.MessageID,
+			&record.ConversationID,
+			&record.RouteType,
+			&record.RouteLabel,
+			&record.Priority,
+			&record.Outcome,
+			&record.Error,
+			&retryable,
+			&record.CursorValue,
+			&record.AttemptedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan runtime route attempt: %w", err)
+		}
+		record.Retryable = retryable == 1
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtime route attempts: %w", err)
+	}
+	return records, nil
 }
 
 func (s *Store) UpsertPresence(ctx context.Context, record PresenceRecord) error {

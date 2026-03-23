@@ -1227,8 +1227,13 @@ function formatMessageSend(value: unknown): string {
   const message = asObject(record?.message);
   const conversation = asObject(record?.conversation);
   const status = typeof message?.status === "string" ? message.status : "";
+  const transportStatus = typeof message?.transport_status === "string" ? message.transport_status : "";
   const headline =
-    status === "delivered" ? "LinkClaw message delivered." : "LinkClaw message queued.";
+    status === "failed"
+      ? "LinkClaw message failed."
+      : transportStatus === "direct" || status === "delivered"
+        ? "LinkClaw message delivered."
+        : "LinkClaw message queued.";
   const lines = [headline];
   if (typeof conversation?.conversation_id === "string") {
     lines.push(`conversation: ${conversation.conversation_id}`);
@@ -1241,6 +1246,9 @@ function formatMessageSend(value: unknown): string {
     if (status === "failed") {
       lines.push("delivery: failed before relay acceptance");
     }
+  }
+  if (transportStatus) {
+    lines.push(`transport status: ${transportStatus}`);
   }
   if (typeof message?.preview === "string") {
     lines.push(`preview: ${message.preview}`);
@@ -1483,12 +1491,16 @@ function formatThread(value: unknown): string {
     const body = typeof item?.body === "string" ? item.body : "";
     const createdAt = typeof item?.created_at === "string" ? item.created_at : "";
     const status = typeof item?.status === "string" ? item.status : "";
+    const transportStatus = typeof item?.transport_status === "string" ? item.transport_status : "";
     const summary = [`[${direction}]`];
     if (createdAt !== "") {
       summary.push(createdAt);
     }
     if (status !== "") {
       summary.push(status);
+    }
+    if (transportStatus !== "") {
+      summary.push(`transport=${transportStatus}`);
     }
     lines.push(`- ${summary.join(" | ")} | ${body}`);
   }
@@ -1501,10 +1513,12 @@ function formatThread(value: unknown): string {
         const body = typeof item?.body === "string" ? item.body : "";
         const createdAt = typeof item?.created_at === "string" ? item.created_at : "";
         const status = typeof item?.status === "string" ? item.status : "";
+        const transportStatus = typeof item?.transport_status === "string" ? item.transport_status : "";
         return [
           `direction: ${direction}`,
           ...(createdAt !== "" ? [`created_at: ${createdAt}`] : []),
           ...(status !== "" ? [`status: ${status}`] : []),
+          ...(transportStatus !== "" ? [`transport_status: ${transportStatus}`] : []),
           `body: ${body}`,
         ].join(" | ");
       }),
@@ -1549,6 +1563,12 @@ function formatStatus(
   const conversations = typeof record?.conversations === "number" ? record.conversations : 0;
   const unread = typeof record?.unread === "number" ? record.unread : 0;
   const pendingOutbox = typeof record?.pending_outbox === "number" ? record.pending_outbox : 0;
+  const identityReady = typeof record?.identity_ready === "boolean" ? record.identity_ready : false;
+  const transportReady = typeof record?.transport_ready === "boolean" ? record.transport_ready : false;
+  const discoveryReady = typeof record?.discovery_ready === "boolean" ? record.discovery_ready : false;
+  const messageDirect = typeof record?.message_status_direct === "number" ? record.message_status_direct : 0;
+  const messageDeferred = typeof record?.message_status_deferred === "number" ? record.message_status_deferred : 0;
+  const messageRecovered = typeof record?.message_status_recovered === "number" ? record.message_status_recovered : 0;
   const presenceEntries = typeof record?.presence_entries === "number" ? record.presence_entries : 0;
   const reachablePresence = typeof record?.reachable_presence === "number" ? record.reachable_presence : 0;
   const storeForwardRoutes = typeof record?.store_forward_routes === "number" ? record.store_forward_routes : 0;
@@ -1559,19 +1579,45 @@ function formatStatus(
   const lastStoreForwardResult = readString(record?.last_store_forward_result);
   const lastRecoveredCount = typeof record?.last_recovered_count === "number" ? record.last_recovered_count : 0;
   const lastAnnounceAt = readString(record?.last_announce_at);
+  const recentRouteOutcomes = Array.isArray(record?.recent_route_outcomes) ? record.recent_route_outcomes : [];
   const messagingReady = selfId !== undefined && selfId !== "";
   const recoveryStatus =
     storeForwardRoutes > 0 ? `ready (${storeForwardRoutes} path${storeForwardRoutes === 1 ? "" : "s"})` : "not configured";
   const directStatus = directEnabled ? "experimental on" : "experimental off";
+  const routeOutcomeLines = recentRouteOutcomes
+    .map((value) => asObject(value))
+    .filter((value): value is Record<string, unknown> => value !== undefined)
+    .map((item) => {
+      const routeType = readString(item.route_type) ?? "unknown";
+      const outcome = readString(item.outcome) ?? "unknown";
+      const attemptedAt = readString(item.attempted_at);
+      const cursor = readString(item.cursor);
+      const error = readString(item.error);
+      const parts = [`${routeType}`, outcome];
+      if (attemptedAt) {
+        parts.push(attemptedAt);
+      }
+      if (cursor) {
+        parts.push(`cursor=${cursor}`);
+      }
+      if (error) {
+        parts.push(`error=${error}`);
+      }
+      return parts.join(" | ");
+    });
   const summaryLines = [
     `identity: ${identity}`,
     ...(selfId ? [`self id: ${selfId}`] : []),
     ...(peerId ? [`peer id: ${peerId}`] : []),
+    `identity ready: ${identityReady ? "yes" : "no"}`,
+    `transport ready: ${transportReady ? "yes" : "no"}`,
+    `discovery ready: ${discoveryReady ? "yes" : "no"}`,
     `messaging: ${messagingReady ? "ready" : "not ready"}`,
     `contacts: ${contacts}`,
     `conversations: ${conversations}`,
     `unread: ${unread}`,
     `queued outgoing: ${pendingOutbox}`,
+    `message status: direct=${messageDirect} deferred=${messageDeferred} recovered=${messageRecovered}`,
     `offline recovery: ${recoveryStatus}`,
     `presence cache: ${presenceEntries} (${reachablePresence} reachable)`,
     `runtime mode: ${runtimeMode}${backgroundRuntime ? " (experimental)" : ""}`,
@@ -1582,6 +1628,8 @@ function formatStatus(
           `last recovery: ${lastStoreForwardSyncAt}${lastStoreForwardResult ? ` | result=${lastStoreForwardResult}` : ""} | recovered=${lastRecoveredCount}`,
         ]
       : []),
+    ...(routeOutcomeLines.length > 0 ? ["recent route outcomes:"] : []),
+    ...routeOutcomeLines.map((line) => `- ${line}`),
   ];
 
   const lines = [

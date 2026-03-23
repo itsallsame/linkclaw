@@ -703,7 +703,10 @@ test("runStatusCommand summarizes health and local state after initialization", 
     assert.match(result.message, /conversations: 0/);
     assert.match(result.message, /unread: 0/);
     assert.match(result.message, /messaging: ready/);
+    assert.match(result.message, /identity ready: yes/);
+    assert.match(result.message, /transport ready: yes/);
     assert.match(result.message, /queued outgoing: 0/);
+    assert.match(result.message, /message status: direct=0 deferred=0 recovered=0/);
     assert.match(result.message, /offline recovery: not configured/);
     assert.match(result.message, /runtime mode: host-managed/);
     assert.match(result.message, /relay: ok \(404\) http:\/\/127\.0\.0\.1:/);
@@ -809,6 +812,7 @@ test("runMessageCommand and inbox/sync summarize messaging workflows", async () 
     );
     assert.equal(sendResult.type, "message");
     assert.match(sendResult.message, /LinkClaw message queued/);
+    assert.match(sendResult.message, /transport status: deferred/);
 
     const syncResult = await runSyncCommand(
       { ...relayConfig, home: aliceHome },
@@ -930,9 +934,11 @@ test("runStatusCommand reflects offline recovery state after sync", async () => 
     assert.match(statusResult.message, /LinkClaw status/);
     assert.match(statusResult.message, /conversations: 1/);
     assert.match(statusResult.message, /unread: 1/);
+    assert.match(statusResult.message, /message status: direct=0 deferred=0 recovered=1/);
     assert.match(statusResult.message, /offline recovery: ready \(1 path\)/);
     assert.match(statusResult.message, /runtime mode: host-managed/);
     assert.match(statusResult.message, /last recovery: .*recovered=1/);
+    assert.match(statusResult.message, /recent route outcomes:/);
   } finally {
     relayProc.kill();
   }

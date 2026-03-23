@@ -419,6 +419,7 @@ Current status:
 
 - complete
 - runtime-backed `message status` now exists in core service/CLI
+- runtime status now surfaces `transport_ready` readiness and normalized message transport states (`direct` / `deferred` / `recovered`) with recent route outcome summaries
 - OpenClaw `/linkclaw-status` now consumes runtime-backed status instead of reconstructing state from `known ls` and `message inbox`
 - plugin status copy now prefers product language such as messaging/offline recovery/direct transport instead of exposing raw store-forward counters directly
 - onboarding/share/connect/message/inbox user flows continue to pass through the rebinding layer

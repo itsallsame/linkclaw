@@ -121,6 +121,20 @@ func TestStorePersistsRuntimeRecords(t *testing.T) {
 	}, "conv_1", ""); err != nil {
 		t.Fatalf("RecordRouteAttempt() error = %v", err)
 	}
+	allMessages, err := store.ListMessages(ctx)
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	if len(allMessages) != 1 {
+		t.Fatalf("ListMessages() len = %d, want 1", len(allMessages))
+	}
+	routeAttempts, err := store.ListRecentRouteAttempts(ctx, 5)
+	if err != nil {
+		t.Fatalf("ListRecentRouteAttempts() error = %v", err)
+	}
+	if len(routeAttempts) != 1 {
+		t.Fatalf("ListRecentRouteAttempts() len = %d, want 1", len(routeAttempts))
+	}
 
 	dbPath := filepath.Join(home, "state.db")
 	raw, err := os.ReadFile(dbPath)

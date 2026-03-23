@@ -64,6 +64,9 @@ func TestSendAndOutbox(t *testing.T) {
 	if sent.Message.Status != StatusPending {
 		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusPending)
 	}
+	if sent.Message.TransportStatus != TransportStatusDeferred {
+		t.Fatalf("transport status = %q, want %q", sent.Message.TransportStatus, TransportStatusDeferred)
+	}
 
 	outbox, err := service.Outbox(context.Background(), ListOptions{Home: bobHome})
 	if err != nil {
@@ -74,6 +77,9 @@ func TestSendAndOutbox(t *testing.T) {
 	}
 	if outbox.Messages[0].Body != "hello alice" {
 		t.Fatalf("outbox body = %q", outbox.Messages[0].Body)
+	}
+	if outbox.Messages[0].TransportStatus != TransportStatusDeferred {
+		t.Fatalf("outbox transport status = %q, want %q", outbox.Messages[0].TransportStatus, TransportStatusDeferred)
 	}
 
 	inbox, err := service.Inbox(context.Background(), ListOptions{Home: bobHome})
@@ -159,6 +165,9 @@ func TestSendAndSyncWithRelay(t *testing.T) {
 	if sent.Message.Status != StatusQueued {
 		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
 	}
+	if sent.Message.TransportStatus != TransportStatusDeferred {
+		t.Fatalf("transport status = %q, want %q", sent.Message.TransportStatus, TransportStatusDeferred)
+	}
 
 	synced, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome})
 	if err != nil {
@@ -196,6 +205,9 @@ func TestSendAndSyncWithRelay(t *testing.T) {
 	}
 	if thread.Conversation.Messages[0].Body != "hello from bob" {
 		t.Fatalf("thread body = %q, want %q", thread.Conversation.Messages[0].Body, "hello from bob")
+	}
+	if thread.Conversation.Messages[0].TransportStatus != TransportStatusRecovered {
+		t.Fatalf("thread transport status = %q, want %q", thread.Conversation.Messages[0].TransportStatus, TransportStatusRecovered)
 	}
 	if thread.Conversation.UnreadCount != 0 {
 		t.Fatalf("thread unread count = %d, want 0", thread.Conversation.UnreadCount)
@@ -282,6 +294,9 @@ func TestSendAndSyncWithRelayAndExperimentalDirectFallback(t *testing.T) {
 	if sent.Message.Status != StatusQueued {
 		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
 	}
+	if sent.Message.TransportStatus != TransportStatusDeferred {
+		t.Fatalf("transport status = %q, want %q", sent.Message.TransportStatus, TransportStatusDeferred)
+	}
 
 	synced, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome})
 	if err != nil {
@@ -329,6 +344,9 @@ func TestStatusSummary(t *testing.T) {
 	}
 	if result.StoreForwardRoutes != 0 {
 		t.Fatalf("store forward routes = %d, want 0", result.StoreForwardRoutes)
+	}
+	if !result.IdentityReady || !result.TransportReady {
+		t.Fatalf("expected identity/transport ready, got identity=%t transport=%t", result.IdentityReady, result.TransportReady)
 	}
 	if result.Contacts != 0 || result.Conversations != 0 || result.Unread != 0 {
 		t.Fatalf("unexpected counts: %+v", result)
@@ -426,6 +444,12 @@ func TestStatusSummaryTracksRecoveryState(t *testing.T) {
 	if status.LastStoreForwardResult != "success" {
 		t.Fatalf("last store-forward result = %q, want success", status.LastStoreForwardResult)
 	}
+	if status.MessageStatusRecovered < 1 {
+		t.Fatalf("message recovered counter = %d, want >= 1", status.MessageStatusRecovered)
+	}
+	if len(status.RecentRouteOutcomes) == 0 {
+		t.Fatal("recent route outcomes should not be empty after sync")
+	}
 }
 
 func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
@@ -505,6 +529,9 @@ func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
 	}
 	if sent.Message.Status != StatusDelivered {
 		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusDelivered)
+	}
+	if sent.Message.TransportStatus != TransportStatusDirect {
+		t.Fatalf("transport status = %q, want %q", sent.Message.TransportStatus, TransportStatusDirect)
 	}
 
 	inbox, err := aliceService.Inbox(context.Background(), ListOptions{Home: aliceHome})
@@ -624,6 +651,9 @@ func TestDirectDeliveryPreservesMultipleMessages(t *testing.T) {
 	bodies := map[string]bool{}
 	for _, msg := range thread.Conversation.Messages {
 		bodies[msg.Body] = true
+		if msg.TransportStatus != TransportStatusDirect {
+			t.Fatalf("thread message transport status = %q, want %q", msg.TransportStatus, TransportStatusDirect)
+		}
 	}
 	if !bodies["hello direct first"] || !bodies["hello direct second"] {
 		t.Fatalf("thread bodies = %#v", thread.Conversation.Messages)
