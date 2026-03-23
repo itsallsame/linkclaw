@@ -44,18 +44,23 @@ type Service struct {
 }
 
 type Result struct {
-	Input            string     `json:"input"`
-	NormalizedOrigin string     `json:"normalized_origin,omitempty"`
-	Resource         string     `json:"resource,omitempty"`
-	Status           string     `json:"status"`
-	CanonicalID      string     `json:"canonical_id,omitempty"`
-	DisplayName      string     `json:"display_name,omitempty"`
-	ProfileURL       string     `json:"profile_url,omitempty"`
-	Artifacts        []Artifact `json:"artifacts"`
-	Proofs           []Proof    `json:"proofs,omitempty"`
-	Mismatches       []string   `json:"mismatches,omitempty"`
-	Warnings         []string   `json:"warnings,omitempty"`
-	ResolvedAt       string     `json:"resolved_at"`
+	Input                 string     `json:"input"`
+	NormalizedOrigin      string     `json:"normalized_origin,omitempty"`
+	Resource              string     `json:"resource,omitempty"`
+	Status                string     `json:"status"`
+	CanonicalID           string     `json:"canonical_id,omitempty"`
+	DisplayName           string     `json:"display_name,omitempty"`
+	ProfileURL            string     `json:"profile_url,omitempty"`
+	PeerID                string     `json:"peer_id,omitempty"`
+	TransportCapabilities []string   `json:"transport_capabilities,omitempty"`
+	DirectHints           []string   `json:"direct_hints,omitempty"`
+	StoreForwardHints     []string   `json:"store_forward_hints,omitempty"`
+	SignedPeerRecord      string     `json:"signed_peer_record,omitempty"`
+	Artifacts             []Artifact `json:"artifacts"`
+	Proofs                []Proof    `json:"proofs,omitempty"`
+	Mismatches            []string   `json:"mismatches,omitempty"`
+	Warnings              []string   `json:"warnings,omitempty"`
+	ResolvedAt            string     `json:"resolved_at"`
 }
 
 type Artifact struct {
@@ -111,6 +116,18 @@ type agentCardDocument struct {
 	WebFingerURL        string   `json:"webfinger_url"`
 	ProfileURL          string   `json:"profile_url"`
 	VerificationMethods []string `json:"verification_methods"`
+	PeerID              string   `json:"peer_id"`
+	TransportCaps       []string `json:"transport_capabilities"`
+	DirectHints         []string `json:"direct_hints"`
+	StoreForwardHints   []string `json:"store_forward_hints"`
+	SignedPeerRecord    string   `json:"signed_peer_record"`
+	Messaging           struct {
+		Transport   string `json:"transport"`
+		RelayURL    string `json:"relay_url"`
+		DirectURL   string `json:"direct_url"`
+		DirectToken string `json:"direct_token"`
+		RecipientID string `json:"recipient_id"`
+	} `json:"messaging"`
 }
 
 type profileDocument struct {
@@ -263,6 +280,7 @@ func (s *Service) Inspect(ctx context.Context, rawInput string) (Result, error) 
 	} else if profileFetch.Artifact.OK {
 		result.ProfileURL = profileFetch.Artifact.URL
 	}
+	applyAgentCardHints(&result, cardDoc)
 
 	mismatches := make([]string, 0)
 	warnings := make([]string, 0)
@@ -738,6 +756,104 @@ func summarizeWebFinger(doc *webFingerDocument) string {
 
 func summarizeAgentCard(doc *agentCardDocument) string {
 	return fmt.Sprintf("canonical_id=%s methods=%d", strings.TrimSpace(doc.CanonicalID), len(doc.VerificationMethods))
+}
+
+func applyAgentCardHints(result *Result, card *agentCardDocument) {
+	if result == nil || card == nil {
+		return
+	}
+
+	peerID := strings.TrimSpace(card.PeerID)
+	signedPeerRecord := strings.TrimSpace(card.SignedPeerRecord)
+	transportCaps := normalizeTransportCapabilities(card.TransportCaps)
+	directHints := dedupeStrings(card.DirectHints)
+	storeForwardHints := dedupeStrings(card.StoreForwardHints)
+
+	messagingTransport := normalizeTransportCapability(card.Messaging.Transport)
+	if messagingTransport != "" {
+		transportCaps = appendUnique(transportCaps, messagingTransport)
+	}
+	if directURL := withTransportToken(card.Messaging.DirectURL, card.Messaging.DirectToken); directURL != "" {
+		directHints = appendUnique(directHints, directURL)
+	}
+	if relayURL := strings.TrimSpace(card.Messaging.RelayURL); relayURL != "" {
+		storeForwardHints = appendUnique(storeForwardHints, relayURL)
+	}
+	if peerID == "" {
+		peerID = strings.TrimSpace(card.Messaging.RecipientID)
+	}
+	if len(directHints) > 0 {
+		transportCaps = appendUnique(transportCaps, string("direct"))
+	}
+	if len(storeForwardHints) > 0 {
+		transportCaps = appendUnique(transportCaps, string("store_forward"))
+	}
+
+	result.PeerID = peerID
+	result.SignedPeerRecord = signedPeerRecord
+	result.TransportCapabilities = transportCaps
+	result.DirectHints = directHints
+	result.StoreForwardHints = storeForwardHints
+}
+
+func normalizeTransportCapabilities(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		capability := normalizeTransportCapability(value)
+		if capability == "" {
+			continue
+		}
+		normalized = append(normalized, capability)
+	}
+	return dedupeStrings(normalized)
+}
+
+func normalizeTransportCapability(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", "none":
+		return ""
+	case "direct", "libp2p":
+		return "direct"
+	case "store_forward", "storeforward", "store-forward", "relay", "recovery":
+		return "store_forward"
+	default:
+		return value
+	}
+}
+
+func withTransportToken(rawURL, token string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	if strings.TrimSpace(query.Get("token")) == "" {
+		query.Set("token", token)
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String()
+}
+
+func appendUnique(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.TrimSpace(existing) == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func summarizeProfile(doc profileDocument) string {

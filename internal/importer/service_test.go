@@ -3,16 +3,19 @@ package importer
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/resolver"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
 
 	_ "modernc.org/sqlite"
 )
@@ -72,6 +75,17 @@ func TestServiceImportPersistsTrustBookRecords(t *testing.T) {
 	if verificationState != resolver.StatusConsistent {
 		t.Fatalf("verification state = %q", verificationState)
 	}
+	var runtimeTrustVerification string
+	if err := db.QueryRow(
+		`SELECT verification_state FROM runtime_trust_records WHERE canonical_id = ?`,
+		result.Inspection.CanonicalID,
+	).Scan(&runtimeTrustVerification); err != nil {
+		t.Fatalf("query runtime trust record: %v", err)
+	}
+	if runtimeTrustVerification != resolver.StatusConsistent {
+		t.Fatalf("runtime trust verification_state = %q", runtimeTrustVerification)
+	}
+	assertCount(t, db, `SELECT COUNT(*) FROM runtime_discovery_records WHERE canonical_id = ?`, result.Inspection.CanonicalID, 1)
 
 	assertCount(t, db, `SELECT COUNT(*) FROM artifact_snapshots WHERE contact_id = ?`, result.ContactID, 4)
 	assertCount(t, db, `SELECT COUNT(*) FROM proofs WHERE contact_id = ?`, result.ContactID, 5)
@@ -128,6 +142,100 @@ func TestServiceImportRejectsDiscoveredByDefault(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resolved or consistent") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestServiceImportPersistsCapabilityDiscoveryFacts(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "with-capabilities"))
+	defer server.Close()
+
+	home := seedHome(t)
+	service := NewService()
+	service.Now = func() time.Time { return time.Date(2026, time.March, 13, 11, 0, 0, 0, time.UTC) }
+	service.Resolver = resolver.NewService()
+	service.Resolver.Client = server.Client()
+	service.Resolver.Now = service.Now
+
+	result, err := service.Import(context.Background(), Options{
+		Home:  home,
+		Input: server.URL + "/profile/",
+	})
+	if err != nil {
+		t.Fatalf("Import returned error: %v", err)
+	}
+
+	db := openDB(t, home)
+	defer db.Close()
+
+	var (
+		peerID            string
+		routeCandidates   string
+		transportCapsJSON string
+		directHintsJSON   string
+		storeHintsJSON    string
+		signedPeerRecord  string
+		reachable         int
+	)
+	if err := db.QueryRow(
+		`SELECT peer_id, route_candidates_json, transport_capabilities_json, direct_hints_json,
+		        store_forward_hints_json, signed_peer_record, reachable
+		   FROM runtime_discovery_records
+		  WHERE canonical_id = ?`,
+		result.Inspection.CanonicalID,
+	).Scan(
+		&peerID,
+		&routeCandidates,
+		&transportCapsJSON,
+		&directHintsJSON,
+		&storeHintsJSON,
+		&signedPeerRecord,
+		&reachable,
+	); err != nil {
+		t.Fatalf("query runtime discovery record: %v", err)
+	}
+	if peerID != "lcpeer:fixture-cap" {
+		t.Fatalf("peer_id = %q, want lcpeer:fixture-cap", peerID)
+	}
+	if !strings.Contains(signedPeerRecord, "fixture-cap") {
+		t.Fatalf("signed_peer_record = %q, want fixture-cap marker", signedPeerRecord)
+	}
+	if reachable != 1 {
+		t.Fatalf("reachable = %d, want 1", reachable)
+	}
+
+	var transportCaps []string
+	if err := json.Unmarshal([]byte(transportCapsJSON), &transportCaps); err != nil {
+		t.Fatalf("decode transport_capabilities_json: %v", err)
+	}
+	slices.Sort(transportCaps)
+	if got, want := strings.Join(transportCaps, ","), "direct,store_forward"; got != want {
+		t.Fatalf("transport capabilities = %q, want %q", got, want)
+	}
+
+	var directHints []string
+	if err := json.Unmarshal([]byte(directHintsJSON), &directHints); err != nil {
+		t.Fatalf("decode direct_hints_json: %v", err)
+	}
+	if got, want := strings.Join(directHints, ","), server.URL+"/direct?token=fixture-token"; got != want {
+		t.Fatalf("direct hints = %q, want %q", got, want)
+	}
+
+	var storeHints []string
+	if err := json.Unmarshal([]byte(storeHintsJSON), &storeHints); err != nil {
+		t.Fatalf("decode store_forward_hints_json: %v", err)
+	}
+	if got, want := strings.Join(storeHints, ","), server.URL+"/relay"; got != want {
+		t.Fatalf("store-forward hints = %q, want %q", got, want)
+	}
+
+	var candidates []transport.RouteCandidate
+	if err := json.Unmarshal([]byte(routeCandidates), &candidates); err != nil {
+		t.Fatalf("decode route_candidates_json: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("route candidates len = %d, want 2", len(candidates))
 	}
 }
 

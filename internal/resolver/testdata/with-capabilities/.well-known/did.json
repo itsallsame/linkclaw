@@ -1,0 +1,31 @@
+{
+  "@context": ["https://www.w3.org/ns/did/v1"],
+  "id": "did:web:fixture.example",
+  "alsoKnownAs": [
+    "{{RESOURCE}}",
+    "{{ORIGIN}}/profile/",
+    "https://github.com/fixture/example"
+  ],
+  "verificationMethod": [
+    {
+      "id": "did:web:fixture.example#key-1"
+    }
+  ],
+  "authentication": [
+    "did:web:fixture.example#key-1"
+  ],
+  "service": [
+    {
+      "type": "WebFinger",
+      "serviceEndpoint": "{{ORIGIN}}/.well-known/webfinger"
+    },
+    {
+      "type": "AgentCard",
+      "serviceEndpoint": "{{ORIGIN}}/.well-known/agent-card.json"
+    },
+    {
+      "type": "ProfilePage",
+      "serviceEndpoint": "{{ORIGIN}}/profile/"
+    }
+  ]
+}

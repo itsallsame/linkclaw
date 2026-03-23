@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/layout"
 	"github.com/xiewanpeng/claw-identity/internal/migrate"
 	"github.com/xiewanpeng/claw-identity/internal/resolver"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
 
 	_ "modernc.org/sqlite"
 )
@@ -123,6 +125,16 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 	}
 	trustID, err := upsertTrustRecord(ctx, tx, contactID, inspection, now, action)
 	if err != nil {
+		return Result{}, err
+	}
+	canonicalID := strings.TrimSpace(inspection.CanonicalID)
+	if canonicalID == "" {
+		canonicalID = strings.TrimSpace(opts.ExpectedCanonicalID)
+	}
+	if err := upsertRuntimeTrustRecord(ctx, tx, canonicalID, contactID, inspection, now, action); err != nil {
+		return Result{}, err
+	}
+	if err := upsertRuntimeDiscoveryRecord(ctx, tx, canonicalID, inspection, now, action); err != nil {
 		return Result{}, err
 	}
 	handleCount, err := upsertHandles(ctx, tx, contactID, inspection, now)
@@ -344,6 +356,237 @@ func upsertTrustRecord(ctx context.Context, tx *sql.Tx, contactID string, inspec
 		return "", fmt.Errorf("insert trust record: %w", err)
 	}
 	return trustID, nil
+}
+
+func upsertRuntimeTrustRecord(ctx context.Context, tx *sql.Tx, canonicalID, contactID string, inspection resolver.Result, now time.Time, action string) error {
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return nil
+	}
+	stamp := now.Format(time.RFC3339Nano)
+	decidedAt := strings.TrimSpace(inspection.ResolvedAt)
+	if decidedAt == "" {
+		decidedAt = stamp
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO runtime_trust_records (
+			canonical_id, contact_id, trust_level, risk_flags_json, verification_state,
+			decision_reason, source, decided_at, updated_at, created_at
+		) VALUES (?, ?, 'unknown', '[]', ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(canonical_id) DO UPDATE SET
+			contact_id = excluded.contact_id,
+			verification_state = excluded.verification_state,
+			decision_reason = excluded.decision_reason,
+			source = excluded.source,
+			decided_at = excluded.decided_at,
+			updated_at = excluded.updated_at`,
+		canonicalID,
+		contactID,
+		inspection.Status,
+		actionDecisionReason(action, inspection),
+		action,
+		decidedAt,
+		stamp,
+		stamp,
+	); err != nil {
+		return fmt.Errorf("upsert runtime trust record: %w", err)
+	}
+	return nil
+}
+
+func upsertRuntimeDiscoveryRecord(ctx context.Context, tx *sql.Tx, canonicalID string, inspection resolver.Result, now time.Time, action string) error {
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return nil
+	}
+	fact := deriveRuntimeDiscoveryFact(inspection)
+	routeCandidatesJSON, err := json.Marshal(fact.RouteCandidates)
+	if err != nil {
+		return fmt.Errorf("marshal runtime discovery route candidates: %w", err)
+	}
+	transportCapsJSON, err := json.Marshal(fact.TransportCapabilities)
+	if err != nil {
+		return fmt.Errorf("marshal runtime discovery transport capabilities: %w", err)
+	}
+	directHintsJSON, err := json.Marshal(fact.DirectHints)
+	if err != nil {
+		return fmt.Errorf("marshal runtime discovery direct hints: %w", err)
+	}
+	storeForwardHintsJSON, err := json.Marshal(fact.StoreForwardHints)
+	if err != nil {
+		return fmt.Errorf("marshal runtime discovery store-forward hints: %w", err)
+	}
+
+	stamp := now.Format(time.RFC3339Nano)
+	resolvedAt := strings.TrimSpace(inspection.ResolvedAt)
+	if resolvedAt == "" {
+		resolvedAt = stamp
+	}
+	freshUntil := deriveFreshUntil(resolvedAt)
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO runtime_discovery_records (
+			canonical_id, peer_id, route_candidates_json, transport_capabilities_json, direct_hints_json,
+			store_forward_hints_json, signed_peer_record, source, reachable, resolved_at, fresh_until,
+			announced_at, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+		ON CONFLICT(canonical_id) DO UPDATE SET
+			peer_id = excluded.peer_id,
+			route_candidates_json = excluded.route_candidates_json,
+			transport_capabilities_json = excluded.transport_capabilities_json,
+			direct_hints_json = excluded.direct_hints_json,
+			store_forward_hints_json = excluded.store_forward_hints_json,
+			signed_peer_record = excluded.signed_peer_record,
+			source = excluded.source,
+			reachable = excluded.reachable,
+			resolved_at = excluded.resolved_at,
+			fresh_until = excluded.fresh_until,
+			announced_at = excluded.announced_at,
+			updated_at = excluded.updated_at`,
+		canonicalID,
+		fact.PeerID,
+		string(routeCandidatesJSON),
+		string(transportCapsJSON),
+		string(directHintsJSON),
+		string(storeForwardHintsJSON),
+		fact.SignedPeerRecord,
+		action,
+		boolToInt(fact.Reachable),
+		resolvedAt,
+		freshUntil,
+		stamp,
+		stamp,
+	); err != nil {
+		return fmt.Errorf("upsert runtime discovery record: %w", err)
+	}
+	return nil
+}
+
+type runtimeDiscoveryFact struct {
+	PeerID                string
+	TransportCapabilities []string
+	DirectHints           []string
+	StoreForwardHints     []string
+	SignedPeerRecord      string
+	RouteCandidates       []transport.RouteCandidate
+	Reachable             bool
+}
+
+func deriveRuntimeDiscoveryFact(inspection resolver.Result) runtimeDiscoveryFact {
+	peerID := strings.TrimSpace(inspection.PeerID)
+	directHints := normalizeStringList(inspection.DirectHints)
+	storeForwardHints := normalizeStringList(inspection.StoreForwardHints)
+	transportCaps := normalizeCapabilityList(inspection.TransportCapabilities)
+	signedPeerRecord := strings.TrimSpace(inspection.SignedPeerRecord)
+
+	if len(directHints) > 0 {
+		transportCaps = appendUniqueValue(transportCaps, string(transport.RouteTypeDirect))
+	}
+	if len(storeForwardHints) > 0 {
+		transportCaps = appendUniqueValue(transportCaps, string(transport.RouteTypeStoreForward))
+	}
+	if peerID != "" && len(directHints) == 0 && containsValue(transportCaps, string(transport.RouteTypeDirect)) {
+		directHints = append(directHints, "libp2p://"+peerID)
+	}
+
+	routes := make([]transport.RouteCandidate, 0, len(directHints)+len(storeForwardHints))
+	for _, target := range directHints {
+		routes = append(routes, transport.RouteCandidate{
+			Type:     transport.RouteTypeDirect,
+			Label:    target,
+			Priority: 100,
+			Target:   target,
+		})
+	}
+	for _, target := range storeForwardHints {
+		routes = append(routes, transport.RouteCandidate{
+			Type:     transport.RouteTypeStoreForward,
+			Label:    target,
+			Priority: 30,
+			Target:   target,
+		})
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].Type == routes[j].Type {
+			return routes[i].Target < routes[j].Target
+		}
+		return routes[i].Type < routes[j].Type
+	})
+
+	return runtimeDiscoveryFact{
+		PeerID:                peerID,
+		TransportCapabilities: transportCaps,
+		DirectHints:           directHints,
+		StoreForwardHints:     storeForwardHints,
+		SignedPeerRecord:      signedPeerRecord,
+		RouteCandidates:       routes,
+		Reachable:             len(routes) > 0,
+	}
+}
+
+func deriveFreshUntil(resolvedAt string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(resolvedAt))
+	if err != nil {
+		return ""
+	}
+	return parsed.Add(24 * time.Hour).Format(time.RFC3339Nano)
+}
+
+func normalizeCapabilityList(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		capability := normalizeCapability(value)
+		if capability == "" {
+			continue
+		}
+		normalized = appendUniqueValue(normalized, capability)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func normalizeCapability(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "none":
+		return ""
+	case "direct", "libp2p":
+		return string(transport.RouteTypeDirect)
+	case "store_forward", "storeforward", "store-forward", "relay", "recovery":
+		return string(transport.RouteTypeStoreForward)
+	default:
+		return value
+	}
+}
+
+func normalizeStringList(values []string) []string {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		normalized = appendUniqueValue(normalized, value)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func appendUniqueValue(values []string, value string) []string {
+	if containsValue(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func containsValue(values []string, value string) bool {
+	for _, existing := range values {
+		if strings.TrimSpace(existing) == strings.TrimSpace(value) {
+			return true
+		}
+	}
+	return false
 }
 
 func upsertHandles(ctx context.Context, tx *sql.Tx, contactID string, inspection resolver.Result, now time.Time) (int, error) {

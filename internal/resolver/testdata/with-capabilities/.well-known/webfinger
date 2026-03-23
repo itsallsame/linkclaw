@@ -1,0 +1,20 @@
+{
+  "subject": "{{RESOURCE}}",
+  "aliases": [
+    "did:web:fixture.example"
+  ],
+  "links": [
+    {
+      "rel": "self",
+      "href": "{{ORIGIN}}/.well-known/did.json"
+    },
+    {
+      "rel": "service-desc",
+      "href": "{{ORIGIN}}/.well-known/agent-card.json"
+    },
+    {
+      "rel": "profile-page",
+      "href": "{{ORIGIN}}/profile/"
+    }
+  ]
+}

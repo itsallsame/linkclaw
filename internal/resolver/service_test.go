@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,39 @@ func successfulArtifacts(artifacts []Artifact) int {
 		}
 	}
 	return count
+}
+
+func TestServiceInspectExtractsCapabilityHintsFromAgentCard(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, "with-capabilities")
+	defer server.Close()
+
+	service := NewService()
+	service.Client = server.Client()
+	service.Now = func() time.Time { return time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC) }
+
+	result, err := service.Inspect(context.Background(), server.URL+"/profile/")
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+	if result.PeerID != "lcpeer:fixture-cap" {
+		t.Fatalf("peer_id = %q, want lcpeer:fixture-cap", result.PeerID)
+	}
+	if !strings.Contains(result.SignedPeerRecord, "fixture-cap") {
+		t.Fatalf("signed_peer_record = %q, want fixture-cap marker", result.SignedPeerRecord)
+	}
+	caps := append([]string(nil), result.TransportCapabilities...)
+	slices.Sort(caps)
+	if got, want := strings.Join(caps, ","), "direct,store_forward"; got != want {
+		t.Fatalf("transport_capabilities = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(result.DirectHints, ","), server.URL+"/direct?token=fixture-token"; got != want {
+		t.Fatalf("direct_hints = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(result.StoreForwardHints, ","), server.URL+"/relay"; got != want {
+		t.Fatalf("store_forward_hints = %q, want %q", got, want)
+	}
 }
 
 func newFixtureServer(t *testing.T, fixture string) *httptest.Server {
