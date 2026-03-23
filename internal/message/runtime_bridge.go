@@ -203,6 +203,123 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 	return view, transports, routes
 }
 
+func runtimePeerViewFromDiscovery(record agentdiscovery.Record) routing.ContactRuntimeView {
+	return routing.ContactRuntimeView{
+		CanonicalID:           strings.TrimSpace(record.CanonicalID),
+		PeerID:                strings.TrimSpace(record.PeerID),
+		TransportCapabilities: append([]string(nil), record.TransportCapabilities...),
+	}
+}
+
+func buildDiscoveryConnectRuntimeBoundary(selfProfile selfMessagingProfile, record agentdiscovery.Record, now time.Time) (agentdiscovery.PeerPresenceView, []transport.Transport, []transport.RouteCandidate) {
+	routes := discoveryRoutes(record)
+	view := agentdiscovery.PeerPresenceView{
+		CanonicalID:           strings.TrimSpace(record.CanonicalID),
+		PeerID:                strings.TrimSpace(record.PeerID),
+		Reachable:             record.Reachable,
+		RouteCandidates:       append([]transport.RouteCandidate(nil), routes...),
+		TransportCapabilities: append([]string(nil), record.TransportCapabilities...),
+		DirectHints:           append([]string(nil), record.DirectHints...),
+		StoreForwardHints:     append([]string(nil), record.StoreForwardHints...),
+		SignedPeerRecord:      strings.TrimSpace(record.SignedPeerRecord),
+		Source:                strings.TrimSpace(record.Source),
+		ResolvedAt:            parseTimestampOrFallback(record.ResolvedAt, now.UTC()),
+		FreshUntil:            parseTimestampOrFallback(record.FreshUntil, now.UTC().Add(5*time.Minute)),
+		AnnouncedAt:           parseTimestamp(record.AnnouncedAt),
+	}
+
+	transports := make([]transport.Transport, 0, 1)
+	if directTransportEnabled() && hasRouteType(routes, transport.RouteTypeDirect) {
+		session, err := discoverylibp2p.BootSession(discoverylibp2p.SessionConfig{
+			Enabled:             true,
+			CanonicalID:         selfProfile.CanonicalID,
+			SigningPublicKey:    selfProfile.SigningPublicKey,
+			EncryptionPublicKey: "",
+			Now:                 now,
+		})
+		if err == nil && session != nil && session.Enabled {
+			transports = append(transports, transportlibp2p.New(session))
+			view.Reachable = true
+		}
+	}
+	if hasRouteType(routes, transport.RouteTypeStoreForward) {
+		view.Reachable = true
+	}
+
+	return view, transports, routes
+}
+
+func discoveryRoutes(record agentdiscovery.Record) []transport.RouteCandidate {
+	routes := append([]transport.RouteCandidate(nil), record.RouteCandidates...)
+	for _, hint := range record.DirectHints {
+		target := strings.TrimSpace(hint)
+		if target == "" || hasRoute(routes, transport.RouteTypeDirect, target) {
+			continue
+		}
+		routes = append(routes, transport.RouteCandidate{
+			Type:     transport.RouteTypeDirect,
+			Label:    target,
+			Priority: 100,
+			Target:   target,
+		})
+	}
+	for _, hint := range record.StoreForwardHints {
+		target := strings.TrimSpace(hint)
+		if target == "" || hasRoute(routes, transport.RouteTypeStoreForward, target) {
+			continue
+		}
+		routes = append(routes, transport.RouteCandidate{
+			Type:     transport.RouteTypeStoreForward,
+			Label:    target,
+			Priority: 1,
+			Target:   target,
+		})
+	}
+	return routes
+}
+
+func hasRoute(routes []transport.RouteCandidate, routeType transport.RouteType, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, route := range routes {
+		if route.Type != routeType {
+			continue
+		}
+		if strings.TrimSpace(route.Target) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRouteType(routes []transport.RouteCandidate, routeType transport.RouteType) bool {
+	for _, route := range routes {
+		if route.Type == routeType {
+			return true
+		}
+	}
+	return false
+}
+
+func parseTimestamp(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
+}
+
+func parseTimestampOrFallback(raw string, fallback time.Time) time.Time {
+	parsed := parseTimestamp(raw)
+	if parsed.IsZero() {
+		return fallback
+	}
+	return parsed
+}
+
 func buildDirectRouteTarget(rawURL string, token string) string {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {

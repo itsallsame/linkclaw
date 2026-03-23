@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/card"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/relayserver"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
 )
 
 func TestSendAndOutbox(t *testing.T) {
@@ -313,6 +315,92 @@ func TestSendAndSyncWithRelayAndExperimentalDirectFallback(t *testing.T) {
 	aliceAttempts := loadRuntimeRouteAttempts(t, aliceHome)
 	recoveryCursor := requireRouteAttemptWithNonEmptyCursor(t, aliceAttempts, "recovery", "recovered")
 	requireRouteAttempt(t, aliceAttempts, "recovery", "acked", recoveryCursor)
+}
+
+func TestConnectPeerSupportsDiscoveryRecordWithoutContact(t *testing.T) {
+	initService := initflow.NewService()
+
+	selfHome := filepath.Join(t.TempDir(), "self-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        selfHome,
+		CanonicalID: "did:key:z6MkConnectSelf",
+		DisplayName: "Connect Self",
+	}); err != nil {
+		t.Fatalf("init self home: %v", err)
+	}
+
+	peerCanonicalID := "did:key:z6MkConnectPeer"
+	relayURL := "https://relay.example"
+
+	db, err := sql.Open("sqlite", filepath.Join(selfHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	routesJSON, err := json.Marshal([]transport.RouteCandidate{
+		{
+			Type:     transport.RouteTypeStoreForward,
+			Label:    relayURL,
+			Priority: 1,
+			Target:   relayURL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal discovery routes: %v", err)
+	}
+	capsJSON, err := json.Marshal([]string{string(transport.RouteTypeStoreForward)})
+	if err != nil {
+		t.Fatalf("marshal discovery capabilities: %v", err)
+	}
+	storeForwardHintsJSON, err := json.Marshal([]string{relayURL})
+	if err != nil {
+		t.Fatalf("marshal discovery store-forward hints: %v", err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(
+		`INSERT INTO runtime_discovery_records (
+			canonical_id, peer_id, route_candidates_json, transport_capabilities_json, direct_hints_json,
+			store_forward_hints_json, signed_peer_record, source, reachable, resolved_at, fresh_until,
+			announced_at, updated_at, created_at
+		) VALUES (?, '', ?, ?, '[]', ?, '', 'fixture', 1, ?, ?, '', ?, ?)`,
+		peerCanonicalID,
+		string(routesJSON),
+		string(capsJSON),
+		string(storeForwardHintsJSON),
+		stamp,
+		stamp,
+		stamp,
+		stamp,
+	); err != nil {
+		t.Fatalf("insert discovery record: %v", err)
+	}
+
+	var contactCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM contacts WHERE canonical_id = ?`, peerCanonicalID).Scan(&contactCount); err != nil {
+		t.Fatalf("count contacts: %v", err)
+	}
+	if contactCount != 0 {
+		t.Fatalf("contacts for canonical_id = %d, want 0", contactCount)
+	}
+
+	service := NewService()
+	result, err := service.ConnectPeer(context.Background(), ConnectPeerOptions{
+		Home:    selfHome,
+		PeerRef: peerCanonicalID,
+	})
+	if err != nil {
+		t.Fatalf("connect peer from discovery: %v", err)
+	}
+	if got, want := result.CanonicalID, peerCanonicalID; got != want {
+		t.Fatalf("connect canonical id = %q, want %q", got, want)
+	}
+	if !result.Connected {
+		t.Fatalf("connect result connected = false, want true; result=%+v", result)
+	}
+	if got, want := result.Transport, "store_forward_ready"; got != want {
+		t.Fatalf("connect transport = %q, want %q", got, want)
+	}
 }
 
 func TestStatusSummary(t *testing.T) {

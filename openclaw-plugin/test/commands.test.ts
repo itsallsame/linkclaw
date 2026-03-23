@@ -1957,11 +1957,21 @@ test("message connect-peer reports blocked readiness when no transport route is 
     assert.equal(typeof imported.contact_id, "string");
     assert.ok((imported.contact_id ?? "").length > 0);
 
+    const removeEnvelope = await runLinkClaw(
+      { binaryPath, home },
+      {
+        command: "known_rm",
+        identifier: imported.contact_id ?? "",
+      },
+      pluginRoot,
+    );
+    assert.equal(removeEnvelope.ok, true);
+
     const connectEnvelope = await runLinkClaw(
       { binaryPath, home },
       {
         command: "message_connect_peer",
-        identifier: imported.contact_id ?? "",
+        identifier: "did:web:fixture.example",
       },
       pluginRoot,
     );

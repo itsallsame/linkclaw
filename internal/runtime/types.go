@@ -80,7 +80,7 @@ type ListDiscoveryResult struct {
 }
 
 type ConnectPeerRequest struct {
-	Contact routing.ContactRuntimeView `json:"contact"`
+	Peer    routing.ContactRuntimeView `json:"peer"`
 	Refresh bool                       `json:"refresh"`
 }
 

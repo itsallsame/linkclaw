@@ -309,7 +309,7 @@ test("bridge covers inspect, import, and known commands against the real binary"
       config,
       {
         command: "message_connect_peer",
-        identifier: contactID,
+        identifier: "did:web:fixture.example",
       },
       pluginRoot,
     );

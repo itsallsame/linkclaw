@@ -561,7 +561,7 @@ func TestServiceConnectPeerUsesTrustAndDiscovery(t *testing.T) {
 	}
 
 	result, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
-		Contact: routing.ContactRuntimeView{
+		Peer: routing.ContactRuntimeView{
 			CanonicalID: "did:key:test",
 		},
 	})
@@ -606,7 +606,7 @@ func TestServiceConnectPeerReturnsUnconnectedWhenNoUsableRoute(t *testing.T) {
 	}
 
 	result, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
-		Contact: routing.ContactRuntimeView{
+		Peer: routing.ContactRuntimeView{
 			CanonicalID: "did:key:test",
 		},
 	})

@@ -916,11 +916,21 @@ func TestRunMessageRuntimeInspectDiscoveryConnectJSON(t *testing.T) {
 		t.Fatalf("list-discovery records = 0, want at least 1")
 	}
 
+	removeCode, removeStdout, removeStderr := runForTest(t, []string{
+		"known", "rm",
+		"--home", home,
+		"--json",
+		imported.Result.ContactID,
+	}, "")
+	if removeCode != 0 {
+		t.Fatalf("known rm exit code = %d, stderr = %s, stdout = %s", removeCode, removeStderr, removeStdout)
+	}
+
 	connectCode, connectStdout, connectStderr := runForTest(t, []string{
 		"message", "connect-peer",
 		"--home", home,
 		"--json",
-		imported.Result.ContactID,
+		imported.Result.Inspection.CanonicalID,
 	}, "")
 	if connectCode != 0 {
 		t.Fatalf("message connect-peer exit code = %d, stderr = %s, stdout = %s", connectCode, connectStderr, connectStdout)

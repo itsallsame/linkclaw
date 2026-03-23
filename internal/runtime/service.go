@@ -243,8 +243,8 @@ func (s *Service) ListDiscovery(ctx context.Context, req ListDiscoveryRequest) (
 }
 
 func (s *Service) ConnectPeer(ctx context.Context, req ConnectPeerRequest) (ConnectPeerResult, error) {
-	contact := req.Contact
-	canonicalID := strings.TrimSpace(contact.CanonicalID)
+	peer := req.Peer
+	canonicalID := strings.TrimSpace(peer.CanonicalID)
 	if canonicalID == "" {
 		return ConnectPeerResult{}, fmt.Errorf("canonical_id is required")
 	}
@@ -270,7 +270,7 @@ func (s *Service) ConnectPeer(ctx context.Context, req ConnectPeerRequest) (Conn
 		return ConnectPeerResult{}, err
 	}
 
-	routes, err := s.Planner.PlanSend(ctx, contact, presence)
+	routes, err := s.Planner.PlanSend(ctx, peer, presence)
 	if err != nil {
 		return ConnectPeerResult{}, err
 	}

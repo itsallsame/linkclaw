@@ -1081,13 +1081,13 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return 1
 		}
 		if len(fs.Args()) != 1 {
-			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("connect-peer"), "message connect-peer requires exactly one contact reference")
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("connect-peer"), "message connect-peer requires exactly one peer reference")
 		}
 		service := message.NewService()
 		result, err := service.ConnectPeer(ctx, message.ConnectPeerOptions{
-			Home:       *home,
-			ContactRef: fs.Args()[0],
-			Refresh:    *refresh,
+			Home:    *home,
+			PeerRef: fs.Args()[0],
+			Refresh: *refresh,
 		})
 		if err != nil {
 			return writeMessageError[map[string]any](errOut, out, *jsonOutput, "connect-peer", err)

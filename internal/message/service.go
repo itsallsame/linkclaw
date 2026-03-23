@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/layout"
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 	"github.com/xiewanpeng/claw-identity/internal/migrate"
+	"github.com/xiewanpeng/claw-identity/internal/routing"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
@@ -70,9 +72,9 @@ type ListDiscoveryOptions struct {
 }
 
 type ConnectPeerOptions struct {
-	Home       string
-	ContactRef string
-	Refresh    bool
+	Home    string
+	PeerRef string
+	Refresh bool
 }
 
 type ListOptions struct {
@@ -479,9 +481,9 @@ func (s *Service) ListDiscovery(ctx context.Context, opts ListDiscoveryOptions) 
 }
 
 func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (agentruntime.ConnectPeerResult, error) {
-	contactRef := strings.TrimSpace(opts.ContactRef)
-	if contactRef == "" {
-		return agentruntime.ConnectPeerResult{}, fmt.Errorf("message connect-peer requires exactly one contact reference")
+	peerRef := strings.TrimSpace(opts.PeerRef)
+	if peerRef == "" {
+		return agentruntime.ConnectPeerResult{}, fmt.Errorf("message connect-peer requires exactly one peer reference")
 	}
 
 	now := s.now()
@@ -495,12 +497,28 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 	if err != nil {
 		return agentruntime.ConnectPeerResult{}, err
 	}
-	contact, err := resolveContactLookup(ctx, db, contactRef)
+	target, err := resolveConnectPeerTarget(ctx, db, peerRef, now)
 	if err != nil {
 		return agentruntime.ConnectPeerResult{}, err
 	}
 
-	view, extraTransports, routes := buildSendRuntimeBoundary(selfProfile, contact, now)
+	var (
+		view            agentdiscovery.PeerPresenceView
+		extraTransports []transport.Transport
+		routes          []transport.RouteCandidate
+		peer            routing.ContactRuntimeView
+	)
+	switch {
+	case target.contact != nil:
+		view, extraTransports, routes = buildSendRuntimeBoundary(selfProfile, *target.contact, now)
+		peer = runtimeContactView(*target.contact)
+	case target.discovery != nil:
+		view, extraTransports, routes = buildDiscoveryConnectRuntimeBoundary(selfProfile, *target.discovery, now)
+		peer = runtimePeerViewFromDiscovery(*target.discovery)
+	default:
+		return agentruntime.ConnectPeerResult{}, fmt.Errorf("peer %q not found in contacts or discovery", peerRef)
+	}
+
 	discoverySvc := staticDiscoveryService{view: view}
 	runtimeSvc := agentruntime.NewService(
 		staticPlanner{sendRoutes: routes},
@@ -513,7 +531,7 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 	runtimeSvc.Now = func() time.Time { return now }
 
 	return runtimeSvc.ConnectPeer(ctx, agentruntime.ConnectPeerRequest{
-		Contact: runtimeContactView(contact),
+		Peer:    peer,
 		Refresh: opts.Refresh,
 	})
 }
@@ -688,6 +706,19 @@ type connectReadinessTransport struct {
 	routeType transport.RouteType
 }
 
+type connectPeerTarget struct {
+	contact   *contactRecord
+	discovery *agentdiscovery.Record
+}
+
+type contactLookupNotFoundError struct {
+	Reference string
+}
+
+func (e contactLookupNotFoundError) Error() string {
+	return fmt.Sprintf("contact %q not found; import an identity card first", e.Reference)
+}
+
 func (t connectReadinessTransport) Name() string {
 	if strings.TrimSpace(t.name) == "" {
 		return "connect_ready"
@@ -709,6 +740,66 @@ func (t connectReadinessTransport) Sync(context.Context, transport.RouteCandidat
 
 func (t connectReadinessTransport) Ack(context.Context, transport.RouteCandidate, string) error {
 	return nil
+}
+
+func resolveConnectPeerTarget(ctx context.Context, db *sql.DB, ref string, now time.Time) (connectPeerTarget, error) {
+	needle := strings.TrimSpace(ref)
+	if needle == "" {
+		return connectPeerTarget{}, fmt.Errorf("peer reference is required")
+	}
+
+	contact, err := resolveContactLookup(ctx, db, needle)
+	if err == nil {
+		return connectPeerTarget{contact: &contact}, nil
+	}
+	var notFound contactLookupNotFoundError
+	if !errors.As(err, &notFound) {
+		return connectPeerTarget{}, err
+	}
+
+	record, ok, err := resolveDiscoveryLookup(ctx, db, needle, now)
+	if err != nil {
+		return connectPeerTarget{}, err
+	}
+	if !ok {
+		return connectPeerTarget{}, fmt.Errorf("peer %q not found in contacts or discovery; run message list-discovery first or import an identity card", needle)
+	}
+	return connectPeerTarget{discovery: &record}, nil
+}
+
+func resolveDiscoveryLookup(ctx context.Context, db *sql.DB, ref string, now time.Time) (agentdiscovery.Record, bool, error) {
+	needle := strings.TrimSpace(ref)
+	if needle == "" {
+		return agentdiscovery.Record{}, false, fmt.Errorf("peer reference is required")
+	}
+	store := agentdiscovery.NewStoreWithDB(db, now)
+	records, err := store.List(ctx)
+	if err != nil {
+		return agentdiscovery.Record{}, false, err
+	}
+
+	var peerMatches []agentdiscovery.Record
+	for _, record := range records {
+		if strings.TrimSpace(record.CanonicalID) == needle {
+			return record, true, nil
+		}
+		if strings.TrimSpace(record.PeerID) == needle {
+			peerMatches = append(peerMatches, record)
+		}
+	}
+	switch len(peerMatches) {
+	case 0:
+		return agentdiscovery.Record{}, false, nil
+	case 1:
+		return peerMatches[0], true, nil
+	default:
+		canonicalIDs := make([]string, 0, len(peerMatches))
+		for _, match := range peerMatches {
+			canonicalIDs = append(canonicalIDs, strings.TrimSpace(match.CanonicalID))
+		}
+		sort.Strings(canonicalIDs)
+		return agentdiscovery.Record{}, false, fmt.Errorf("peer reference %q is ambiguous in discovery records; canonical ids: %s", needle, strings.Join(canonicalIDs, ", "))
+	}
 }
 
 func resolveContactLookup(ctx context.Context, db *sql.DB, ref string) (contactRecord, error) {
@@ -744,7 +835,7 @@ func resolveContactLookup(ctx context.Context, db *sql.DB, ref string) (contactR
 		return contactRecord{}, fmt.Errorf("iterate contact reference matches: %w", err)
 	}
 	if len(matches) == 0 {
-		return contactRecord{}, fmt.Errorf("contact %q not found; import an identity card first", needle)
+		return contactRecord{}, contactLookupNotFoundError{Reference: needle}
 	}
 	if len(matches) > 1 {
 		sort.Slice(matches, func(i, j int) bool { return matches[i].ContactID < matches[j].ContactID })
