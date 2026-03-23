@@ -87,6 +87,71 @@ test("buildLinkClawArgs maps known trust and note flags", () => {
     "--json",
     "did:key:z6MkAlice",
   ]);
+
+  const inspectTrustArgs = buildLinkClawArgs(
+    "message_inspect_trust",
+    {
+      command: "message_inspect_trust",
+      identifier: "did:key:z6MkAlice",
+    },
+    "/tmp/linkclaw-home",
+  );
+  assert.deepEqual(inspectTrustArgs, [
+    "message",
+    "inspect-trust",
+    "--home",
+    "/tmp/linkclaw-home",
+    "--json",
+    "did:key:z6MkAlice",
+  ]);
+
+  const listDiscoveryArgs = buildLinkClawArgs(
+    "message_list_discovery",
+    {
+      command: "message_list_discovery",
+      capability: "direct",
+      capabilities: ["direct", "store_forward"],
+      source: "import",
+      freshOnly: true,
+      limit: 5,
+    },
+    "/tmp/linkclaw-home",
+  );
+  assert.deepEqual(listDiscoveryArgs, [
+    "message",
+    "list-discovery",
+    "--home",
+    "/tmp/linkclaw-home",
+    "--json",
+    "--capability",
+    "direct",
+    "--capabilities",
+    "direct,store_forward",
+    "--source",
+    "import",
+    "--fresh-only",
+    "--limit",
+    "5",
+  ]);
+
+  const connectPeerArgs = buildLinkClawArgs(
+    "message_connect_peer",
+    {
+      command: "message_connect_peer",
+      identifier: "contact-1",
+      refresh: true,
+    },
+    "/tmp/linkclaw-home",
+  );
+  assert.deepEqual(connectPeerArgs, [
+    "message",
+    "connect-peer",
+    "--home",
+    "/tmp/linkclaw-home",
+    "--json",
+    "--refresh",
+    "contact-1",
+  ]);
 });
 
 test("bridge runs init and publish against the real binary", async () => {
@@ -213,6 +278,44 @@ test("bridge covers inspect, import, and known commands against the real binary"
     assert.equal(
       (((trustEnvelope.result as Record<string, unknown>).contact as Record<string, unknown>).trust as Record<string, unknown>).trust_level,
       "trusted",
+    );
+
+    const inspectTrustEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "message_inspect_trust",
+        identifier: contactID,
+      },
+      pluginRoot,
+    );
+    assert.equal(
+      ((inspectTrustEnvelope.result as Record<string, unknown>).summary as Record<string, unknown>).trust_level,
+      "trusted",
+    );
+
+    const listDiscoveryEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "message_list_discovery",
+        limit: 10,
+      },
+      pluginRoot,
+    );
+    assert.ok(
+      (((listDiscoveryEnvelope.result as Record<string, unknown>).records as unknown[]).length) >= 1,
+    );
+
+    const connectPeerEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "message_connect_peer",
+        identifier: contactID,
+      },
+      pluginRoot,
+    );
+    assert.equal(
+      (connectPeerEnvelope.result as Record<string, unknown>).canonical_id,
+      "did:web:fixture.example",
     );
 
     const noteEnvelope = await runLinkClaw(

@@ -17,6 +17,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
 	"github.com/xiewanpeng/claw-identity/internal/relayserver"
+	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 
 	_ "modernc.org/sqlite"
 )
@@ -784,6 +785,96 @@ func TestRunMessageStatusJSON(t *testing.T) {
 	}
 	if out.Result.StoreForwardRoutes != 0 {
 		t.Fatalf("store forward routes = %d, want 0", out.Result.StoreForwardRoutes)
+	}
+}
+
+func TestRunMessageRuntimeInspectDiscoveryConnectJSON(t *testing.T) {
+	home, imported := setupImportedContact(t)
+
+	trustCode, trustStdout, trustStderr := runForTest(t, []string{
+		"known", "trust",
+		"--home", home,
+		"--json",
+		"--level", "trusted",
+		imported.Result.ContactID,
+	}, "")
+	if trustCode != 0 {
+		t.Fatalf("known trust exit code = %d, stderr = %s, stdout = %s", trustCode, trustStderr, trustStdout)
+	}
+
+	inspectCode, inspectStdout, inspectStderr := runForTest(t, []string{
+		"message", "inspect-trust",
+		"--home", home,
+		"--json",
+		imported.Result.ContactID,
+	}, "")
+	if inspectCode != 0 {
+		t.Fatalf("message inspect-trust exit code = %d, stderr = %s, stdout = %s", inspectCode, inspectStderr, inspectStdout)
+	}
+	var inspectOut struct {
+		OK     bool                            `json:"ok"`
+		Result agentruntime.InspectTrustResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(inspectStdout), &inspectOut); err != nil {
+		t.Fatalf("unmarshal inspect-trust output: %v", err)
+	}
+	if !inspectOut.OK {
+		t.Fatalf("expected inspect-trust ok=true: %+v", inspectOut)
+	}
+	if inspectOut.Result.CanonicalID != imported.Result.Inspection.CanonicalID {
+		t.Fatalf("inspect canonical id = %q, want %q", inspectOut.Result.CanonicalID, imported.Result.Inspection.CanonicalID)
+	}
+	if inspectOut.Result.Summary.TrustLevel != "trusted" {
+		t.Fatalf("inspect trust level = %q, want trusted", inspectOut.Result.Summary.TrustLevel)
+	}
+
+	discoveryCode, discoveryStdout, discoveryStderr := runForTest(t, []string{
+		"message", "list-discovery",
+		"--home", home,
+		"--json",
+		"--limit", "10",
+	}, "")
+	if discoveryCode != 0 {
+		t.Fatalf("message list-discovery exit code = %d, stderr = %s, stdout = %s", discoveryCode, discoveryStderr, discoveryStdout)
+	}
+	var discoveryOut struct {
+		OK     bool                             `json:"ok"`
+		Result agentruntime.ListDiscoveryResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(discoveryStdout), &discoveryOut); err != nil {
+		t.Fatalf("unmarshal list-discovery output: %v", err)
+	}
+	if !discoveryOut.OK {
+		t.Fatalf("expected list-discovery ok=true: %+v", discoveryOut)
+	}
+	if len(discoveryOut.Result.Records) == 0 {
+		t.Fatalf("list-discovery records = 0, want at least 1")
+	}
+
+	connectCode, connectStdout, connectStderr := runForTest(t, []string{
+		"message", "connect-peer",
+		"--home", home,
+		"--json",
+		imported.Result.ContactID,
+	}, "")
+	if connectCode != 0 {
+		t.Fatalf("message connect-peer exit code = %d, stderr = %s, stdout = %s", connectCode, connectStderr, connectStdout)
+	}
+	var connectOut struct {
+		OK     bool                           `json:"ok"`
+		Result agentruntime.ConnectPeerResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(connectStdout), &connectOut); err != nil {
+		t.Fatalf("unmarshal connect-peer output: %v", err)
+	}
+	if !connectOut.OK {
+		t.Fatalf("expected connect-peer ok=true: %+v", connectOut)
+	}
+	if connectOut.Result.CanonicalID != imported.Result.Inspection.CanonicalID {
+		t.Fatalf("connect canonical id = %q, want %q", connectOut.Result.CanonicalID, imported.Result.Inspection.CanonicalID)
+	}
+	if connectOut.Result.Trust.TrustLevel == "" {
+		t.Fatalf("connect trust level = empty, want non-empty")
 	}
 }
 

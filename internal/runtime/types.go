@@ -1,6 +1,11 @@
 package runtime
 
-import "github.com/xiewanpeng/claw-identity/internal/transport"
+import (
+	"github.com/xiewanpeng/claw-identity/internal/discovery"
+	"github.com/xiewanpeng/claw-identity/internal/routing"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
+	"github.com/xiewanpeng/claw-identity/internal/trust"
+)
 
 type SendRequest struct {
 	MessageID   string
@@ -46,4 +51,47 @@ type Status struct {
 	DiscoveryReady    bool
 	RuntimeMode       string
 	BackgroundRuntime bool
+}
+
+type InspectTrustRequest struct {
+	CanonicalID string
+}
+
+type InspectTrustResult struct {
+	CanonicalID string             `json:"canonical_id"`
+	Found       bool               `json:"found"`
+	Profile     trust.TrustProfile `json:"profile"`
+	Summary     trust.TrustSummary `json:"summary"`
+	InspectedAt string             `json:"inspected_at"`
+}
+
+type ListDiscoveryRequest struct {
+	Capability   string   `json:"capability,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	FreshOnly    bool     `json:"fresh_only,omitempty"`
+	Limit        int      `json:"limit,omitempty"`
+}
+
+type ListDiscoveryResult struct {
+	Query   discovery.FindQuery        `json:"query"`
+	Records []discovery.DiscoveryEntry `json:"records"`
+	FoundAt string                     `json:"found_at"`
+}
+
+type ConnectPeerRequest struct {
+	Contact routing.ContactRuntimeView `json:"contact"`
+	Refresh bool                       `json:"refresh"`
+}
+
+type ConnectPeerResult struct {
+	CanonicalID   string                     `json:"canonical_id"`
+	Trust         trust.TrustSummary         `json:"trust"`
+	Presence      discovery.PeerPresenceView `json:"presence"`
+	Routes        []transport.RouteCandidate `json:"routes"`
+	SelectedRoute transport.RouteCandidate   `json:"selected_route,omitempty"`
+	Transport     string                     `json:"transport,omitempty"`
+	Connected     bool                       `json:"connected"`
+	Reason        string                     `json:"reason,omitempty"`
+	ConnectedAt   string                     `json:"connected_at"`
 }

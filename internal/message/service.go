@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/card"
+	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	"github.com/xiewanpeng/claw-identity/internal/ids"
 	"github.com/xiewanpeng/claw-identity/internal/layout"
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
@@ -19,6 +20,7 @@ import (
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
+	"github.com/xiewanpeng/claw-identity/internal/trust"
 
 	_ "modernc.org/sqlite"
 )
@@ -51,6 +53,26 @@ type ReceiveDirectOptions struct {
 
 type SyncOptions struct {
 	Home string
+}
+
+type InspectTrustOptions struct {
+	Home       string
+	Identifier string
+}
+
+type ListDiscoveryOptions struct {
+	Home         string
+	Capability   string
+	Capabilities []string
+	Source       string
+	FreshOnly    bool
+	Limit        int
+}
+
+type ConnectPeerOptions struct {
+	Home       string
+	ContactRef string
+	Refresh    bool
 }
 
 type ListOptions struct {
@@ -408,6 +430,94 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error
 	}, nil
 }
 
+func (s *Service) InspectTrust(ctx context.Context, opts InspectTrustOptions) (agentruntime.InspectTrustResult, error) {
+	identifier := strings.TrimSpace(opts.Identifier)
+	if identifier == "" {
+		return agentruntime.InspectTrustResult{}, fmt.Errorf("message inspect-trust requires exactly one contact reference")
+	}
+
+	now := s.now()
+	db, _, err := openStateDB(ctx, opts.Home, now)
+	if err != nil {
+		return agentruntime.InspectTrustResult{}, err
+	}
+	defer db.Close()
+
+	canonicalID := identifier
+	if !strings.HasPrefix(canonicalID, "did:") {
+		contact, resolveErr := resolveContactLookup(ctx, db, identifier)
+		if resolveErr != nil {
+			return agentruntime.InspectTrustResult{}, resolveErr
+		}
+		canonicalID = contact.CanonicalID
+	}
+
+	runtimeSvc := agentruntime.NewService(nil, nil)
+	runtimeSvc.Trust = trust.NewServiceWithDB(db, now)
+	runtimeSvc.Now = func() time.Time { return now }
+	return runtimeSvc.InspectTrust(ctx, agentruntime.InspectTrustRequest{CanonicalID: canonicalID})
+}
+
+func (s *Service) ListDiscovery(ctx context.Context, opts ListDiscoveryOptions) (agentruntime.ListDiscoveryResult, error) {
+	now := s.now()
+	db, _, err := openStateDB(ctx, opts.Home, now)
+	if err != nil {
+		return agentruntime.ListDiscoveryResult{}, err
+	}
+	defer db.Close()
+
+	runtimeSvc := agentruntime.NewService(nil, nil)
+	runtimeSvc.DiscoveryQuery = agentdiscovery.NewQueryServiceWithDB(db, now, nil)
+	runtimeSvc.Now = func() time.Time { return now }
+	return runtimeSvc.ListDiscovery(ctx, agentruntime.ListDiscoveryRequest{
+		Capability:   strings.TrimSpace(opts.Capability),
+		Capabilities: append([]string(nil), opts.Capabilities...),
+		Source:       strings.TrimSpace(opts.Source),
+		FreshOnly:    opts.FreshOnly,
+		Limit:        opts.Limit,
+	})
+}
+
+func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (agentruntime.ConnectPeerResult, error) {
+	contactRef := strings.TrimSpace(opts.ContactRef)
+	if contactRef == "" {
+		return agentruntime.ConnectPeerResult{}, fmt.Errorf("message connect-peer requires exactly one contact reference")
+	}
+
+	now := s.now()
+	db, home, err := openStateDB(ctx, opts.Home, now)
+	if err != nil {
+		return agentruntime.ConnectPeerResult{}, err
+	}
+	defer db.Close()
+
+	selfProfile, err := loadSelfMessagingProfile(ctx, db, home)
+	if err != nil {
+		return agentruntime.ConnectPeerResult{}, err
+	}
+	contact, err := resolveContactLookup(ctx, db, contactRef)
+	if err != nil {
+		return agentruntime.ConnectPeerResult{}, err
+	}
+
+	view, extraTransports, routes := buildSendRuntimeBoundary(selfProfile, contact, now)
+	discoverySvc := staticDiscoveryService{view: view}
+	runtimeSvc := agentruntime.NewService(
+		staticPlanner{sendRoutes: routes},
+		discoverySvc,
+		connectReadinessTransport{name: "store_forward_ready", routeType: transport.RouteTypeStoreForward},
+	)
+	runtimeSvc.Transports = append(extraTransports, runtimeSvc.Transports...)
+	runtimeSvc.Trust = trust.NewServiceWithDB(db, now)
+	runtimeSvc.DiscoveryQuery = agentdiscovery.NewQueryServiceWithDB(db, now, discoverySvc)
+	runtimeSvc.Now = func() time.Time { return now }
+
+	return runtimeSvc.ConnectPeer(ctx, agentruntime.ConnectPeerRequest{
+		Contact: runtimeContactView(contact),
+		Refresh: opts.Refresh,
+	})
+}
+
 func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, error) {
 	now := s.now()
 	db, home, err := openStateDB(ctx, opts.Home, now)
@@ -571,6 +681,80 @@ func openStateDB(ctx context.Context, rawHome string, now time.Time) (*sql.DB, s
 		return nil, "", fmt.Errorf("apply migrations: %w", err)
 	}
 	return db, home, nil
+}
+
+type connectReadinessTransport struct {
+	name      string
+	routeType transport.RouteType
+}
+
+func (t connectReadinessTransport) Name() string {
+	if strings.TrimSpace(t.name) == "" {
+		return "connect_ready"
+	}
+	return t.name
+}
+
+func (t connectReadinessTransport) Supports(route transport.RouteCandidate) bool {
+	return route.Type == t.routeType
+}
+
+func (t connectReadinessTransport) Send(context.Context, transport.Envelope, transport.RouteCandidate) (transport.SendResult, error) {
+	return transport.SendResult{}, fmt.Errorf("connect readiness transport does not support send")
+}
+
+func (t connectReadinessTransport) Sync(context.Context, transport.RouteCandidate) (transport.SyncResult, error) {
+	return transport.SyncResult{}, fmt.Errorf("connect readiness transport does not support sync")
+}
+
+func (t connectReadinessTransport) Ack(context.Context, transport.RouteCandidate, string) error {
+	return nil
+}
+
+func resolveContactLookup(ctx context.Context, db *sql.DB, ref string) (contactRecord, error) {
+	needle := strings.TrimSpace(ref)
+	if needle == "" {
+		return contactRecord{}, fmt.Errorf("contact reference is required")
+	}
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, status
+		 FROM contacts
+		 WHERE contact_id = ? OR canonical_id = ? OR display_name = ?
+		 ORDER BY created_at ASC`,
+		needle,
+		needle,
+		needle,
+	)
+	if err != nil {
+		return contactRecord{}, fmt.Errorf("query contact reference: %w", err)
+	}
+	defer rows.Close()
+
+	matches := []contactRecord{}
+	for rows.Next() {
+		var record contactRecord
+		if err := rows.Scan(&record.ContactID, &record.CanonicalID, &record.DisplayName, &record.RecipientID, &record.SigningPublicKey, &record.EncryptionPublicKey, &record.RelayURL, &record.DirectURL, &record.DirectToken, &record.Status); err != nil {
+			return contactRecord{}, fmt.Errorf("scan contact reference: %w", err)
+		}
+		matches = append(matches, record)
+	}
+	if err := rows.Err(); err != nil {
+		return contactRecord{}, fmt.Errorf("iterate contact reference matches: %w", err)
+	}
+	if len(matches) == 0 {
+		return contactRecord{}, fmt.Errorf("contact %q not found; import an identity card first", needle)
+	}
+	if len(matches) > 1 {
+		sort.Slice(matches, func(i, j int) bool { return matches[i].ContactID < matches[j].ContactID })
+		ids := make([]string, 0, len(matches))
+		for _, match := range matches {
+			ids = append(ids, match.ContactID)
+		}
+		return contactRecord{}, fmt.Errorf("contact reference %q is ambiguous; use one of: %s", needle, strings.Join(ids, ", "))
+	}
+	return matches[0], nil
 }
 
 func resolveContact(ctx context.Context, tx *sql.Tx, ref string) (contactRecord, error) {

@@ -2,12 +2,14 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/discovery"
 	"github.com/xiewanpeng/claw-identity/internal/routing"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
+	"github.com/xiewanpeng/claw-identity/internal/trust"
 )
 
 type stubDiscovery struct {
@@ -106,6 +108,35 @@ func (s *stubHooks) OnRecovery(_ context.Context, event RecoveryEvent) error {
 func (s *stubHooks) OnReputationSignal(context.Context, ReputationSignal) error { return nil }
 func (s *stubHooks) OnPaymentIntent(context.Context, PaymentIntent) error       { return nil }
 func (s *stubHooks) OnPenaltySignal(context.Context, PenaltySignal) error       { return nil }
+
+type stubTrustInspector struct {
+	profile trust.TrustProfile
+	found   bool
+	err     error
+}
+
+func (s stubTrustInspector) Profile(context.Context, string) (trust.TrustProfile, bool, error) {
+	return s.profile, s.found, s.err
+}
+
+type stubDiscoveryQuery struct {
+	result   discovery.FindResult
+	err      error
+	lastFind discovery.FindOptions
+}
+
+func (s *stubDiscoveryQuery) Find(_ context.Context, opts discovery.FindOptions) (discovery.FindResult, error) {
+	s.lastFind = opts
+	return s.result, s.err
+}
+
+func (s *stubDiscoveryQuery) Show(context.Context, discovery.ShowOptions) (discovery.ShowResult, error) {
+	return discovery.ShowResult{}, nil
+}
+
+func (s *stubDiscoveryQuery) Refresh(context.Context, discovery.RefreshOptions) (discovery.RefreshResult, error) {
+	return discovery.RefreshResult{}, nil
+}
 
 func TestServiceSendPrefersMatchingTransport(t *testing.T) {
 	planner := &stubPlanner{
@@ -433,5 +464,159 @@ func TestServiceSyncIgnoresNonP0Routes(t *testing.T) {
 	}
 	if nostr.syncCalls != 0 {
 		t.Fatalf("nostr sync calls = %d, want 0 (non-P0 routes should be ignored)", nostr.syncCalls)
+	}
+}
+
+func TestServiceInspectTrustReturnsProfile(t *testing.T) {
+	service := NewService(&stubPlanner{}, stubDiscovery{})
+	service.Trust = stubTrustInspector{
+		found: true,
+		profile: trust.TrustProfile{
+			CanonicalID: "did:key:test",
+			TrustLevel:  "trusted",
+			Summary: trust.TrustSummary{
+				CanonicalID: "did:key:test",
+				TrustLevel:  "trusted",
+			},
+		},
+	}
+
+	result, err := service.InspectTrust(context.Background(), InspectTrustRequest{CanonicalID: "did:key:test"})
+	if err != nil {
+		t.Fatalf("InspectTrust() error = %v", err)
+	}
+	if !result.Found {
+		t.Fatalf("InspectTrust() Found = %t, want true", result.Found)
+	}
+	if got, want := result.Summary.TrustLevel, "trusted"; got != want {
+		t.Fatalf("InspectTrust() summary trust level = %q, want %q", got, want)
+	}
+	if result.InspectedAt == "" {
+		t.Fatal("InspectTrust() inspected_at = empty")
+	}
+}
+
+func TestServiceListDiscoveryDelegatesToQueryService(t *testing.T) {
+	query := &stubDiscoveryQuery{
+		result: discovery.FindResult{
+			Query: discovery.FindQuery{
+				Capabilities: []string{"direct"},
+				Source:       "import",
+				FreshOnly:    true,
+				Limit:        3,
+			},
+			Records: []discovery.DiscoveryEntry{{CanonicalID: "did:key:test"}},
+			FoundAt: "2026-03-23T09:00:00Z",
+		},
+	}
+	service := NewService(&stubPlanner{}, stubDiscovery{})
+	service.DiscoveryQuery = query
+
+	result, err := service.ListDiscovery(context.Background(), ListDiscoveryRequest{
+		Capability: "direct",
+		Source:     "import",
+		FreshOnly:  true,
+		Limit:      3,
+	})
+	if err != nil {
+		t.Fatalf("ListDiscovery() error = %v", err)
+	}
+	if got, want := len(result.Records), 1; got != want {
+		t.Fatalf("ListDiscovery() records len = %d, want %d", got, want)
+	}
+	if got, want := query.lastFind.Capability, "direct"; got != want {
+		t.Fatalf("delegated capability = %q, want %q", got, want)
+	}
+	if got, want := query.lastFind.Source, "import"; got != want {
+		t.Fatalf("delegated source = %q, want %q", got, want)
+	}
+}
+
+func TestServiceConnectPeerUsesTrustAndDiscovery(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeDirect, Label: "peer-direct", Priority: 100, Target: "libp2p://peer-direct"},
+		},
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{
+			CanonicalID: "did:key:test",
+			PeerID:      "peer-direct",
+			Reachable:   true,
+			ResolvedAt:  time.Now(),
+		}},
+		&stubTransport{name: "libp2p_direct", routeType: transport.RouteTypeDirect},
+	)
+	service.Trust = stubTrustInspector{
+		found: true,
+		profile: trust.TrustProfile{
+			CanonicalID: "did:key:test",
+			TrustLevel:  "verified",
+			Summary: trust.TrustSummary{
+				CanonicalID: "did:key:test",
+				TrustLevel:  "verified",
+			},
+		},
+	}
+
+	result, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
+		Contact: routing.ContactRuntimeView{
+			CanonicalID: "did:key:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ConnectPeer() error = %v", err)
+	}
+	if !result.Connected {
+		t.Fatalf("ConnectPeer() Connected = %t, want true; result=%#v", result.Connected, result)
+	}
+	if got, want := result.Transport, "libp2p_direct"; got != want {
+		t.Fatalf("ConnectPeer() transport = %q, want %q", got, want)
+	}
+	if got, want := result.Trust.TrustLevel, "verified"; got != want {
+		t.Fatalf("ConnectPeer() trust level = %q, want %q", got, want)
+	}
+}
+
+func TestServiceConnectPeerReturnsUnconnectedWhenNoUsableRoute(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 10, Target: "wss://relay.example"},
+		},
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{
+			CanonicalID: "did:key:test",
+			ResolvedAt:  time.Now(),
+		}},
+		&stubTransport{name: "nostr", routeType: transport.RouteTypeNostr},
+	)
+	service.Trust = stubTrustInspector{
+		found: true,
+		profile: trust.TrustProfile{
+			CanonicalID: "did:key:test",
+			TrustLevel:  "unknown",
+			Summary: trust.TrustSummary{
+				CanonicalID: "did:key:test",
+				TrustLevel:  "unknown",
+			},
+		},
+	}
+
+	result, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
+		Contact: routing.ContactRuntimeView{
+			CanonicalID: "did:key:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ConnectPeer() error = %v", err)
+	}
+	if result.Connected {
+		t.Fatalf("ConnectPeer() Connected = true, want false")
+	}
+	if !strings.Contains(result.Reason, "no usable transport route") {
+		t.Fatalf("ConnectPeer() reason = %q, want no usable transport route", result.Reason)
 	}
 }

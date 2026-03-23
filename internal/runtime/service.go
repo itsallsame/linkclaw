@@ -3,11 +3,13 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/discovery"
 	"github.com/xiewanpeng/claw-identity/internal/routing"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
+	"github.com/xiewanpeng/claw-identity/internal/trust"
 )
 
 type MessagingRuntime interface {
@@ -16,14 +18,29 @@ type MessagingRuntime interface {
 	Recover(ctx context.Context, contact routing.ContactRuntimeView) (RecoverResult, error)
 	Acknowledge(ctx context.Context, req AckRequest) error
 	Status(ctx context.Context) (Status, error)
+	InspectTrust(ctx context.Context, req InspectTrustRequest) (InspectTrustResult, error)
+	ListDiscovery(ctx context.Context, req ListDiscoveryRequest) (ListDiscoveryResult, error)
+	ConnectPeer(ctx context.Context, req ConnectPeerRequest) (ConnectPeerResult, error)
+}
+
+type TrustInspector interface {
+	Profile(ctx context.Context, canonicalID string) (trust.TrustProfile, bool, error)
+}
+
+type DiscoveryQuery interface {
+	Find(ctx context.Context, opts discovery.FindOptions) (discovery.FindResult, error)
+	Show(ctx context.Context, opts discovery.ShowOptions) (discovery.ShowResult, error)
+	Refresh(ctx context.Context, opts discovery.RefreshOptions) (discovery.RefreshResult, error)
 }
 
 type Service struct {
-	Planner    routing.Planner
-	Discovery  discovery.Service
-	Transports []transport.Transport
-	Hooks      Hooks
-	Now        func() time.Time
+	Planner        routing.Planner
+	Discovery      discovery.Service
+	DiscoveryQuery DiscoveryQuery
+	Trust          TrustInspector
+	Transports     []transport.Transport
+	Hooks          Hooks
+	Now            func() time.Time
 }
 
 func NewService(planner routing.Planner, discoverySvc discovery.Service, transports ...transport.Transport) *Service {
@@ -168,6 +185,118 @@ func (s *Service) Status(_ context.Context) (Status, error) {
 	}, nil
 }
 
+func (s *Service) InspectTrust(ctx context.Context, req InspectTrustRequest) (InspectTrustResult, error) {
+	canonicalID := strings.TrimSpace(req.CanonicalID)
+	if canonicalID == "" {
+		return InspectTrustResult{}, fmt.Errorf("canonical_id is required")
+	}
+	if s.Trust == nil {
+		return InspectTrustResult{}, fmt.Errorf("trust service is not configured")
+	}
+
+	profile, found, err := s.Trust.Profile(ctx, canonicalID)
+	if err != nil {
+		return InspectTrustResult{}, err
+	}
+	if !found {
+		profile = trust.TrustProfile{
+			CanonicalID: canonicalID,
+			TrustLevel:  "unknown",
+		}
+	}
+	if strings.TrimSpace(profile.CanonicalID) == "" {
+		profile.CanonicalID = canonicalID
+	}
+	if strings.TrimSpace(profile.Summary.CanonicalID) == "" {
+		profile.Summary = trust.BuildTrustSummary(profile)
+	}
+
+	return InspectTrustResult{
+		CanonicalID: canonicalID,
+		Found:       found,
+		Profile:     profile,
+		Summary:     profile.Summary,
+		InspectedAt: s.nowUTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func (s *Service) ListDiscovery(ctx context.Context, req ListDiscoveryRequest) (ListDiscoveryResult, error) {
+	if s.DiscoveryQuery == nil {
+		return ListDiscoveryResult{}, fmt.Errorf("discovery query service is not configured")
+	}
+
+	result, err := s.DiscoveryQuery.Find(ctx, discovery.FindOptions{
+		Capability:   req.Capability,
+		Capabilities: req.Capabilities,
+		Source:       req.Source,
+		FreshOnly:    req.FreshOnly,
+		Limit:        req.Limit,
+	})
+	if err != nil {
+		return ListDiscoveryResult{}, err
+	}
+	return ListDiscoveryResult{
+		Query:   result.Query,
+		Records: result.Records,
+		FoundAt: result.FoundAt,
+	}, nil
+}
+
+func (s *Service) ConnectPeer(ctx context.Context, req ConnectPeerRequest) (ConnectPeerResult, error) {
+	contact := req.Contact
+	canonicalID := strings.TrimSpace(contact.CanonicalID)
+	if canonicalID == "" {
+		return ConnectPeerResult{}, fmt.Errorf("canonical_id is required")
+	}
+	if s.Planner == nil {
+		return ConnectPeerResult{}, fmt.Errorf("route planner is not configured")
+	}
+	if s.Discovery == nil {
+		return ConnectPeerResult{}, fmt.Errorf("discovery service is not configured")
+	}
+
+	trustResult, err := s.InspectTrust(ctx, InspectTrustRequest{CanonicalID: canonicalID})
+	if err != nil {
+		return ConnectPeerResult{}, err
+	}
+
+	var presence discovery.PeerPresenceView
+	if req.Refresh {
+		presence, err = s.Discovery.RefreshPeer(ctx, canonicalID)
+	} else {
+		presence, err = s.Discovery.ResolvePeer(ctx, canonicalID)
+	}
+	if err != nil {
+		return ConnectPeerResult{}, err
+	}
+
+	routes, err := s.Planner.PlanSend(ctx, contact, presence)
+	if err != nil {
+		return ConnectPeerResult{}, err
+	}
+
+	result := ConnectPeerResult{
+		CanonicalID: canonicalID,
+		Trust:       trustResult.Summary,
+		Presence:    presence,
+		Routes:      routes,
+		ConnectedAt: s.nowUTC().Format(time.RFC3339Nano),
+	}
+	for _, route := range routes {
+		adapter := s.findTransport(route)
+		if adapter == nil {
+			continue
+		}
+		result.SelectedRoute = route
+		result.Transport = adapter.Name()
+		result.Connected = true
+		return result, nil
+	}
+
+	result.Reason = fmt.Sprintf("no usable transport route for peer %q", canonicalID)
+	return result, nil
+}
+
 func (s *Service) resolveSendRoutes(ctx context.Context, contact routing.ContactRuntimeView) (discovery.PeerPresenceView, []transport.RouteCandidate, error) {
 	presence, err := s.resolvePresence(ctx, contact)
 	if err != nil {
@@ -213,10 +342,6 @@ func (s *Service) recordOutcome(
 	if s.Planner == nil {
 		return
 	}
-	nowFn := s.Now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
 	_ = s.Planner.RecordOutcome(ctx, routing.RouteOutcome{
 		MessageID:  messageID,
 		Route:      route,
@@ -225,7 +350,7 @@ func (s *Service) recordOutcome(
 		Retryable:  retryable,
 		Error:      errMsg,
 		Cursor:     cursor,
-		OccurredAt: nowFn().UTC(),
+		OccurredAt: s.nowUTC(),
 	})
 }
 
@@ -234,4 +359,12 @@ func (s *Service) hooks() Hooks {
 		return NoopHooks{}
 	}
 	return s.Hooks
+}
+
+func (s *Service) nowUTC() time.Time {
+	nowFn := s.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	return nowFn().UTC()
 }

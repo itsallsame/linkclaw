@@ -31,6 +31,9 @@ export type LinkClawCommand =
   | "message_outbox"
   | "message_sync"
   | "message_status"
+  | "message_inspect_trust"
+  | "message_list_discovery"
+  | "message_connect_peer"
   | "message_receive_direct"
   | "known_ls"
   | "known_show"
@@ -51,6 +54,11 @@ export type LinkClawBridgeRequest = {
   identifier?: string;
   body?: string;
   limit?: number;
+  capability?: string;
+  capabilities?: string[];
+  source?: string;
+  freshOnly?: boolean;
+  refresh?: boolean;
   trustLevel?: string;
   riskFlags?: string[];
   clearRiskFlags?: boolean;
@@ -352,6 +360,35 @@ export function buildLinkClawArgs(
       return ["message", "sync", "--home", home, "--json"];
     case "message_status":
       return ["message", "status", "--home", home, "--json"];
+    case "message_inspect_trust":
+      requireField(request.identifier, "identifier");
+      return ["message", "inspect-trust", "--home", home, "--json", request.identifier];
+    case "message_list_discovery":
+      args.push("message", "list-discovery", "--home", home, "--json");
+      if (request.capability) {
+        args.push("--capability", request.capability);
+      }
+      if (request.capabilities && request.capabilities.length > 0) {
+        args.push("--capabilities", request.capabilities.join(","));
+      }
+      if (request.source) {
+        args.push("--source", request.source);
+      }
+      if (request.freshOnly) {
+        args.push("--fresh-only");
+      }
+      if (typeof request.limit === "number" && Number.isFinite(request.limit)) {
+        args.push("--limit", String(Math.floor(request.limit)));
+      }
+      return args;
+    case "message_connect_peer":
+      requireField(request.identifier, "identifier");
+      args.push("message", "connect-peer", "--home", home, "--json");
+      if (request.refresh) {
+        args.push("--refresh");
+      }
+      args.push(request.identifier);
+      return args;
     case "message_receive_direct":
       requireField(request.payload, "payload");
       return ["message", "receive-direct", "--home", home, "--json", "--input", request.payload];
@@ -502,6 +539,9 @@ function normalizeCommand(raw: string): LinkClawCommand {
     case "message_outbox":
     case "message_sync":
     case "message_status":
+    case "message_inspect_trust":
+    case "message_list_discovery":
+    case "message_connect_peer":
     case "message_receive_direct":
     case "known_ls":
     case "known_show":

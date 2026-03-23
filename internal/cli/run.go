@@ -1001,6 +1001,117 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, "- run `linkclaw message inbox` to inspect recent conversations")
 		fmt.Fprintln(out, "- run `linkclaw message sync` to recover new messages")
 		return 0
+	case "inspect-trust":
+		fs := newFlagSet("message inspect-trust", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("inspect-trust"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("inspect-trust"), "message inspect-trust requires exactly one contact reference")
+		}
+		service := message.NewService()
+		result, err := service.InspectTrust(ctx, message.InspectTrustOptions{
+			Home:       *home,
+			Identifier: fs.Args()[0],
+		})
+		if err != nil {
+			return writeMessageError[map[string]any](errOut, out, *jsonOutput, "inspect-trust", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "inspect-trust", result)
+		}
+		fmt.Fprintln(out, "LinkClaw trust inspection")
+		fmt.Fprintf(out, "canonical id: %s\n", result.CanonicalID)
+		fmt.Fprintf(out, "trust level: %s\n", result.Summary.TrustLevel)
+		if result.Summary.VerificationState != "" {
+			fmt.Fprintf(out, "verification: %s\n", result.Summary.VerificationState)
+		}
+		fmt.Fprintf(out, "confidence: %s (%.2f)\n", result.Summary.ConfidenceLevel, result.Summary.ConfidenceScore)
+		fmt.Fprintf(out, "reachability: %s\n", result.Summary.Reachability)
+		return 0
+	case "list-discovery":
+		fs := newFlagSet("message list-discovery", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		capability := fs.String("capability", "", "filter by one capability (for example direct)")
+		capabilities := fs.String("capabilities", "", "comma-separated capability filters")
+		source := fs.String("source", "", "filter by discovery source")
+		freshOnly := fs.Bool("fresh-only", false, "include only fresh discovery records")
+		limit := fs.Int("limit", 0, "maximum records to return; 0 means no limit")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("list-discovery"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("list-discovery"), "message list-discovery does not accept positional arguments")
+		}
+		service := message.NewService()
+		result, err := service.ListDiscovery(ctx, message.ListDiscoveryOptions{
+			Home:         *home,
+			Capability:   *capability,
+			Capabilities: splitCSV(*capabilities),
+			Source:       *source,
+			FreshOnly:    *freshOnly,
+			Limit:        *limit,
+		})
+		if err != nil {
+			return writeMessageError[map[string]any](errOut, out, *jsonOutput, "list-discovery", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "list-discovery", result)
+		}
+		fmt.Fprintln(out, "LinkClaw discovery list")
+		fmt.Fprintf(out, "records: %d\n", len(result.Records))
+		for _, record := range result.Records {
+			fmt.Fprintf(out, "- %s | reachable=%t | source=%s\n", record.CanonicalID, record.Reachable, record.Source)
+		}
+		return 0
+	case "connect-peer":
+		fs := newFlagSet("message connect-peer", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		refresh := fs.Bool("refresh", false, "refresh discovery view before connecting")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "message", stringPtr("connect-peer"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "message", stringPtr("connect-peer"), "message connect-peer requires exactly one contact reference")
+		}
+		service := message.NewService()
+		result, err := service.ConnectPeer(ctx, message.ConnectPeerOptions{
+			Home:       *home,
+			ContactRef: fs.Args()[0],
+			Refresh:    *refresh,
+		})
+		if err != nil {
+			return writeMessageError[map[string]any](errOut, out, *jsonOutput, "connect-peer", err)
+		}
+		if *jsonOutput {
+			return writeMessageJSON(errOut, out, "connect-peer", result)
+		}
+		fmt.Fprintln(out, "LinkClaw connect peer")
+		fmt.Fprintf(out, "canonical id: %s\n", result.CanonicalID)
+		fmt.Fprintf(out, "connected: %t\n", result.Connected)
+		if result.Transport != "" {
+			fmt.Fprintf(out, "transport: %s\n", result.Transport)
+		}
+		if result.Reason != "" {
+			fmt.Fprintf(out, "reason: %s\n", result.Reason)
+		}
+		return 0
 	case "receive-direct":
 		fs := newFlagSet("message receive-direct", errOut, jsonRequested)
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
@@ -1559,4 +1670,8 @@ func printMessageUsage(out io.Writer) {
 	fmt.Fprintln(out, "  outbox  List queued outgoing messages")
 	fmt.Fprintln(out, "  sync    Recover new messages through the runtime")
 	fmt.Fprintln(out, "  status  Show runtime messaging readiness and counters")
+	fmt.Fprintln(out, "  inspect-trust   Inspect trust summary for one peer")
+	fmt.Fprintln(out, "  list-discovery  List cached discovery records")
+	fmt.Fprintln(out, "  connect-peer    Evaluate runtime connect readiness for one peer")
+	fmt.Fprintln(out, "  receive-direct  Accept one direct-envelope payload")
 }
