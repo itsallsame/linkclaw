@@ -585,7 +585,7 @@ test("runSetupCommand initializes an uninitialized home", async () => {
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: 正常/);
-  assert.match(result.message, /relay: not configured/);
+  assert.match(result.message, /offline recovery: not configured/);
   assert.match(result.message, /publish origin: not configured/);
 });
 
@@ -602,7 +602,7 @@ test("runOnboardingCommand defaults to a readiness check when no args are provid
   assert.match(result.message, /LinkClaw 首次引导/);
   assert.match(result.message, /LinkClaw 检查完成/);
   assert.match(result.message, /状态：未初始化/);
-  assert.match(result.message, /relay: not configured/);
+  assert.match(result.message, /offline recovery: not configured/);
 });
 
 test("runSetupCommand can locate the binary through LINKCLAW_BINARY", async () => {
@@ -643,7 +643,7 @@ test("runSetupCommand supports check-only mode before initialization", async () 
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: 正常/);
-  assert.match(result.message, /relay: not configured/);
+  assert.match(result.message, /offline recovery: not configured/);
   assert.match(result.message, /运行 \/linkclaw-setup --display-name <name>/);
 });
 
@@ -667,7 +667,7 @@ test("runSetupCommand reports relay reachability when configured", async () => {
 
     assert.equal(result.type, "message");
     assert.match(result.message, /LinkClaw 初始化完成/);
-    assert.match(result.message, /relay: ok \(404\) http:\/\/127\.0\.0\.1:/);
+    assert.match(result.message, /offline recovery: ok \(404\) http:\/\/127\.0\.0\.1:/);
     assert.match(result.message, /publish origin: not configured/);
   } finally {
     relayProc.kill();
@@ -762,7 +762,7 @@ test("runStatusCommand summarizes health and local state after initialization", 
     assert.match(result.message, /message status: direct=0 deferred=0 recovered=0/);
     assert.match(result.message, /offline recovery: not configured/);
     assert.match(result.message, /runtime mode: host-managed/);
-    assert.match(result.message, /relay: ok \(404\) http:\/\/127\.0\.0\.1:/);
+    assert.match(result.message, /offline recovery: ok \(404\) http:\/\/127\.0\.0\.1:/);
   } finally {
     relayProc.kill();
   }

@@ -2364,7 +2364,7 @@ function formatHealthSection(health: SetupHealth): string[] {
     "检查项：",
     "--- health-checks-begin ---",
     `- binary: 正常 (${health.binaryPath})`,
-    `- relay: ${health.relayStatus}`,
+    `- offline recovery: ${health.relayStatus}`,
     `- publish origin: ${health.publishStatus}`,
     "--- health-checks-end ---",
   ];

@@ -97,7 +97,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 如果安装正常，至少应该看到这些信号：
 
 - `binary: ok (...)`
-- `relay: ...`
+- `offline recovery: ...`
 - `publish origin: ...`
 
 如果第一次还没初始化身份，看到：
@@ -201,11 +201,11 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 - 或者是否设置了 `LINKCLAW_BINARY`
 - 不行再显式配置 `binaryPath`
 
-### `relay: unreachable`
+### `offline recovery: unreachable`
 
 说明当前机器无法访问你显式配置的旧 HTTP fallback。先检查：
 
-- relay 是否真的在运行
+- 离线恢复兼容端点（relay）是否真的在运行
 - 端口是否开放
 - 当前宿主网络是否能访问该地址
 
