@@ -182,6 +182,10 @@ func (s *Service) resolvePresence(ctx context.Context, contact routing.ContactRu
 }
 
 func (s *Service) findTransport(route transport.RouteCandidate) transport.Transport {
+	// P0 runtime only dispatches first-batch route types.
+	if !route.IsP0() {
+		return nil
+	}
 	for _, adapter := range s.Transports {
 		if adapter.Supports(route) {
 			return adapter

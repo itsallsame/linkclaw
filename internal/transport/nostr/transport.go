@@ -28,6 +28,9 @@ func (t *Transport) Supports(route transport.RouteCandidate) bool {
 }
 
 func (t *Transport) Send(ctx context.Context, env transport.Envelope, route transport.RouteCandidate) (transport.SendResult, error) {
+	if !t.Supports(route) {
+		return transport.SendResult{}, fmt.Errorf("unsupported route type %q", route.Type)
+	}
 	if t.publisher == nil {
 		return transport.SendResult{}, fmt.Errorf("nostr transport is not configured")
 	}
@@ -35,6 +38,9 @@ func (t *Transport) Send(ctx context.Context, env transport.Envelope, route tran
 }
 
 func (t *Transport) Sync(ctx context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
+	if !t.Supports(route) {
+		return transport.SyncResult{}, fmt.Errorf("unsupported route type %q", route.Type)
+	}
 	if t.publisher == nil {
 		return transport.SyncResult{}, fmt.Errorf("nostr transport is not configured")
 	}
@@ -42,6 +48,9 @@ func (t *Transport) Sync(ctx context.Context, route transport.RouteCandidate) (t
 }
 
 func (t *Transport) Ack(ctx context.Context, route transport.RouteCandidate, cursor string) error {
+	if !t.Supports(route) {
+		return fmt.Errorf("unsupported route type %q", route.Type)
+	}
 	if t.publisher == nil {
 		return fmt.Errorf("nostr transport is not configured")
 	}

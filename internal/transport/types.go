@@ -8,14 +8,41 @@ const (
 	RouteTypeDirect       RouteType = "direct"
 	RouteTypeStoreForward RouteType = "store_forward"
 	RouteTypeRecovery     RouteType = "recovery"
-	RouteTypeNostr        RouteType = "nostr"
+	// RouteTypeNostr is intentionally reserved for future rollout, not P0.
+	RouteTypeNostr RouteType = "nostr"
 )
+
+func IsKnownRouteType(routeType RouteType) bool {
+	switch routeType {
+	case RouteTypeDirect, RouteTypeStoreForward, RouteTypeRecovery, RouteTypeNostr:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsP0RouteType(routeType RouteType) bool {
+	switch routeType {
+	case RouteTypeDirect, RouteTypeStoreForward, RouteTypeRecovery:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsReservedRouteType(routeType RouteType) bool {
+	return routeType == RouteTypeNostr
+}
 
 type RouteCandidate struct {
 	Type     RouteType
 	Label    string
 	Priority int
 	Target   string
+}
+
+func (r RouteCandidate) IsP0() bool {
+	return IsP0RouteType(r.Type)
 }
 
 type Envelope struct {
@@ -35,8 +62,8 @@ type SendResult struct {
 }
 
 type SyncResult struct {
-	Route         RouteCandidate
-	Recovered     int
+	Route          RouteCandidate
+	Recovered      int
 	AdvancedCursor string
 }
 

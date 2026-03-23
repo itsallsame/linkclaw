@@ -36,6 +36,9 @@ func TestTransportSupportsStoreForwardAndRecovery(t *testing.T) {
 	if !tr.Supports(transport.RouteCandidate{Type: transport.RouteTypeRecovery}) {
 		t.Fatal("Supports(recovery) = false, want true")
 	}
+	if tr.Supports(transport.RouteCandidate{Type: transport.RouteTypeDirect}) {
+		t.Fatal("Supports(direct) = true, want false")
+	}
 }
 
 func TestTransportDelegatesToBackend(t *testing.T) {
@@ -64,5 +67,30 @@ func TestTransportDelegatesToBackend(t *testing.T) {
 	}
 	if len(backend.acked) != 1 || backend.acked[0] != "cursor-1" {
 		t.Fatalf("backend.acked=%#v, want [cursor-1]", backend.acked)
+	}
+}
+
+func TestTransportRejectsUnsupportedRouteTypes(t *testing.T) {
+	backend := &stubBackend{}
+	tr := New(backend)
+	unsupported := transport.RouteCandidate{Type: transport.RouteTypeDirect, Target: "libp2p://peer"}
+
+	if _, err := tr.Send(context.Background(), transport.Envelope{MessageID: "msg_1"}, unsupported); err == nil {
+		t.Fatal("Send() error = nil, want unsupported route type error")
+	}
+	if _, err := tr.Sync(context.Background(), unsupported); err == nil {
+		t.Fatal("Sync() error = nil, want unsupported route type error")
+	}
+	if err := tr.Ack(context.Background(), unsupported, "cursor-1"); err == nil {
+		t.Fatal("Ack() error = nil, want unsupported route type error")
+	}
+	if backend.sent {
+		t.Fatal("backend Send should not be called for unsupported route")
+	}
+	if backend.recovered {
+		t.Fatal("backend Recover should not be called for unsupported route")
+	}
+	if len(backend.acked) != 0 {
+		t.Fatalf("backend Ack should not be called for unsupported route, got %#v", backend.acked)
 	}
 }

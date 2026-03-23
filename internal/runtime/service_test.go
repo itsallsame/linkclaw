@@ -43,6 +43,8 @@ func (s *stubPlanner) RecordOutcome(_ context.Context, outcome routing.RouteOutc
 type stubTransport struct {
 	name       string
 	routeType  transport.RouteType
+	sendCalls  int
+	syncCalls  int
 	sendErr    error
 	syncErr    error
 	syncCount  int
@@ -56,12 +58,14 @@ func (s *stubTransport) Supports(route transport.RouteCandidate) bool {
 	return route.Type == s.routeType
 }
 func (s *stubTransport) Send(_ context.Context, env transport.Envelope, route transport.RouteCandidate) (transport.SendResult, error) {
+	s.sendCalls++
 	if s.sendErr != nil {
 		return transport.SendResult{}, s.sendErr
 	}
 	return transport.SendResult{Route: route, Delivered: true, RemoteID: env.MessageID}, nil
 }
 func (s *stubTransport) Sync(_ context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
+	s.syncCalls++
 	if s.syncErr != nil {
 		return transport.SyncResult{}, s.syncErr
 	}
@@ -237,5 +241,60 @@ func TestServiceStatusReportsRuntimeMode(t *testing.T) {
 	}
 	if status.RuntimeMode != "background-experimental" || !status.BackgroundRuntime {
 		t.Fatalf("status = %#v, want background-experimental enabled", status)
+	}
+}
+
+func TestServiceSendIgnoresNonP0Routes(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 10, Target: "wss://relay.example"},
+		},
+	}
+	nostr := &stubTransport{name: "nostr", routeType: transport.RouteTypeNostr}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		nostr,
+	)
+
+	_, err := service.Send(context.Background(), routing.ContactRuntimeView{
+		CanonicalID: "did:key:test",
+	}, SendRequest{
+		SenderID:    "self",
+		RecipientID: "peer",
+		Plaintext:   "hello",
+	})
+	if err == nil {
+		t.Fatal("Send() error = nil, want no usable transport route error")
+	}
+	if nostr.sendCalls != 0 {
+		t.Fatalf("nostr send calls = %d, want 0 (non-P0 routes should be ignored)", nostr.sendCalls)
+	}
+}
+
+func TestServiceSyncIgnoresNonP0Routes(t *testing.T) {
+	planner := &stubPlanner{
+		recoverRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 5, Target: "wss://relay.example"},
+		},
+	}
+	nostr := &stubTransport{name: "nostr", routeType: transport.RouteTypeNostr, syncCount: 3}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		nostr,
+	)
+
+	result, err := service.Sync(context.Background(), routing.ContactRuntimeView{
+		CanonicalID: "did:key:test",
+	})
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.Synced != 0 {
+		t.Fatalf("Sync() recovered = %d, want 0", result.Synced)
+	}
+	if nostr.syncCalls != 0 {
+		t.Fatalf("nostr sync calls = %d, want 0 (non-P0 routes should be ignored)", nostr.syncCalls)
 	}
 }

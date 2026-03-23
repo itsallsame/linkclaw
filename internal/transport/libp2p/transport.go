@@ -52,10 +52,16 @@ func (t *Transport) Send(ctx context.Context, env transport.Envelope, route tran
 	return t.Dialer.SendDirect(ctx, env, route)
 }
 
-func (t *Transport) Sync(context.Context, transport.RouteCandidate) (transport.SyncResult, error) {
+func (t *Transport) Sync(_ context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
+	if !t.Supports(route) {
+		return transport.SyncResult{}, fmt.Errorf("unsupported route type %q", route.Type)
+	}
 	return transport.SyncResult{}, fmt.Errorf("libp2p direct transport does not implement sync")
 }
 
-func (t *Transport) Ack(context.Context, transport.RouteCandidate, string) error {
+func (t *Transport) Ack(_ context.Context, route transport.RouteCandidate, _ string) error {
+	if !t.Supports(route) {
+		return fmt.Errorf("unsupported route type %q", route.Type)
+	}
 	return nil
 }

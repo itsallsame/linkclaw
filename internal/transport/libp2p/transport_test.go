@@ -21,6 +21,12 @@ func (s *stubDialer) SendDirect(_ context.Context, _ transport.Envelope, _ trans
 
 func TestTransportSendRequiresDialer(t *testing.T) {
 	tr := New(nil)
+	if !tr.Supports(transport.RouteCandidate{Type: transport.RouteTypeDirect}) {
+		t.Fatal("Supports(direct) = false, want true")
+	}
+	if tr.Supports(transport.RouteCandidate{Type: transport.RouteTypeStoreForward}) {
+		t.Fatal("Supports(store_forward) = true, want false")
+	}
 	_, err := tr.Send(context.Background(), transport.Envelope{}, transport.RouteCandidate{
 		Type:   transport.RouteTypeDirect,
 		Target: "/ip4/127.0.0.1/tcp/4001/p2p/peer",
@@ -52,6 +58,28 @@ func TestTransportSendUsesConfiguredDialer(t *testing.T) {
 	}
 	if !result.Delivered {
 		t.Fatalf("delivered = false, want true")
+	}
+}
+
+func TestTransportRejectsUnsupportedRouteTypes(t *testing.T) {
+	dialer := &stubDialer{}
+	tr := New(dialer)
+	unsupported := transport.RouteCandidate{
+		Type:   transport.RouteTypeStoreForward,
+		Target: "sf://relay.example",
+	}
+
+	if _, err := tr.Send(context.Background(), transport.Envelope{MessageID: "msg_unsupported"}, unsupported); err == nil {
+		t.Fatal("Send() error = nil, want unsupported route type error")
+	}
+	if dialer.called {
+		t.Fatal("dialer should not be called for unsupported route types")
+	}
+	if _, err := tr.Sync(context.Background(), unsupported); err == nil {
+		t.Fatal("Sync() error = nil, want unsupported route type error")
+	}
+	if err := tr.Ack(context.Background(), unsupported, "cursor-1"); err == nil {
+		t.Fatal("Ack() error = nil, want unsupported route type error")
 	}
 }
 
