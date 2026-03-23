@@ -621,8 +621,8 @@ func TestServiceConnectPeerRefreshUsesRefreshedPresenceForRoutePlanning(t *testi
 	if got, want := discoverySvc.refreshCalls, 0; got != want {
 		t.Fatalf("RefreshPeer() calls = %d, want %d", got, want)
 	}
-	if planner.lastPresence.Source != "stale-cache" {
-		t.Fatalf("planner stale presence source = %q, want stale-cache", planner.lastPresence.Source)
+	if planner.lastPresence.Source != "cache" {
+		t.Fatalf("planner stale presence source = %q, want cache", planner.lastPresence.Source)
 	}
 
 	freshResult, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{

@@ -86,14 +86,18 @@ func (s queryBackedDiscoveryService) ResolvePeer(ctx context.Context, canonicalI
 	if s.query != nil {
 		result, err := s.query.Show(ctx, agentdiscovery.ShowOptions{CanonicalID: canonicalID})
 		if err == nil {
-			return presenceViewFromDiscoveryEntry(result.Record, s.nowUTC()), nil
+			return normalizePresenceSource(presenceViewFromDiscoveryEntry(result.Record, s.nowUTC())), nil
 		}
 		if !isDiscoveryRecordNotFound(err) {
 			return agentdiscovery.PeerPresenceView{}, err
 		}
 	}
 	if s.fallback != nil {
-		return s.fallback.ResolvePeer(ctx, canonicalID)
+		view, err := s.fallback.ResolvePeer(ctx, canonicalID)
+		if err != nil {
+			return agentdiscovery.PeerPresenceView{}, err
+		}
+		return normalizePresenceSource(view), nil
 	}
 	return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
 }
@@ -102,14 +106,18 @@ func (s queryBackedDiscoveryService) RefreshPeer(ctx context.Context, canonicalI
 	if s.query != nil {
 		result, err := s.query.Refresh(ctx, agentdiscovery.RefreshOptions{CanonicalID: canonicalID})
 		if err == nil {
-			return presenceViewFromDiscoveryEntry(result.Record, s.nowUTC()), nil
+			return normalizePresenceSource(presenceViewFromDiscoveryEntry(result.Record, s.nowUTC())), nil
 		}
 		if !isDiscoveryRecordNotFound(err) || s.fallback == nil {
 			return agentdiscovery.PeerPresenceView{}, err
 		}
 	}
 	if s.fallback != nil {
-		return s.fallback.RefreshPeer(ctx, canonicalID)
+		view, err := s.fallback.RefreshPeer(ctx, canonicalID)
+		if err != nil {
+			return agentdiscovery.PeerPresenceView{}, err
+		}
+		return normalizePresenceSource(view), nil
 	}
 	return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
 }
@@ -126,6 +134,11 @@ func (s queryBackedDiscoveryService) nowUTC() time.Time {
 		return time.Now().UTC()
 	}
 	return s.now().UTC()
+}
+
+func normalizePresenceSource(view agentdiscovery.PeerPresenceView) agentdiscovery.PeerPresenceView {
+	view.Source = agentdiscovery.NormalizeSource(view.Source)
+	return view
 }
 
 type presenceRoutesPlanner struct{}

@@ -97,7 +97,7 @@ func TestQueryServiceFindFiltersByCapabilityAndRanksByPolicy(t *testing.T) {
 	}
 }
 
-func TestQueryServiceFindFiltersBySourceIncludingUnknown(t *testing.T) {
+func TestQueryServiceFindFiltersBySourceIncludingUnknownAndLegacyAliases(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -124,10 +124,21 @@ func TestQueryServiceFindFiltersBySourceIncludingUnknown(t *testing.T) {
 		RouteCandidates:       []transport.RouteCandidate{{Type: transport.RouteTypeStoreForward, Label: "unknown", Priority: 80, Target: "nostr://relay/unknown"}},
 		TransportCapabilities: []string{"store_forward"},
 		StoreForwardHints:     []string{"nostr://relay/unknown"},
-		Source:                "",
+		Source:                "legacy-custom-source",
 		Reachable:             false,
 		ResolvedAt:            now.Add(-10 * time.Minute).Format(time.RFC3339Nano),
 		FreshUntil:            now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+	})
+	mustUpsertDiscovery(t, ctx, store, Record{
+		CanonicalID:           "did:key:cache",
+		PeerID:                "peer-cache",
+		RouteCandidates:       []transport.RouteCandidate{{Type: transport.RouteTypeStoreForward, Label: "cache", Priority: 70, Target: "nostr://relay/cache"}},
+		TransportCapabilities: []string{"store_forward"},
+		StoreForwardHints:     []string{"nostr://relay/cache"},
+		Source:                "stale-cache",
+		Reachable:             false,
+		ResolvedAt:            now.Add(-8 * time.Minute).Format(time.RFC3339Nano),
+		FreshUntil:            now.Add(2 * time.Minute).Format(time.RFC3339Nano),
 	})
 
 	service := NewQueryServiceWithDB(db, now, nil)
@@ -142,6 +153,34 @@ func TestQueryServiceFindFiltersBySourceIncludingUnknown(t *testing.T) {
 	if got, want := unknownResult.Records[0].CanonicalID, "did:key:unknown"; got != want {
 		t.Fatalf("unknownResult.Records[0].CanonicalID = %q, want %q", got, want)
 	}
+	if got, want := unknownResult.Records[0].Source, SourceUnknown; got != want {
+		t.Fatalf("unknownResult.Records[0].Source = %q, want %q", got, want)
+	}
+
+	cacheResult, err := service.Find(ctx, FindOptions{Source: "cache"})
+	if err != nil {
+		t.Fatalf("Find(source=cache) error = %v", err)
+	}
+	if got, want := len(cacheResult.Records), 1; got != want {
+		t.Fatalf("len(cacheResult.Records) = %d, want %d", got, want)
+	}
+	if got, want := cacheResult.Records[0].CanonicalID, "did:key:cache"; got != want {
+		t.Fatalf("cacheResult.Records[0].CanonicalID = %q, want %q", got, want)
+	}
+	if got, want := cacheResult.Records[0].Source, SourceCache; got != want {
+		t.Fatalf("cacheResult.Records[0].Source = %q, want %q", got, want)
+	}
+
+	cacheAliasResult, err := service.Find(ctx, FindOptions{Source: "stale-cache"})
+	if err != nil {
+		t.Fatalf("Find(source=stale-cache) error = %v", err)
+	}
+	if got, want := len(cacheAliasResult.Records), 1; got != want {
+		t.Fatalf("len(cacheAliasResult.Records) = %d, want %d", got, want)
+	}
+	if got, want := cacheAliasResult.Query.Source, SourceCache; got != want {
+		t.Fatalf("cacheAliasResult.Query.Source = %q, want %q", got, want)
+	}
 
 	importResult, err := service.Find(ctx, FindOptions{Source: "import"})
 	if err != nil {
@@ -152,6 +191,14 @@ func TestQueryServiceFindFiltersBySourceIncludingUnknown(t *testing.T) {
 	}
 	if got, want := importResult.Records[0].CanonicalID, "did:key:known"; got != want {
 		t.Fatalf("importResult.Records[0].CanonicalID = %q, want %q", got, want)
+	}
+
+	_, err = service.Find(ctx, FindOptions{Source: "future-source"})
+	if err == nil {
+		t.Fatal("Find(source=future-source) error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "unsupported discovery source filter") {
+		t.Fatalf("Find(source=future-source) error = %v, want unsupported filter error", err)
 	}
 }
 

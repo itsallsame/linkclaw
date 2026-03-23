@@ -269,6 +269,7 @@ func (s *Service) ConnectPeer(ctx context.Context, req ConnectPeerRequest) (Conn
 	if err != nil {
 		return ConnectPeerResult{}, err
 	}
+	presence.Source = discovery.NormalizeSource(presence.Source)
 
 	routes, err := s.Planner.PlanSend(ctx, peer, presence)
 	if err != nil {

@@ -484,7 +484,7 @@ func TestConnectPeerRefreshDistinguishesStaleAndFreshPresence(t *testing.T) {
 	if got := len(staleResult.Routes); got != 0 {
 		t.Fatalf("stale connect routes = %d, want 0", got)
 	}
-	if got, want := staleResult.Presence.Source, "stale-cache"; got != want {
+	if got, want := staleResult.Presence.Source, "cache"; got != want {
 		t.Fatalf("stale connect source = %q, want %q", got, want)
 	}
 

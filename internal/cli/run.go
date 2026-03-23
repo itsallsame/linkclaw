@@ -1033,7 +1033,7 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
 		capability := fs.String("capability", "", "filter by one capability (for example direct)")
 		capabilities := fs.String("capabilities", "", "comma-separated capability filters")
-		source := fs.String("source", "", "filter by discovery source")
+		source := fs.String("source", "", "filter by discovery source (refresh|import|libp2p-announce|libp2p|dht-announce|dht|nostr|manual|cache|unknown)")
 		freshOnly := fs.Bool("fresh-only", false, "include only fresh discovery records")
 		limit := fs.Int("limit", 0, "maximum records to return; 0 means no limit")
 		jsonOutput := fs.Bool("json", false, "emit JSON result")

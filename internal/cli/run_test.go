@@ -1008,7 +1008,7 @@ func TestRunMessageConnectPeerRefreshUsesDiscoveryRefreshPath(t *testing.T) {
 	if staleOut.Result.Connected {
 		t.Fatalf("stale connect connected = true, want false; result=%+v", staleOut.Result)
 	}
-	if got, want := staleOut.Result.Presence.Source, "stale-cache"; got != want {
+	if got, want := staleOut.Result.Presence.Source, "cache"; got != want {
 		t.Fatalf("stale presence source = %q, want %q", got, want)
 	}
 

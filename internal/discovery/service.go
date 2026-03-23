@@ -130,11 +130,18 @@ func (s *QueryService) Find(ctx context.Context, opts FindOptions) (FindResult, 
 	}
 
 	requiredCaps := normalizeRequestedCapabilities(opts.Capability, opts.Capabilities)
-	sourceFilter := normalizeSource(opts.Source)
-	hasSourceFilter := strings.TrimSpace(opts.Source) != ""
+	sourceFilterRaw := strings.TrimSpace(opts.Source)
+	hasSourceFilter := sourceFilterRaw != ""
+	sourceFilter := ""
+	if hasSourceFilter {
+		if !IsSupportedSourceFilter(sourceFilterRaw) {
+			return FindResult{}, fmt.Errorf("unsupported discovery source filter %q", sourceFilterRaw)
+		}
+		sourceFilter = NormalizeSource(sourceFilterRaw)
+	}
 	entries := make([]DiscoveryEntry, 0, len(records))
 	for _, record := range records {
-		if hasSourceFilter && normalizeSource(record.Source) != sourceFilter {
+		if hasSourceFilter && NormalizeSource(record.Source) != sourceFilter {
 			continue
 		}
 		if len(requiredCaps) > 0 && !matchesCapabilities(record, requiredCaps) {
@@ -160,7 +167,7 @@ func (s *QueryService) Find(ctx context.Context, opts FindOptions) (FindResult, 
 	return FindResult{
 		Query: FindQuery{
 			Capabilities: requiredCaps,
-			Source:       strings.TrimSpace(opts.Source),
+			Source:       sourceFilter,
 			FreshOnly:    opts.FreshOnly,
 			Limit:        opts.Limit,
 		},
@@ -257,7 +264,7 @@ func (s *QueryService) buildEntry(ctx context.Context, record Record, now time.T
 		DirectHints:           normalizeStringList(record.DirectHints),
 		StoreForwardHints:     normalizeStringList(record.StoreForwardHints),
 		SignedPeerRecord:      strings.TrimSpace(record.SignedPeerRecord),
-		Source:                strings.TrimSpace(record.Source),
+		Source:                NormalizeSource(record.Source),
 		SourceRank:            s.sourceRanking.Rank(record.Source),
 		ResolvedAt:            strings.TrimSpace(record.ResolvedAt),
 		FreshUntil:            strings.TrimSpace(record.FreshUntil),
@@ -303,8 +310,9 @@ func (s *QueryService) recordFromPresence(canonicalID string, view PeerPresenceV
 
 	source := strings.TrimSpace(view.Source)
 	if source == "" {
-		source = "refresh"
+		source = SourceRefresh
 	}
+	source = NormalizeSource(source)
 	return Record{
 		CanonicalID:           canonicalID,
 		PeerID:                strings.TrimSpace(view.PeerID),
@@ -370,7 +378,7 @@ func (s *QueryService) loadTrustSummary(ctx context.Context, record Record, rout
 		ConfidenceLevel:   confidenceLevel,
 		Reachability:      reachability,
 		RiskFlags:         normalizeStringList(snapshot.RiskFlags),
-		Source:            firstNonEmpty(strings.TrimSpace(snapshot.Source), strings.TrimSpace(record.Source)),
+		Source:            firstNonEmpty(strings.TrimSpace(snapshot.Source), NormalizeSource(record.Source)),
 		AsOf:              asOf,
 		Status:            status,
 	}, nil

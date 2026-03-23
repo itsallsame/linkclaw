@@ -64,6 +64,7 @@ func (s *Store) Upsert(ctx context.Context, record Record) error {
 		return fmt.Errorf("marshal discovery store-forward hints: %w", err)
 	}
 	now := s.now().Format(time.RFC3339Nano)
+	source := NormalizeSource(record.Source)
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO runtime_discovery_records (
 			canonical_id, peer_id, route_candidates_json, transport_capabilities_json, direct_hints_json,
@@ -91,7 +92,7 @@ func (s *Store) Upsert(ctx context.Context, record Record) error {
 		string(directHintsJSON),
 		string(storeForwardHintsJSON),
 		strings.TrimSpace(record.SignedPeerRecord),
-		strings.TrimSpace(record.Source),
+		source,
 		boolToInt(record.Reachable),
 		strings.TrimSpace(record.ResolvedAt),
 		strings.TrimSpace(record.FreshUntil),
@@ -212,6 +213,7 @@ func scanRecord(scanner rowScanner) (Record, error) {
 	if err := decodeStringArray(storeForwardHintsRaw, &record.StoreForwardHints); err != nil {
 		return Record{}, fmt.Errorf("decode runtime discovery store_forward_hints_json: %w", err)
 	}
+	record.Source = NormalizeSource(record.Source)
 	record.Reachable = reachable != 0
 	return record, nil
 }
