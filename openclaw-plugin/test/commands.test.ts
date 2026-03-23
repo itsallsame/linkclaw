@@ -1811,3 +1811,165 @@ test("runInboxCommand filters conversations by preview query", async () => {
     relayProc.kill();
   }
 });
+
+test("discover inspect connect message recover flow stays healthy end-to-end", async () => {
+  const fixture = await createResolverFixtureServer();
+  const relayPort = await reservePort();
+  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
+  const relayDb = join(relayDir, "relay.db");
+  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
+    cwd: resolve(pluginRoot, ".."),
+    env: { ...process.env },
+  });
+
+  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
+  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
+
+  try {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
+
+    await runLinkClaw(
+      { ...relayConfig, home: aliceHome },
+      { command: "init", canonicalId: "did:key:z6MkAliceE2EChain", displayName: "Alice E2E Chain" },
+      pluginRoot,
+    );
+    await runLinkClaw(
+      { ...relayConfig, home: bobHome },
+      { command: "init", canonicalId: "did:key:z6MkBobE2EChain", displayName: "Bob E2E Chain" },
+      pluginRoot,
+    );
+
+    const inspectResult = await runInspectCommand(
+      { binaryPath },
+      `${fixture.origin}/.well-known/agent-card.json`,
+      pluginRoot,
+    );
+    assert.equal(inspectResult.type, "message");
+    assert.match(inspectResult.message, /LinkClaw inspect/);
+    assert.match(inspectResult.message, /status: consistent/);
+    assert.match(inspectResult.message, /importable: yes/);
+
+    const importResult = await runImportCommand(
+      { binaryPath, home: bobHome },
+      `${fixture.origin}/.well-known/agent-card.json`,
+      pluginRoot,
+    );
+    assert.equal(importResult.type, "message");
+    assert.match(importResult.message, /Identity imported/);
+
+    const discoverResult = await runDiscoverCommand(
+      { binaryPath, home: bobHome },
+      "--limit 10",
+      pluginRoot,
+    );
+    assert.equal(discoverResult.type, "message");
+    assert.match(discoverResult.message, /LinkClaw discovery/);
+    assert.match(discoverResult.message, /did:web:fixture\.example/);
+
+    const aliceCard = await runLinkClaw(
+      { ...relayConfig, home: aliceHome },
+      { command: "card_export" },
+      pluginRoot,
+    );
+    const bobCard = await runLinkClaw(
+      { ...relayConfig, home: bobHome },
+      { command: "card_export" },
+      pluginRoot,
+    );
+
+    const aliceCardPath = join(bobHome, "alice-e2e-chain.card.json");
+    const bobCardPath = join(aliceHome, "bob-e2e-chain.card.json");
+    await writeFile(aliceCardPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
+    await writeFile(bobCardPath, JSON.stringify((bobCard.result as { card: unknown }).card, null, 2), "utf8");
+
+    const bobConnectsAlice = await runConnectCommand(
+      { ...relayConfig, home: bobHome },
+      aliceCardPath,
+      pluginRoot,
+    );
+    const contactMatch = bobConnectsAlice.message.match(/contact: ([^\n]+)/);
+    assert.ok(contactMatch);
+    await runConnectCommand(
+      { ...relayConfig, home: aliceHome },
+      bobCardPath,
+      pluginRoot,
+    );
+
+    const sendResult = await runMessageCommand(
+      { ...relayConfig, home: bobHome },
+      `${contactMatch[1]} hello e2e chain`,
+      pluginRoot,
+    );
+    assert.equal(sendResult.type, "message");
+    assert.match(sendResult.message, /LinkClaw message (queued|delivered)/);
+
+    let syncResult = await runSyncCommand(
+      { ...relayConfig, home: aliceHome },
+      "",
+      pluginRoot,
+    );
+    for (let attempt = 0; attempt < 3 && !/synced: 1/.test(syncResult.message); attempt += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+      syncResult = await runSyncCommand(
+        { ...relayConfig, home: aliceHome },
+        "",
+        pluginRoot,
+      );
+    }
+    assert.match(syncResult.message, /synced: 1/);
+    assert.match(syncResult.message, /recovery checks: \d+/);
+
+    const threadResult = await runThreadCommand(
+      { ...relayConfig, home: aliceHome },
+      "did:key:z6MkBobE2EChain",
+      pluginRoot,
+    );
+    assert.equal(threadResult.type, "message");
+    assert.match(threadResult.message, /LinkClaw thread/);
+    assert.match(threadResult.message, /hello e2e chain/);
+  } finally {
+    relayProc.kill();
+    await fixture.close();
+  }
+});
+
+test("message connect-peer reports blocked readiness when no transport route is usable", async () => {
+  const fixture = await createResolverFixtureServer();
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-connect-peer-blocked-home-"));
+
+  try {
+    await runLinkClaw(
+      { binaryPath, home },
+      { command: "init", canonicalId: "did:key:z6MkBlockedReady", displayName: "Blocked Ready" },
+      pluginRoot,
+    );
+
+    const importEnvelope = await runLinkClaw(
+      { binaryPath, home },
+      {
+        command: "import",
+        input: `${fixture.origin}/.well-known/agent-card.json`,
+      },
+      pluginRoot,
+    );
+    const imported = importEnvelope.result as { contact_id?: string };
+    assert.equal(typeof imported.contact_id, "string");
+    assert.ok((imported.contact_id ?? "").length > 0);
+
+    const connectEnvelope = await runLinkClaw(
+      { binaryPath, home },
+      {
+        command: "message_connect_peer",
+        identifier: imported.contact_id ?? "",
+      },
+      pluginRoot,
+    );
+    assert.equal(connectEnvelope.ok, true);
+    const connectResult = connectEnvelope.result as Record<string, unknown>;
+    assert.equal(connectResult.connected, false);
+    assert.match(String(connectResult.reason ?? ""), /no usable transport route/i);
+  } finally {
+    await fixture.close();
+  }
+});
