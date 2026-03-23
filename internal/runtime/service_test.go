@@ -46,6 +46,7 @@ type stubTransport struct {
 	sendCalls  int
 	syncCalls  int
 	sendErr    error
+	sendResult *transport.SendResult
 	syncErr    error
 	syncCount  int
 	syncCursor string
@@ -61,6 +62,16 @@ func (s *stubTransport) Send(_ context.Context, env transport.Envelope, route tr
 	s.sendCalls++
 	if s.sendErr != nil {
 		return transport.SendResult{}, s.sendErr
+	}
+	if s.sendResult != nil {
+		result := *s.sendResult
+		if result.Route.Type == "" {
+			result.Route = route
+		}
+		if result.RemoteID == "" {
+			result.RemoteID = env.MessageID
+		}
+		return result, nil
 	}
 	return transport.SendResult{Route: route, Delivered: true, RemoteID: env.MessageID}, nil
 }
@@ -151,6 +162,63 @@ func TestServiceSendEmitsDeliveryHook(t *testing.T) {
 	}
 }
 
+func TestServiceSendFallsBackToStoreForwardAndRecordsQueuedOutcome(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeDirect, Label: "peer-direct", Priority: 100},
+			{Type: transport.RouteTypeStoreForward, Label: "sf-relay", Priority: 1},
+		},
+	}
+	direct := &stubTransport{
+		name:      "libp2p_direct",
+		routeType: transport.RouteTypeDirect,
+		sendErr:   context.DeadlineExceeded,
+	}
+	storeForward := &stubTransport{
+		name:      "store_forward",
+		routeType: transport.RouteTypeStoreForward,
+		sendResult: &transport.SendResult{
+			Delivered: false,
+			Retryable: true,
+		},
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		direct,
+		storeForward,
+	)
+
+	result, err := service.Send(context.Background(), routing.ContactRuntimeView{
+		CanonicalID: "did:key:test",
+	}, SendRequest{
+		SenderID:    "self",
+		RecipientID: "peer",
+		Plaintext:   "hello",
+	})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if got, want := result.Transport, "store_forward"; got != want {
+		t.Fatalf("Send() transport = %q, want %q", got, want)
+	}
+	if got, want := result.Status, "queued"; got != want {
+		t.Fatalf("Send() status = %q, want %q", got, want)
+	}
+	if direct.sendCalls != 1 || storeForward.sendCalls != 1 {
+		t.Fatalf("send calls direct=%d store_forward=%d, want 1/1", direct.sendCalls, storeForward.sendCalls)
+	}
+	if got, want := len(planner.outcomes), 2; got != want {
+		t.Fatalf("planner outcomes len = %d, want %d", got, want)
+	}
+	if got, want := planner.outcomes[0].Outcome, routing.RouteOutcomeFailed; got != want {
+		t.Fatalf("planner.outcomes[0].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[1].Outcome, routing.RouteOutcomeQueued; got != want {
+		t.Fatalf("planner.outcomes[1].Outcome = %q, want %q", got, want)
+	}
+}
+
 func TestServiceSyncAggregatesTransportRecovery(t *testing.T) {
 	planner := &stubPlanner{
 		recoverRoutes: []transport.RouteCandidate{
@@ -205,6 +273,75 @@ func TestServiceSyncAcknowledgesAdvancedCursor(t *testing.T) {
 	}
 	if len(recovery.ackCalls) != 1 || recovery.ackCalls[0] != "cursor-1" {
 		t.Fatalf("ack calls = %#v, want [cursor-1]", recovery.ackCalls)
+	}
+}
+
+func TestServiceSyncRecordsRecoveryAndAckOutcomes(t *testing.T) {
+	planner := &stubPlanner{
+		recoverRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeRecovery, Label: "recovery-1", Priority: 2},
+		},
+	}
+	recovery := &stubTransport{name: "recovery", routeType: transport.RouteTypeRecovery, syncCount: 1, syncCursor: "cursor-1"}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		recovery,
+	)
+
+	if _, err := service.Sync(context.Background(), routing.ContactRuntimeView{CanonicalID: "did:key:test"}); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if got, want := len(planner.outcomes), 2; got != want {
+		t.Fatalf("planner outcomes len = %d, want %d", got, want)
+	}
+	if got, want := planner.outcomes[0].Outcome, routing.RouteOutcomeRecovered; got != want {
+		t.Fatalf("planner.outcomes[0].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[0].Cursor, "cursor-1"; got != want {
+		t.Fatalf("planner.outcomes[0].Cursor = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[1].Outcome, routing.RouteOutcomeAcked; got != want {
+		t.Fatalf("planner.outcomes[1].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[1].Cursor, "cursor-1"; got != want {
+		t.Fatalf("planner.outcomes[1].Cursor = %q, want %q", got, want)
+	}
+}
+
+func TestServiceSyncRecordsAckFailureOutcome(t *testing.T) {
+	planner := &stubPlanner{
+		recoverRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeRecovery, Label: "recovery-1", Priority: 2},
+		},
+	}
+	recovery := &stubTransport{
+		name:       "recovery",
+		routeType:  transport.RouteTypeRecovery,
+		syncCount:  1,
+		syncCursor: "cursor-1",
+		ackErr:     context.DeadlineExceeded,
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		recovery,
+	)
+
+	if _, err := service.Sync(context.Background(), routing.ContactRuntimeView{CanonicalID: "did:key:test"}); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if got, want := len(planner.outcomes), 2; got != want {
+		t.Fatalf("planner outcomes len = %d, want %d", got, want)
+	}
+	if got, want := planner.outcomes[1].Outcome, routing.RouteOutcomeAckFailed; got != want {
+		t.Fatalf("planner.outcomes[1].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[1].Cursor, "cursor-1"; got != want {
+		t.Fatalf("planner.outcomes[1].Cursor = %q, want %q", got, want)
+	}
+	if planner.outcomes[1].Error == "" {
+		t.Fatalf("planner.outcomes[1].Error = empty, want ack failure error")
 	}
 }
 

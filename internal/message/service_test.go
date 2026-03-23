@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -289,6 +290,14 @@ func TestSendAndSyncWithRelayAndExperimentalDirectFallback(t *testing.T) {
 	if synced.Synced != 1 {
 		t.Fatalf("synced count = %d, want 1", synced.Synced)
 	}
+
+	bobAttempts := loadRuntimeRouteAttempts(t, bobHome)
+	requireRouteAttempt(t, bobAttempts, "direct", "failed", "")
+	requireRouteAttempt(t, bobAttempts, "store_forward", "queued", "")
+
+	aliceAttempts := loadRuntimeRouteAttempts(t, aliceHome)
+	recoveryCursor := requireRouteAttemptWithNonEmptyCursor(t, aliceAttempts, "recovery", "recovered")
+	requireRouteAttempt(t, aliceAttempts, "recovery", "acked", recoveryCursor)
 }
 
 func TestStatusSummary(t *testing.T) {
@@ -619,4 +628,59 @@ func TestDirectDeliveryPreservesMultipleMessages(t *testing.T) {
 	if !bodies["hello direct first"] || !bodies["hello direct second"] {
 		t.Fatalf("thread bodies = %#v", thread.Conversation.Messages)
 	}
+}
+
+type runtimeRouteAttempt struct {
+	RouteType string
+	Outcome   string
+	Cursor    string
+}
+
+func loadRuntimeRouteAttempts(t *testing.T, home string) []runtimeRouteAttempt {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT route_type, outcome, cursor_value FROM runtime_route_attempts`)
+	if err != nil {
+		t.Fatalf("query runtime_route_attempts: %v", err)
+	}
+	defer rows.Close()
+
+	attempts := make([]runtimeRouteAttempt, 0)
+	for rows.Next() {
+		var record runtimeRouteAttempt
+		if err := rows.Scan(&record.RouteType, &record.Outcome, &record.Cursor); err != nil {
+			t.Fatalf("scan runtime_route_attempts: %v", err)
+		}
+		attempts = append(attempts, record)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate runtime_route_attempts: %v", err)
+	}
+	return attempts
+}
+
+func requireRouteAttempt(t *testing.T, attempts []runtimeRouteAttempt, routeType, outcome, cursor string) {
+	t.Helper()
+	for _, attempt := range attempts {
+		if attempt.RouteType == routeType && attempt.Outcome == outcome && attempt.Cursor == cursor {
+			return
+		}
+	}
+	t.Fatalf("route attempt (%s,%s,%s) not found, got %#v", routeType, outcome, cursor, attempts)
+}
+
+func requireRouteAttemptWithNonEmptyCursor(t *testing.T, attempts []runtimeRouteAttempt, routeType, outcome string) string {
+	t.Helper()
+	for _, attempt := range attempts {
+		if attempt.RouteType == routeType && attempt.Outcome == outcome && attempt.Cursor != "" {
+			return attempt.Cursor
+		}
+	}
+	t.Fatalf("route attempt (%s,%s,<non-empty cursor>) not found, got %#v", routeType, outcome, attempts)
+	return ""
 }

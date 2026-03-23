@@ -521,6 +521,11 @@ func (s *Store) MarkConversationRead(ctx context.Context, conversationID string)
 }
 
 func (s *Store) RecordRouteAttempt(ctx context.Context, outcome routing.RouteOutcome, conversationID string, cursor string) error {
+	outcomeLabel := strings.TrimSpace(outcome.Outcome)
+	if outcomeLabel == "" {
+		outcomeLabel = boolToOutcome(outcome.Success)
+	}
+	cursorValue := coalesceString(cursor, outcome.Cursor)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO runtime_route_attempts (
 			attempt_id, message_id, conversation_id, route_type, route_label, priority,
@@ -529,7 +534,7 @@ func (s *Store) RecordRouteAttempt(ctx context.Context, outcome routing.RouteOut
 	`,
 		fmt.Sprintf("%s:%s:%d", outcome.MessageID, outcome.Route.Label, outcome.OccurredAt.UnixNano()),
 		outcome.MessageID, conversationID, string(outcome.Route.Type), outcome.Route.Label, outcome.Route.Priority,
-		boolToOutcome(outcome.Success), outcome.Error, boolToInt(outcome.Retryable), cursor,
+		outcomeLabel, outcome.Error, boolToInt(outcome.Retryable), cursorValue,
 		outcome.OccurredAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {

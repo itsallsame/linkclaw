@@ -21,11 +21,22 @@ type ContactRuntimeView struct {
 type RouteOutcome struct {
 	MessageID  string
 	Route      transport.RouteCandidate
+	Outcome    string
 	Success    bool
 	Retryable  bool
 	Error      string
+	Cursor     string
 	OccurredAt time.Time
 }
+
+const (
+	RouteOutcomeDelivered = "delivered"
+	RouteOutcomeQueued    = "queued"
+	RouteOutcomeFailed    = "failed"
+	RouteOutcomeRecovered = "recovered"
+	RouteOutcomeAcked     = "acked"
+	RouteOutcomeAckFailed = "ack_failed"
+)
 
 type Planner interface {
 	PlanSend(ctx context.Context, contact ContactRuntimeView, presence discovery.PeerPresenceView) ([]transport.RouteCandidate, error)

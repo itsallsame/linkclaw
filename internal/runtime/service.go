@@ -60,7 +60,7 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 		}
 		sendResult, sendErr := adapter.Send(ctx, envelope, route)
 		if sendErr != nil {
-			s.recordOutcome(ctx, route, envelope.MessageID, false, true, sendErr.Error())
+			s.recordOutcome(ctx, route, envelope.MessageID, routing.RouteOutcomeFailed, false, true, sendErr.Error(), "")
 			_ = s.hooks().OnDeliveryOutcome(ctx, DeliveryOutcomeEvent{
 				MessageID: envelope.MessageID,
 				Route:     route,
@@ -71,7 +71,11 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 			})
 			continue
 		}
-		s.recordOutcome(ctx, route, envelope.MessageID, sendResult.Delivered, sendResult.Retryable, "")
+		deliveryOutcome := routing.RouteOutcomeQueued
+		if sendResult.Delivered {
+			deliveryOutcome = routing.RouteOutcomeDelivered
+		}
+		s.recordOutcome(ctx, route, envelope.MessageID, deliveryOutcome, sendResult.Delivered, sendResult.Retryable, "", "")
 		_ = s.hooks().OnDeliveryOutcome(ctx, DeliveryOutcomeEvent{
 			MessageID: envelope.MessageID,
 			Route:     route,
@@ -110,12 +114,12 @@ func (s *Service) Sync(ctx context.Context, contact routing.ContactRuntimeView) 
 		}
 		syncResult, syncErr := adapter.Sync(ctx, route)
 		if syncErr != nil {
-			s.recordOutcome(ctx, route, "", false, true, syncErr.Error())
+			s.recordOutcome(ctx, route, "", routing.RouteOutcomeFailed, false, true, syncErr.Error(), "")
 			continue
 		}
 		result.Synced += syncResult.Recovered
 		result.RoutesUsed = append(result.RoutesUsed, adapter.Name())
-		s.recordOutcome(ctx, route, "", true, true, "")
+		s.recordOutcome(ctx, route, "", routing.RouteOutcomeRecovered, true, true, "", syncResult.AdvancedCursor)
 		_ = s.hooks().OnRecovery(ctx, RecoveryEvent{
 			Route:          route,
 			Transport:      adapter.Name(),
@@ -124,7 +128,9 @@ func (s *Service) Sync(ctx context.Context, contact routing.ContactRuntimeView) 
 		})
 		if syncResult.AdvancedCursor != "" {
 			if ackErr := adapter.Ack(ctx, route, syncResult.AdvancedCursor); ackErr != nil {
-				s.recordOutcome(ctx, route, "", false, true, ackErr.Error())
+				s.recordOutcome(ctx, route, "", routing.RouteOutcomeAckFailed, false, true, ackErr.Error(), syncResult.AdvancedCursor)
+			} else {
+				s.recordOutcome(ctx, route, "", routing.RouteOutcomeAcked, true, false, "", syncResult.AdvancedCursor)
 			}
 		}
 	}
@@ -194,7 +200,16 @@ func (s *Service) findTransport(route transport.RouteCandidate) transport.Transp
 	return nil
 }
 
-func (s *Service) recordOutcome(ctx context.Context, route transport.RouteCandidate, messageID string, success bool, retryable bool, errMsg string) {
+func (s *Service) recordOutcome(
+	ctx context.Context,
+	route transport.RouteCandidate,
+	messageID string,
+	outcome string,
+	success bool,
+	retryable bool,
+	errMsg string,
+	cursor string,
+) {
 	if s.Planner == nil {
 		return
 	}
@@ -205,9 +220,11 @@ func (s *Service) recordOutcome(ctx context.Context, route transport.RouteCandid
 	_ = s.Planner.RecordOutcome(ctx, routing.RouteOutcome{
 		MessageID:  messageID,
 		Route:      route,
+		Outcome:    outcome,
 		Success:    success,
 		Retryable:  retryable,
 		Error:      errMsg,
+		Cursor:     cursor,
 		OccurredAt: nowFn().UTC(),
 	})
 }
