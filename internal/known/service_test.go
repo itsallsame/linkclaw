@@ -110,6 +110,112 @@ func TestServiceRefreshMarksMismatchWithoutDuplicatingContact(t *testing.T) {
 	}
 }
 
+func TestServiceTrustWritesTrustEventHistory(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newSwitchableFixtureServer(t, filepath.Join("..", "resolver", "testdata", "consistent"))
+	t.Cleanup(server.Close)
+
+	home := seedKnownHome(t)
+	importerService := importer.NewService()
+	importerService.Now = func() time.Time { return time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC) }
+	importerService.Resolver = resolver.NewService()
+	importerService.Resolver.Client = server.Client()
+	importerService.Resolver.Now = importerService.Now
+
+	imported, err := importerService.Import(context.Background(), importer.Options{
+		Home:  home,
+		Input: server.URL + "/profile/",
+	})
+	if err != nil {
+		t.Fatalf("initial import: %v", err)
+	}
+
+	service := &Service{
+		Importer: importerService,
+		Now:      func() time.Time { return time.Date(2026, time.March, 13, 12, 5, 0, 0, time.UTC) },
+	}
+	if _, err := service.Trust(context.Background(), TrustOptions{
+		Home:       home,
+		Identifier: imported.ContactID,
+		Level:      "seen",
+		Reason:     "first manual pass",
+	}); err != nil {
+		t.Fatalf("first trust update: %v", err)
+	}
+	if _, err := service.Trust(context.Background(), TrustOptions{
+		Home:         home,
+		Identifier:   imported.ContactID,
+		Level:        "trusted",
+		RiskFlags:    []string{"manual-review"},
+		HasRiskFlags: true,
+		Reason:       "manual review approved",
+	}); err != nil {
+		t.Fatalf("second trust update: %v", err)
+	}
+
+	db := openKnownDB(t, home)
+	defer db.Close()
+
+	var trustLevel string
+	var riskFlags string
+	var decisionReason string
+	if err := db.QueryRow(
+		`SELECT trust_level, risk_flags, decision_reason FROM trust_records WHERE contact_id = ?`,
+		imported.ContactID,
+	).Scan(&trustLevel, &riskFlags, &decisionReason); err != nil {
+		t.Fatalf("query trust record: %v", err)
+	}
+	if trustLevel != "trusted" {
+		t.Fatalf("stored trust level = %q, want trusted", trustLevel)
+	}
+	if riskFlags != `["manual-review"]` {
+		t.Fatalf("stored risk flags = %q, want [\"manual-review\"]", riskFlags)
+	}
+	if decisionReason != "manual review approved" {
+		t.Fatalf("stored reason = %q, want manual review approved", decisionReason)
+	}
+
+	var trustEventCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM trust_events WHERE contact_id = ?`,
+		imported.ContactID,
+	).Scan(&trustEventCount); err != nil {
+		t.Fatalf("count trust events: %v", err)
+	}
+	if trustEventCount != 2 {
+		t.Fatalf("trust event count = %d, want 2", trustEventCount)
+	}
+
+	rows, err := db.Query(
+		`SELECT decision_reason, source FROM trust_events WHERE contact_id = ?`,
+		imported.ContactID,
+	)
+	if err != nil {
+		t.Fatalf("query trust event history: %v", err)
+	}
+	defer rows.Close()
+
+	reasons := map[string]bool{}
+	for rows.Next() {
+		var reason string
+		var source string
+		if err := rows.Scan(&reason, &source); err != nil {
+			t.Fatalf("scan trust event: %v", err)
+		}
+		reasons[reason] = true
+		if source != "known-trust" {
+			t.Fatalf("trust event source = %q, want known-trust", source)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate trust events: %v", err)
+	}
+	if !reasons["first manual pass"] || !reasons["manual review approved"] {
+		t.Fatalf("unexpected trust event reasons: %+v", reasons)
+	}
+}
+
 func seedKnownHome(t *testing.T) string {
 	t.Helper()
 

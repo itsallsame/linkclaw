@@ -30,6 +30,9 @@ func TestApplyCreatesTrustDiscoveryFoundationTablesOnCleanDB(t *testing.T) {
 	if !tableExists(t, db, "runtime_discovery_records") {
 		t.Fatal("runtime_discovery_records table missing")
 	}
+	if !tableExists(t, db, "trust_events") {
+		t.Fatal("trust_events table missing")
+	}
 }
 
 func TestApplyMigratesExistingDBToTrustDiscoveryFoundation(t *testing.T) {
@@ -58,8 +61,14 @@ func TestApplyMigratesExistingDBToTrustDiscoveryFoundation(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `DROP TABLE runtime_discovery_records`); err != nil {
 		t.Fatalf("drop runtime_discovery_records: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE trust_events`); err != nil {
+		t.Fatalf("drop trust_events: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = ?`, "0013_trust_discovery_store_foundation"); err != nil {
 		t.Fatalf("delete 0013 migration marker: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = ?`, "0014_trust_events"); err != nil {
+		t.Fatalf("delete 0014 migration marker: %v", err)
 	}
 
 	steps, err := Apply(ctx, db, time.Date(2026, 3, 23, 7, 0, 0, 0, time.UTC))
@@ -83,6 +92,9 @@ func TestApplyMigratesExistingDBToTrustDiscoveryFoundation(t *testing.T) {
 	}
 	if !tableExists(t, db, "runtime_discovery_records") {
 		t.Fatal("runtime_discovery_records table missing after re-run")
+	}
+	if !tableExists(t, db, "trust_events") {
+		t.Fatal("trust_events table missing after re-run")
 	}
 
 	var count int

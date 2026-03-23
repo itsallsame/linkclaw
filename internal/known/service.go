@@ -295,18 +295,22 @@ func (s *Service) Trust(ctx context.Context, opts TrustOptions) (TrustResult, er
 	if reason == "" {
 		reason = summarizeTrustChange(trust)
 	}
+	riskFlagsJSON := encodeStringArray(trust.RiskFlags)
 	if _, err := tx.ExecContext(
 		ctx,
 		`UPDATE trust_records
 		 SET trust_level = ?, risk_flags = ?, decision_reason = ?, updated_at = ?
 		 WHERE trust_id = ?`,
 		trust.TrustLevel,
-		encodeStringArray(trust.RiskFlags),
+		riskFlagsJSON,
 		reason,
 		stamp,
 		trust.TrustID,
 	); err != nil {
 		return TrustResult{}, fmt.Errorf("update trust record: %w", err)
+	}
+	if _, err := insertTrustEvent(ctx, tx, contact, trust, reason, riskFlagsJSON, now); err != nil {
+		return TrustResult{}, err
 	}
 	eventID, err := insertEvent(ctx, tx, contact.ContactID, "trust", summarizeTrustChange(trust), now)
 	if err != nil {
@@ -971,6 +975,43 @@ func insertEvent(ctx context.Context, tx *sql.Tx, contactID, eventType, summary 
 		stamp,
 	); err != nil {
 		return "", fmt.Errorf("insert %s event: %w", eventType, err)
+	}
+	return eventID, nil
+}
+
+func insertTrustEvent(
+	ctx context.Context,
+	tx *sql.Tx,
+	contact ContactSummary,
+	trust TrustRecord,
+	reason string,
+	riskFlagsJSON string,
+	now time.Time,
+) (string, error) {
+	eventID, err := ids.New("trust_event")
+	if err != nil {
+		return "", err
+	}
+	stamp := now.Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO trust_events (
+			event_id, trust_id, contact_id, canonical_id, trust_level, risk_flags_json,
+			verification_state, decision_reason, source, decided_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		eventID,
+		trust.TrustID,
+		contact.ContactID,
+		strings.TrimSpace(contact.CanonicalID),
+		trust.TrustLevel,
+		riskFlagsJSON,
+		trust.VerificationState,
+		strings.TrimSpace(reason),
+		"known-trust",
+		stamp,
+		stamp,
+	); err != nil {
+		return "", fmt.Errorf("insert trust event: %w", err)
 	}
 	return eventID, nil
 }

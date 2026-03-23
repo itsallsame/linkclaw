@@ -972,6 +972,34 @@ func TestRunKnownTrustJSON(t *testing.T) {
 		t.Fatalf("stored reason = %q", reason)
 	}
 	assertCount(t, db, `SELECT COUNT(*) FROM interaction_events WHERE contact_id = ? AND event_type = 'trust'`, imported.Result.ContactID, 1)
+	assertCount(t, db, `SELECT COUNT(*) FROM trust_events WHERE contact_id = ?`, imported.Result.ContactID, 1)
+
+	var eventLevel string
+	var eventRiskFlags string
+	var eventReason string
+	var eventSource string
+	if err := db.QueryRow(
+		`SELECT trust_level, risk_flags_json, decision_reason, source
+		   FROM trust_events
+		  WHERE contact_id = ?
+		  ORDER BY decided_at DESC, event_id DESC
+		  LIMIT 1`,
+		imported.Result.ContactID,
+	).Scan(&eventLevel, &eventRiskFlags, &eventReason, &eventSource); err != nil {
+		t.Fatalf("query trust event: %v", err)
+	}
+	if eventLevel != "trusted" {
+		t.Fatalf("trust event level = %q", eventLevel)
+	}
+	if eventRiskFlags != `["fixture","manual-review"]` {
+		t.Fatalf("trust event risk_flags_json = %q", eventRiskFlags)
+	}
+	if eventReason != "reviewed in CLI test" {
+		t.Fatalf("trust event reason = %q", eventReason)
+	}
+	if eventSource != "known-trust" {
+		t.Fatalf("trust event source = %q", eventSource)
+	}
 }
 
 func TestRunKnownNoteJSON(t *testing.T) {
