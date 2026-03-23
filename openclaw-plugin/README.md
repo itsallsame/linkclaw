@@ -242,6 +242,10 @@ Before trying A/B messaging, verify these host-level conditions:
   - publishing skill adapter with manifest fallback
 - Tool: `linkclaw_onboarding`
   - first-run readiness check and identity bootstrap for normal OpenClaw users
+- Tool: `linkclaw_inspect_identity`
+  - inspect one public identity surface and summarize verification/import readiness
+- Tool: `linkclaw_discover_peers`
+  - list runtime discovery candidates with optional capability/source/freshness filters
 - Skill: `/linkclaw-publish`
   - dispatches raw args directly to `linkclaw_publish`
 - Command: `/linkclaw-onboarding`
@@ -250,6 +254,10 @@ Before trying A/B messaging, verify these host-level conditions:
   - imports a discovered `did.json` or `agent-card.json` link into the local known contacts book
 - Command: `/linkclaw-status`
   - shows readiness, health checks, contact count, and inbox summary for the current home
+- Command: `/linkclaw-inspect`
+  - inspects one identity URL and reports verification/import readiness
+- Command: `/linkclaw-discover`
+  - lists runtime discovery records and reachability hints
 - Command: `/linkclaw-share`
   - returns the published agent-card and did.json links for the configured origin, or a raw signed identity card with `--card`
 - Command: `/linkclaw-connect`

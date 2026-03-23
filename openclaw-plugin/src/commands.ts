@@ -44,6 +44,20 @@ type ShareOptions = {
   card?: boolean;
 };
 
+type InspectOptions = {
+  input: string;
+  home?: string;
+};
+
+type DiscoverOptions = {
+  home?: string;
+  capability?: string;
+  capabilities?: string[];
+  source?: string;
+  freshOnly?: boolean;
+  limit?: number;
+};
+
 type ConnectOptions = {
   input: string;
   home?: string;
@@ -428,6 +442,91 @@ export async function runShareCommand(
     return {
       type: "message",
       message: formatCommandError("linkclaw share", error),
+    };
+  }
+}
+
+export async function runInspectCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: InspectOptions;
+  try {
+    options = parseInspectCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw inspect command failed: ${(error as Error).message}`,
+    };
+  }
+
+  if (options.input === "") {
+    return {
+      type: "message",
+      message: "Usage: /linkclaw-inspect [--home /path/to/home] <did-or-origin-or-url>",
+    };
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "inspect",
+        home: options.home,
+        input: options.input,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatInspect(options.input, envelope.result),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw inspect", error),
+    };
+  }
+}
+
+export async function runDiscoverCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: DiscoverOptions;
+  try {
+    options = parseDiscoverCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw discover command failed: ${(error as Error).message}`,
+    };
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "message_list_discovery",
+        home: options.home,
+        capability: options.capability,
+        capabilities: options.capabilities,
+        source: options.source,
+        freshOnly: options.freshOnly,
+        limit: options.limit,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatDiscover(envelope.result, options),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw discover", error),
     };
   }
 }
@@ -890,6 +989,114 @@ export function parseShareCommand(rawArgs: string): ShareOptions {
   return options;
 }
 
+export function parseInspectCommand(rawArgs: string): InspectOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  let input = "";
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported inspect argument: ${token}`);
+    }
+    if (input !== "") {
+      throw new Error("linkclaw-inspect accepts exactly one input");
+    }
+    input = token;
+  }
+
+  return { home, input };
+}
+
+export function parseDiscoverCommand(rawArgs: string): DiscoverOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  let capability: string | undefined;
+  let capabilities: string[] = [];
+  let source: string | undefined;
+  let freshOnly = false;
+  let limit: number | undefined;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--capability") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --capability");
+      }
+      const value = tokens[index + 1].trim();
+      if (value === "") {
+        throw new Error("invalid value for --capability");
+      }
+      capability = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--capabilities") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --capabilities");
+      }
+      capabilities = capabilities.concat(parseCommaSeparatedValues(tokens[index + 1], "--capabilities"));
+      index += 1;
+      continue;
+    }
+    if (token === "--source") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --source");
+      }
+      const value = tokens[index + 1].trim();
+      if (value === "") {
+        throw new Error("invalid value for --source");
+      }
+      source = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--fresh-only") {
+      freshOnly = true;
+      continue;
+    }
+    if (token === "--limit") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --limit");
+      }
+      const parsed = Number.parseInt(tokens[index + 1] ?? "", 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error("invalid value for --limit");
+      }
+      limit = parsed;
+      index += 1;
+      continue;
+    }
+    throw new Error(`unsupported discover argument: ${token}`);
+  }
+
+  const mergedCapabilities = [...new Set([...(capabilities ?? []), ...(capability ? [capability] : [])])];
+  return {
+    home,
+    capability,
+    capabilities: mergedCapabilities.length > 0 ? mergedCapabilities : undefined,
+    source,
+    freshOnly: freshOnly ? true : undefined,
+    limit,
+  };
+}
+
 export function parseConnectCommand(rawArgs: string): ConnectOptions {
   const directPayload = parseDirectConnectPayload(rawArgs);
   if (directPayload) {
@@ -1182,6 +1389,91 @@ function formatImportMessage(value: unknown): string {
   }
   lines.push("- if you want to message them, exchange identity cards and use /linkclaw-message <contact> <text>");
 
+  return lines.join("\n");
+}
+
+function formatInspect(input: string, value: unknown): string {
+  const inspection = toInspectResult(value);
+  const record = asObject(value);
+  const proofs = Array.isArray(record?.proofs) ? record.proofs.length : 0;
+  const artifacts = Array.isArray(inspection.artifacts) ? inspection.artifacts.length : 0;
+  const lines = ["LinkClaw inspect", `input: ${inspection.input ?? input}`];
+  if (inspection.normalized_origin) {
+    lines.push(`origin: ${inspection.normalized_origin}`);
+  }
+  if (inspection.display_name) {
+    lines.push(`name: ${inspection.display_name}`);
+  }
+  if (inspection.canonical_id) {
+    lines.push(`canonical id: ${inspection.canonical_id}`);
+  }
+  if (inspection.profile_url) {
+    lines.push(`profile: ${inspection.profile_url}`);
+  }
+  if (inspection.verification_state) {
+    lines.push(`status: ${inspection.verification_state}`);
+  }
+  if (typeof inspection.can_import === "boolean") {
+    lines.push(`importable: ${inspection.can_import ? "yes" : "no"}`);
+  }
+  lines.push(`artifacts: ${artifacts}`);
+  lines.push(`proofs: ${proofs}`);
+  if ((inspection.warnings ?? []).length > 0) {
+    lines.push(`warnings: ${(inspection.warnings ?? []).join("; ")}`);
+  }
+  if ((inspection.mismatches ?? []).length > 0) {
+    lines.push(`mismatches: ${(inspection.mismatches ?? []).join("; ")}`);
+  }
+  lines.push("Next:");
+  if (inspection.can_import) {
+    lines.push(`- run /linkclaw-import ${inspection.input ?? input}`);
+  } else {
+    lines.push("- resolve identity mismatches or missing artifacts before importing");
+  }
+  lines.push("- run /linkclaw-share --card if you want to exchange identity cards directly");
+  return lines.join("\n");
+}
+
+function formatDiscover(value: unknown, options: DiscoverOptions): string {
+  const record = asObject(value);
+  const rawRecords = Array.isArray(record?.records) ? record.records : [];
+  const lines = ["LinkClaw discovery", `records: ${rawRecords.length}`];
+  if (options.capability) {
+    lines.push(`capability: ${options.capability}`);
+  }
+  if (options.capabilities && options.capabilities.length > 0) {
+    lines.push(`capabilities: ${options.capabilities.join(",")}`);
+  }
+  if (options.source) {
+    lines.push(`source: ${options.source}`);
+  }
+  if (options.freshOnly) {
+    lines.push("fresh only: yes");
+  }
+  for (const candidate of rawRecords) {
+    const item = asObject(candidate);
+    const canonicalId = readString(item?.canonical_id) ?? "(unknown)";
+    const reachable =
+      typeof item?.reachable === "boolean" ? (item.reachable ? "yes" : "no") : "unknown";
+    const source = readString(item?.source) ?? "unknown";
+    const capabilities = Array.isArray(item?.capabilities)
+      ? item.capabilities
+          .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+          .map((entry) => entry.trim())
+      : [];
+    const parts = [canonicalId, `reachable=${reachable}`, `source=${source}`];
+    if (capabilities.length > 0) {
+      parts.push(`capabilities=${capabilities.join(",")}`);
+    }
+    lines.push(`- ${parts.join(" | ")}`);
+  }
+  if (rawRecords.length === 0) {
+    lines.push("No discovery records matched the current filters.");
+    return lines.join("\n");
+  }
+  lines.push("Next:");
+  lines.push("- run /linkclaw-connect <card-or-url> after the peer shares identity proof");
+  lines.push("- run /linkclaw-message <contact> <text> once the contact is saved");
   return lines.join("\n");
 }
 
@@ -1681,6 +1973,17 @@ function parseOptionalHome(rawArgs: string, commandName: string): string | undef
     throw new Error(`unsupported ${commandName} argument: ${token}`);
   }
   return home;
+}
+
+function parseCommaSeparatedValues(raw: string, flagName: string): string[] {
+  const values = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  if (values.length === 0) {
+    throw new Error(`invalid value for ${flagName}`);
+  }
+  return values;
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {

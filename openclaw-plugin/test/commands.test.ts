@@ -10,9 +10,11 @@ import { runLinkClaw } from "../src/bridge.ts";
 import {
   runConnectCommand,
   runContactsCommand,
+  runDiscoverCommand,
   runFindCommand,
   runImportCommand,
   runInboxCommand,
+  runInspectCommand,
   runMessageCommand,
   runOnboardingCommand,
   runReplyCommand,
@@ -96,6 +98,57 @@ test("runImportCommand returns usage when no input is provided", async () => {
   const result = await runImportCommand({ binaryPath }, "", pluginRoot);
   assert.equal(result.type, "message");
   assert.match(result.message, /Usage: \/linkclaw-import/);
+});
+
+test("runInspectCommand verifies one identity surface and reports import readiness", async () => {
+  const fixture = await createResolverFixtureServer();
+
+  try {
+    const result = await runInspectCommand(
+      { binaryPath },
+      `${fixture.origin}/.well-known/agent-card.json`,
+      pluginRoot,
+    );
+
+    assert.equal(result.type, "message");
+    assert.match(result.message, /LinkClaw inspect/);
+    assert.match(result.message, /status: consistent/);
+    assert.match(result.message, /importable: yes/);
+    assert.match(result.message, /Next:/);
+    assert.match(result.message, /\/linkclaw-import /);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("runInspectCommand returns usage when no input is provided", async () => {
+  const result = await runInspectCommand({ binaryPath }, "", pluginRoot);
+  assert.equal(result.type, "message");
+  assert.match(result.message, /Usage: \/linkclaw-inspect/);
+});
+
+test("runDiscoverCommand lists discovery records from runtime", async () => {
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-discovery-home-"));
+  await runLinkClaw(
+    { binaryPath, home },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkDiscoverSelf",
+      displayName: "Discovery Self",
+    },
+    pluginRoot,
+  );
+
+  const result = await runDiscoverCommand(
+    { binaryPath, home },
+    "--fresh-only --limit 5",
+    pluginRoot,
+  );
+
+  assert.equal(result.type, "message");
+  assert.match(result.message, /LinkClaw discovery/);
+  assert.match(result.message, /records: \d+/);
+  assert.match(result.message, /fresh only: yes/);
 });
 
 test("runShareCommand reports published share links for the configured origin", async () => {

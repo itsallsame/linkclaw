@@ -9,9 +9,11 @@ import {
 import {
   runConnectCommand,
   runContactsCommand,
+  runDiscoverCommand,
   runFindCommand,
   runImportCommand,
   runInboxCommand,
+  runInspectCommand,
   runMessageCommand,
   runOnboardingCommand,
   runReplyCommand,
@@ -480,6 +482,84 @@ const plugin = {
     });
 
     api.registerTool({
+      name: "linkclaw_inspect_identity",
+      description:
+        "Inspect one LinkClaw public identity surface (domain, origin, did.json, or agent-card URL) and summarize verification and import readiness.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["input"],
+        properties: {
+          input: { type: "string" },
+          home: { type: "string" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        if (typeof params.input === "string" && params.input.trim() !== "") {
+          args.push(params.input.trim());
+        }
+        const result = await runInspectCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
+      name: "linkclaw_discover_peers",
+      description:
+        "List LinkClaw discovery candidates and optional filters for reachability, source, and capabilities.",
+      optional: true,
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          home: { type: "string" },
+          capability: { type: "string" },
+          capabilities: {
+            type: "array",
+            items: { type: "string" },
+          },
+          source: { type: "string" },
+          freshOnly: { type: "boolean" },
+          limit: { type: "number" },
+        },
+      },
+      async execute(params) {
+        const args: string[] = [];
+        if (typeof params.home === "string" && params.home.trim() !== "") {
+          args.push("--home", params.home.trim());
+        }
+        if (typeof params.capability === "string" && params.capability.trim() !== "") {
+          args.push("--capability", params.capability.trim());
+        }
+        if (Array.isArray(params.capabilities)) {
+          const values = params.capabilities
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((entry) => entry.trim())
+            .filter((entry) => entry !== "");
+          if (values.length > 0) {
+            args.push("--capabilities", values.join(","));
+          }
+        }
+        if (typeof params.source === "string" && params.source.trim() !== "") {
+          args.push("--source", params.source.trim());
+        }
+        if (typeof params.freshOnly === "boolean" && params.freshOnly) {
+          args.push("--fresh-only");
+        }
+        if (typeof params.limit === "number" && Number.isFinite(params.limit) && params.limit > 0) {
+          args.push("--limit", String(Math.floor(params.limit)));
+        }
+        const result = await runDiscoverCommand(loadConfig(api), args.join(" "), pluginRoot);
+        return asToolTextResult(result.message);
+      },
+    });
+
+    api.registerTool({
       name: "linkclaw_share_card",
       description:
         "Export the current signed LinkClaw identity card JSON for sharing with another user. The card includes legacy HTTP fallback details only when relayUrl is explicitly configured.",
@@ -601,6 +681,20 @@ const plugin = {
       "linkclaw-status",
       "Show LinkClaw readiness, health checks, contacts, and inbox summary for the configured home.",
       async (args) => runStatusCommand(loadConfig(api), args, pluginRoot),
+    );
+
+    registerPluginCommand(
+      api,
+      "linkclaw-inspect",
+      "Inspect one LinkClaw identity URL and summarize verification and import readiness.",
+      async (args) => runInspectCommand(loadConfig(api), args, pluginRoot),
+    );
+
+    registerPluginCommand(
+      api,
+      "linkclaw-discover",
+      "List runtime discovery candidates and reachability hints for potential peers.",
+      async (args) => runDiscoverCommand(loadConfig(api), args, pluginRoot),
     );
 
     registerPluginCommand(
