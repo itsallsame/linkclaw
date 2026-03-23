@@ -165,6 +165,30 @@ func TestRunInitNonInteractiveAutoGeneratesCanonicalID(t *testing.T) {
 	}
 }
 
+func TestRunInitTextOutputUsesProductMessagingLanguage(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "linkclaw-home")
+	t.Setenv(card.EnvRelayURL, "http://relay.example:8788")
+
+	code, stdout, stderr := runForTest(
+		t,
+		[]string{"init", "--home", home, "--display-name", "Local Agent", "--non-interactive"},
+		"",
+	)
+	if code != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "messaging: runtime-managed") {
+		t.Fatalf("expected runtime-managed messaging label in init output, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "offline recovery endpoint: http://relay.example:8788") {
+		t.Fatalf("expected product-language recovery endpoint in init output, got %q", stdout)
+	}
+	lower := strings.ToLower(stdout)
+	if strings.Contains(lower, "relay:") || strings.Contains(lower, "linkclaw-relay") {
+		t.Fatalf("init output should not expose relay internals: %q", stdout)
+	}
+}
+
 func TestRunPublishJSON(t *testing.T) {
 	t.Parallel()
 

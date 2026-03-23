@@ -282,19 +282,23 @@ function describeMessagingReadiness(result: Record<string, unknown> | undefined)
   const relayUrl = readString(messaging.relay_url);
   const ready = typeof messaging.ready === "boolean" ? messaging.ready : undefined;
   if (transport) {
-    lines.push(`messaging: ${transport}${ready !== undefined ? ` | ready=${ready}` : ""}`);
+    lines.push(`messaging: ${humanMessagingTransportLabel(transport)}${ready !== undefined ? ` | ready=${ready}` : ""}`);
   }
   if (recipientId) {
     lines.push(`recipient id: ${recipientId}`);
   }
   if (relayUrl) {
-    lines.push(`relay url: ${relayUrl}`);
+    lines.push(`offline recovery endpoint: ${relayUrl}`);
   }
   return lines;
 }
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+function humanMessagingTransportLabel(_transport: string): string {
+  return "runtime-managed";
 }
 
 export async function runStatusCommand(
@@ -1244,7 +1248,7 @@ function formatMessageSend(value: unknown): string {
   if (status) {
     lines.push(`status: ${status}`);
     if (status === "failed") {
-      lines.push("delivery: failed before relay acceptance");
+      lines.push("delivery: failed before runtime handoff");
     }
   }
   if (transportStatus) {
@@ -1255,7 +1259,7 @@ function formatMessageSend(value: unknown): string {
   }
   lines.push("Next:");
   if (status === "failed") {
-    lines.push("- run /linkclaw-setup to verify your local identity and relay config");
+    lines.push("- run /linkclaw-setup to verify your local identity and messaging setup");
     lines.push("- confirm the contact was imported from a full identity card, not a partial profile");
   } else if (status === "delivered") {
     lines.push("- the recipient can open /linkclaw-thread <contact> to refresh the conversation");
@@ -1538,8 +1542,8 @@ function formatThread(value: unknown): string {
 function formatSync(value: unknown): string {
   const record = asObject(value);
   const synced = typeof record?.synced === "number" ? record.synced : 0;
-  const relayCalls = typeof record?.relay_calls === "number" ? record.relay_calls : 0;
-  const lines = ["LinkClaw sync completed", `synced: ${synced}`, `relay calls: ${relayCalls}`];
+  const recoveryChecks = typeof record?.relay_calls === "number" ? record.relay_calls : 0;
+  const lines = ["LinkClaw sync completed", `synced: ${synced}`, `recovery checks: ${recoveryChecks}`];
   lines.push("Next:");
   if (synced > 0) {
     lines.push("- run /linkclaw-inbox to read new messages");
@@ -1593,7 +1597,7 @@ function formatStatus(
       const attemptedAt = readString(item.attempted_at);
       const cursor = readString(item.cursor);
       const error = readString(item.error);
-      const parts = [`${routeType}`, outcome];
+      const parts = [humanRouteOutcomeLabel(routeType), outcome];
       if (attemptedAt) {
         parts.push(attemptedAt);
       }
@@ -1648,6 +1652,17 @@ function formatStatus(
   ];
 
   return lines.join("\n");
+}
+
+function humanRouteOutcomeLabel(routeType: string): string {
+  const normalized = routeType.trim().toLowerCase();
+  if (normalized.includes("store_forward") || normalized.includes("store-forward")) {
+    return "offline recovery";
+  }
+  if (normalized.includes("direct")) {
+    return "direct transport";
+  }
+  return "delivery path";
 }
 
 function parseOptionalHome(rawArgs: string, commandName: string): string | undefined {

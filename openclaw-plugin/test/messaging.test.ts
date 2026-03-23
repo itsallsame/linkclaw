@@ -34,7 +34,7 @@ test("extractUnknownSenders returns discovered conversations with unread message
 });
 
 test("formatBackgroundSyncNotice adds explicit guidance for unknown senders", () => {
-  const message = formatBackgroundSyncNotice("linkclaw sync completed\nsynced: 1\nrelay calls: 1", {
+  const message = formatBackgroundSyncNotice("linkclaw sync completed\nsynced: 1\nrecovery checks: 1", {
     conversations: [
       {
         contact_display_name: "Bob",

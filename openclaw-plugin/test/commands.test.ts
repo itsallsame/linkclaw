@@ -821,6 +821,8 @@ test("runMessageCommand and inbox/sync summarize messaging workflows", async () 
     );
     assert.equal(syncResult.type, "message");
     assert.match(syncResult.message, /LinkClaw sync completed/);
+    assert.match(syncResult.message, /recovery checks: \d+/);
+    assert.doesNotMatch(syncResult.message, /relay calls/i);
     assert.match(syncResult.message, /\/linkclaw-inbox/);
 
     const inboxResult = await runInboxCommand(
@@ -939,6 +941,7 @@ test("runStatusCommand reflects offline recovery state after sync", async () => 
     assert.match(statusResult.message, /runtime mode: host-managed/);
     assert.match(statusResult.message, /last recovery: .*recovered=1/);
     assert.match(statusResult.message, /recent route outcomes:/);
+    assert.doesNotMatch(statusResult.message, /store_forward/i);
   } finally {
     relayProc.kill();
   }
