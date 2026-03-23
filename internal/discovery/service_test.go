@@ -97,6 +97,64 @@ func TestQueryServiceFindFiltersByCapabilityAndRanksByPolicy(t *testing.T) {
 	}
 }
 
+func TestQueryServiceFindFiltersBySourceIncludingUnknown(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := openStoreDB(t)
+	defer db.Close()
+
+	now := time.Date(2026, 3, 23, 9, 5, 0, 0, time.UTC)
+	store := NewStoreWithDB(db, now)
+
+	mustUpsertDiscovery(t, ctx, store, Record{
+		CanonicalID:           "did:key:known",
+		PeerID:                "peer-known",
+		RouteCandidates:       []transport.RouteCandidate{{Type: transport.RouteTypeDirect, Label: "known", Priority: 100, Target: "libp2p://known"}},
+		TransportCapabilities: []string{"direct"},
+		DirectHints:           []string{"libp2p://known"},
+		Source:                "import",
+		Reachable:             true,
+		ResolvedAt:            now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+		FreshUntil:            now.Add(10 * time.Minute).Format(time.RFC3339Nano),
+	})
+	mustUpsertDiscovery(t, ctx, store, Record{
+		CanonicalID:           "did:key:unknown",
+		PeerID:                "peer-unknown",
+		RouteCandidates:       []transport.RouteCandidate{{Type: transport.RouteTypeStoreForward, Label: "unknown", Priority: 80, Target: "nostr://relay/unknown"}},
+		TransportCapabilities: []string{"store_forward"},
+		StoreForwardHints:     []string{"nostr://relay/unknown"},
+		Source:                "",
+		Reachable:             false,
+		ResolvedAt:            now.Add(-10 * time.Minute).Format(time.RFC3339Nano),
+		FreshUntil:            now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+	})
+
+	service := NewQueryServiceWithDB(db, now, nil)
+
+	unknownResult, err := service.Find(ctx, FindOptions{Source: "unknown"})
+	if err != nil {
+		t.Fatalf("Find(source=unknown) error = %v", err)
+	}
+	if got, want := len(unknownResult.Records), 1; got != want {
+		t.Fatalf("len(unknownResult.Records) = %d, want %d", got, want)
+	}
+	if got, want := unknownResult.Records[0].CanonicalID, "did:key:unknown"; got != want {
+		t.Fatalf("unknownResult.Records[0].CanonicalID = %q, want %q", got, want)
+	}
+
+	importResult, err := service.Find(ctx, FindOptions{Source: "import"})
+	if err != nil {
+		t.Fatalf("Find(source=import) error = %v", err)
+	}
+	if got, want := len(importResult.Records), 1; got != want {
+		t.Fatalf("len(importResult.Records) = %d, want %d", got, want)
+	}
+	if got, want := importResult.Records[0].CanonicalID, "did:key:known"; got != want {
+		t.Fatalf("importResult.Records[0].CanonicalID = %q, want %q", got, want)
+	}
+}
+
 func TestQueryServiceShowReturnsNotFound(t *testing.T) {
 	t.Parallel()
 

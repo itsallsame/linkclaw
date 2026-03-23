@@ -131,9 +131,10 @@ func (s *QueryService) Find(ctx context.Context, opts FindOptions) (FindResult, 
 
 	requiredCaps := normalizeRequestedCapabilities(opts.Capability, opts.Capabilities)
 	sourceFilter := normalizeSource(opts.Source)
+	hasSourceFilter := strings.TrimSpace(opts.Source) != ""
 	entries := make([]DiscoveryEntry, 0, len(records))
 	for _, record := range records {
-		if sourceFilter != "unknown" && strings.TrimSpace(opts.Source) != "" && normalizeSource(record.Source) != sourceFilter {
+		if hasSourceFilter && normalizeSource(record.Source) != sourceFilter {
 			continue
 		}
 		if len(requiredCaps) > 0 && !matchesCapabilities(record, requiredCaps) {
