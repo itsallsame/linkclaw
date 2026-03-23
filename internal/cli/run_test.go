@@ -14,10 +14,12 @@ import (
 
 	"github.com/xiewanpeng/claw-identity/internal/buildinfo"
 	"github.com/xiewanpeng/claw-identity/internal/card"
+	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
 	"github.com/xiewanpeng/claw-identity/internal/relayserver"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
 
 	_ "modernc.org/sqlite"
 )
@@ -950,6 +952,113 @@ func TestRunMessageRuntimeInspectDiscoveryConnectJSON(t *testing.T) {
 	}
 	if connectOut.Result.Trust.TrustLevel == "" {
 		t.Fatalf("connect trust level = empty, want non-empty")
+	}
+}
+
+func TestRunMessageConnectPeerRefreshUsesDiscoveryRefreshPath(t *testing.T) {
+	t.Parallel()
+
+	home, imported := setupImportedContact(t)
+	db := openDBForTest(t, home)
+	defer db.Close()
+
+	relayURL := "https://relay.refresh-cli.example"
+	if _, err := db.Exec(
+		`UPDATE contacts SET relay_url = ?, recipient_id = ?, direct_url = '', direct_token = '' WHERE contact_id = ?`,
+		relayURL,
+		"refresh-cli-peer",
+		imported.Result.ContactID,
+	); err != nil {
+		t.Fatalf("update contact relay for refresh test: %v", err)
+	}
+
+	canonicalID := imported.Result.Inspection.CanonicalID
+	staleNow := time.Now().UTC().Add(-2 * time.Hour)
+	discoveryStore := agentdiscovery.NewStoreWithDB(db, staleNow)
+	if err := discoveryStore.Upsert(context.Background(), agentdiscovery.Record{
+		CanonicalID: canonicalID,
+		PeerID:      "stale-peer",
+		Source:      "stale-cache",
+		Reachable:   false,
+		ResolvedAt:  staleNow.Format(time.RFC3339Nano),
+		FreshUntil:  staleNow.Add(-30 * time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("upsert stale discovery record: %v", err)
+	}
+
+	staleCode, staleStdout, staleStderr := runForTest(t, []string{
+		"message", "connect-peer",
+		"--home", home,
+		"--json",
+		imported.Result.ContactID,
+	}, "")
+	if staleCode != 0 {
+		t.Fatalf("stale connect-peer exit code = %d, stderr = %s, stdout = %s", staleCode, staleStderr, staleStdout)
+	}
+	var staleOut struct {
+		OK     bool                           `json:"ok"`
+		Result agentruntime.ConnectPeerResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(staleStdout), &staleOut); err != nil {
+		t.Fatalf("unmarshal stale connect output: %v", err)
+	}
+	if !staleOut.OK {
+		t.Fatalf("expected stale connect ok=true: %+v", staleOut)
+	}
+	if staleOut.Result.Connected {
+		t.Fatalf("stale connect connected = true, want false; result=%+v", staleOut.Result)
+	}
+	if got, want := staleOut.Result.Presence.Source, "stale-cache"; got != want {
+		t.Fatalf("stale presence source = %q, want %q", got, want)
+	}
+
+	freshCode, freshStdout, freshStderr := runForTest(t, []string{
+		"message", "connect-peer",
+		"--home", home,
+		"--json",
+		"--refresh",
+		imported.Result.ContactID,
+	}, "")
+	if freshCode != 0 {
+		t.Fatalf("refresh connect-peer exit code = %d, stderr = %s, stdout = %s", freshCode, freshStderr, freshStdout)
+	}
+	var freshOut struct {
+		OK     bool                           `json:"ok"`
+		Result agentruntime.ConnectPeerResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(freshStdout), &freshOut); err != nil {
+		t.Fatalf("unmarshal refresh connect output: %v", err)
+	}
+	if !freshOut.OK {
+		t.Fatalf("expected refresh connect ok=true: %+v", freshOut)
+	}
+	if !freshOut.Result.Connected {
+		t.Fatalf("refresh connect connected = false, want true; result=%+v", freshOut.Result)
+	}
+	if got, want := freshOut.Result.Transport, "store_forward_ready"; got != want {
+		t.Fatalf("refresh connect transport = %q, want %q", got, want)
+	}
+	if !freshOut.Result.Presence.ResolvedAt.After(staleOut.Result.Presence.ResolvedAt) {
+		t.Fatalf("refresh resolved_at = %s, stale resolved_at = %s; want refresh newer", freshOut.Result.Presence.ResolvedAt, staleOut.Result.Presence.ResolvedAt)
+	}
+
+	updatedStore := agentdiscovery.NewStoreWithDB(db, time.Now().UTC())
+	record, ok, err := updatedStore.Get(context.Background(), canonicalID)
+	if err != nil {
+		t.Fatalf("load refreshed discovery record: %v", err)
+	}
+	if !ok {
+		t.Fatalf("refreshed discovery record missing for %q", canonicalID)
+	}
+	foundStoreForward := false
+	for _, route := range record.RouteCandidates {
+		if route.Type == transport.RouteTypeStoreForward && route.Target == relayURL {
+			foundStoreForward = true
+			break
+		}
+	}
+	if !foundStoreForward {
+		t.Fatalf("refreshed routes = %#v, want store-forward route to %q", record.RouteCandidates, relayURL)
 	}
 }
 

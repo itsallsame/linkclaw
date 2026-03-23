@@ -52,6 +52,130 @@ func (s staticPlanner) RecordOutcome(ctx context.Context, outcome routing.RouteO
 	return s.record(ctx, outcome)
 }
 
+type connectPresenceProvider struct {
+	resolve func(context.Context, string) (agentdiscovery.PeerPresenceView, error)
+	refresh func(context.Context, string) (agentdiscovery.PeerPresenceView, error)
+}
+
+func (s connectPresenceProvider) ResolvePeer(ctx context.Context, canonicalID string) (agentdiscovery.PeerPresenceView, error) {
+	if s.resolve != nil {
+		return s.resolve(ctx, canonicalID)
+	}
+	if s.refresh != nil {
+		return s.refresh(ctx, canonicalID)
+	}
+	return agentdiscovery.PeerPresenceView{}, fmt.Errorf("connect presence resolver is not configured")
+}
+
+func (s connectPresenceProvider) RefreshPeer(ctx context.Context, canonicalID string) (agentdiscovery.PeerPresenceView, error) {
+	if s.refresh != nil {
+		return s.refresh(ctx, canonicalID)
+	}
+	return s.ResolvePeer(ctx, canonicalID)
+}
+
+func (s connectPresenceProvider) PublishSelf(context.Context) error { return nil }
+
+type queryBackedDiscoveryService struct {
+	query    *agentdiscovery.QueryService
+	fallback agentdiscovery.Service
+	now      func() time.Time
+}
+
+func (s queryBackedDiscoveryService) ResolvePeer(ctx context.Context, canonicalID string) (agentdiscovery.PeerPresenceView, error) {
+	if s.query != nil {
+		result, err := s.query.Show(ctx, agentdiscovery.ShowOptions{CanonicalID: canonicalID})
+		if err == nil {
+			return presenceViewFromDiscoveryEntry(result.Record, s.nowUTC()), nil
+		}
+		if !isDiscoveryRecordNotFound(err) {
+			return agentdiscovery.PeerPresenceView{}, err
+		}
+	}
+	if s.fallback != nil {
+		return s.fallback.ResolvePeer(ctx, canonicalID)
+	}
+	return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
+}
+
+func (s queryBackedDiscoveryService) RefreshPeer(ctx context.Context, canonicalID string) (agentdiscovery.PeerPresenceView, error) {
+	if s.query != nil {
+		result, err := s.query.Refresh(ctx, agentdiscovery.RefreshOptions{CanonicalID: canonicalID})
+		if err == nil {
+			return presenceViewFromDiscoveryEntry(result.Record, s.nowUTC()), nil
+		}
+		if !isDiscoveryRecordNotFound(err) || s.fallback == nil {
+			return agentdiscovery.PeerPresenceView{}, err
+		}
+	}
+	if s.fallback != nil {
+		return s.fallback.RefreshPeer(ctx, canonicalID)
+	}
+	return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
+}
+
+func (s queryBackedDiscoveryService) PublishSelf(ctx context.Context) error {
+	if s.fallback == nil {
+		return nil
+	}
+	return s.fallback.PublishSelf(ctx)
+}
+
+func (s queryBackedDiscoveryService) nowUTC() time.Time {
+	if s.now == nil {
+		return time.Now().UTC()
+	}
+	return s.now().UTC()
+}
+
+type presenceRoutesPlanner struct{}
+
+func (s presenceRoutesPlanner) PlanSend(_ context.Context, _ routing.ContactRuntimeView, presence agentdiscovery.PeerPresenceView) ([]transport.RouteCandidate, error) {
+	return routesFromPresenceView(presence), nil
+}
+
+func (s presenceRoutesPlanner) PlanRecover(context.Context, routing.ContactRuntimeView, agentdiscovery.PeerPresenceView) ([]transport.RouteCandidate, error) {
+	return nil, nil
+}
+
+func (s presenceRoutesPlanner) RecordOutcome(context.Context, routing.RouteOutcome) error {
+	return nil
+}
+
+func presenceViewFromDiscoveryEntry(entry agentdiscovery.DiscoveryEntry, fallbackNow time.Time) agentdiscovery.PeerPresenceView {
+	resolvedAt := parseTimestamp(entry.ResolvedAt)
+	if resolvedAt.IsZero() {
+		resolvedAt = fallbackNow.UTC()
+	}
+	freshUntil := parseTimestampOrFallback(entry.FreshUntil, resolvedAt.Add(5*time.Minute))
+	return agentdiscovery.PeerPresenceView{
+		CanonicalID:           strings.TrimSpace(entry.CanonicalID),
+		PeerID:                strings.TrimSpace(entry.PeerID),
+		Reachable:             entry.Reachable,
+		RouteCandidates:       append([]transport.RouteCandidate(nil), entry.RouteCandidates...),
+		TransportCapabilities: append([]string(nil), entry.TransportCapabilities...),
+		DirectHints:           append([]string(nil), entry.DirectHints...),
+		StoreForwardHints:     append([]string(nil), entry.StoreForwardHints...),
+		SignedPeerRecord:      strings.TrimSpace(entry.SignedPeerRecord),
+		Source:                strings.TrimSpace(entry.Source),
+		ResolvedAt:            resolvedAt,
+		FreshUntil:            freshUntil,
+		AnnouncedAt:           parseTimestamp(entry.AnnouncedAt),
+	}
+}
+
+func routesFromPresenceView(view agentdiscovery.PeerPresenceView) []transport.RouteCandidate {
+	return appendHintsToRoutes(view.RouteCandidates, view.DirectHints, view.StoreForwardHints)
+}
+
+func isDiscoveryRecordNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "discovery record") && strings.Contains(msg, "not found")
+}
+
 type legacyStoreForwardBackend struct {
 	service     *Service
 	home        string
@@ -250,8 +374,12 @@ func buildDiscoveryConnectRuntimeBoundary(selfProfile selfMessagingProfile, reco
 }
 
 func discoveryRoutes(record agentdiscovery.Record) []transport.RouteCandidate {
-	routes := append([]transport.RouteCandidate(nil), record.RouteCandidates...)
-	for _, hint := range record.DirectHints {
+	return appendHintsToRoutes(record.RouteCandidates, record.DirectHints, record.StoreForwardHints)
+}
+
+func appendHintsToRoutes(base []transport.RouteCandidate, directHints []string, storeForwardHints []string) []transport.RouteCandidate {
+	routes := append([]transport.RouteCandidate(nil), base...)
+	for _, hint := range directHints {
 		target := strings.TrimSpace(hint)
 		if target == "" || hasRoute(routes, transport.RouteTypeDirect, target) {
 			continue
@@ -263,7 +391,7 @@ func discoveryRoutes(record agentdiscovery.Record) []transport.RouteCandidate {
 			Target:   target,
 		})
 	}
-	for _, hint := range record.StoreForwardHints {
+	for _, hint := range storeForwardHints {
 		target := strings.TrimSpace(hint)
 		if target == "" || hasRoute(routes, transport.RouteTypeStoreForward, target) {
 			continue

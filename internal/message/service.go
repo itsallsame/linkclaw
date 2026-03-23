@@ -503,31 +503,77 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 	}
 
 	var (
-		view            agentdiscovery.PeerPresenceView
 		extraTransports []transport.Transport
-		routes          []transport.RouteCandidate
 		peer            routing.ContactRuntimeView
+		presenceSvc     agentdiscovery.Service
 	)
 	switch {
 	case target.contact != nil:
-		view, extraTransports, routes = buildSendRuntimeBoundary(selfProfile, *target.contact, now)
-		peer = runtimeContactView(*target.contact)
+		contact := *target.contact
+		_, extraTransports, _ = buildSendRuntimeBoundary(selfProfile, contact, now)
+		peer = runtimeContactView(contact)
+		presenceSvc = connectPresenceProvider{
+			resolve: func(context.Context, string) (agentdiscovery.PeerPresenceView, error) {
+				view, _, _ := buildSendRuntimeBoundary(selfProfile, contact, now)
+				return view, nil
+			},
+			refresh: func(context.Context, string) (agentdiscovery.PeerPresenceView, error) {
+				view, _, _ := buildSendRuntimeBoundary(selfProfile, contact, now)
+				return view, nil
+			},
+		}
 	case target.discovery != nil:
-		view, extraTransports, routes = buildDiscoveryConnectRuntimeBoundary(selfProfile, *target.discovery, now)
-		peer = runtimePeerViewFromDiscovery(*target.discovery)
+		record := *target.discovery
+		_, extraTransports, _ = buildDiscoveryConnectRuntimeBoundary(selfProfile, record, now)
+		peer = runtimePeerViewFromDiscovery(record)
+		presenceSvc = connectPresenceProvider{
+			resolve: func(ctx context.Context, canonicalID string) (agentdiscovery.PeerPresenceView, error) {
+				lookup, ok, err := resolveDiscoveryLookup(ctx, db, canonicalID, now)
+				if err != nil {
+					return agentdiscovery.PeerPresenceView{}, err
+				}
+				if !ok {
+					return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
+				}
+				view, _, _ := buildDiscoveryConnectRuntimeBoundary(selfProfile, lookup, now)
+				return view, nil
+			},
+			refresh: func(ctx context.Context, canonicalID string) (agentdiscovery.PeerPresenceView, error) {
+				lookup, ok, err := resolveDiscoveryLookup(ctx, db, canonicalID, now)
+				if err != nil {
+					return agentdiscovery.PeerPresenceView{}, err
+				}
+				if !ok {
+					return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
+				}
+				view, _, _ := buildDiscoveryConnectRuntimeBoundary(selfProfile, lookup, now)
+				refreshedAt := now.UTC()
+				view.ResolvedAt = refreshedAt
+				if view.FreshUntil.Before(refreshedAt) {
+					view.FreshUntil = refreshedAt.Add(5 * time.Minute)
+				}
+				view.Source = "refresh-peer"
+				return view, nil
+			},
+		}
 	default:
 		return agentruntime.ConnectPeerResult{}, fmt.Errorf("peer %q not found in contacts or discovery", peerRef)
 	}
 
-	discoverySvc := staticDiscoveryService{view: view}
+	querySvc := agentdiscovery.NewQueryServiceWithClock(db, presenceSvc, func() time.Time { return now })
+	discoverySvc := queryBackedDiscoveryService{
+		query:    querySvc,
+		fallback: presenceSvc,
+		now:      func() time.Time { return now },
+	}
 	runtimeSvc := agentruntime.NewService(
-		staticPlanner{sendRoutes: routes},
+		presenceRoutesPlanner{},
 		discoverySvc,
 		connectReadinessTransport{name: "store_forward_ready", routeType: transport.RouteTypeStoreForward},
 	)
 	runtimeSvc.Transports = append(extraTransports, runtimeSvc.Transports...)
 	runtimeSvc.Trust = trust.NewServiceWithDB(db, now)
-	runtimeSvc.DiscoveryQuery = agentdiscovery.NewQueryServiceWithDB(db, now, discoverySvc)
+	runtimeSvc.DiscoveryQuery = querySvc
 	runtimeSvc.Now = func() time.Time { return now }
 
 	return runtimeSvc.ConnectPeer(ctx, agentruntime.ConnectPeerRequest{

@@ -25,6 +25,42 @@ func (s stubDiscovery) RefreshPeer(context.Context, string) (discovery.PeerPrese
 }
 func (s stubDiscovery) PublishSelf(context.Context) error { return nil }
 
+type refreshAwareDiscovery struct {
+	resolveView  discovery.PeerPresenceView
+	refreshView  discovery.PeerPresenceView
+	resolveCalls int
+	refreshCalls int
+}
+
+func (s *refreshAwareDiscovery) ResolvePeer(context.Context, string) (discovery.PeerPresenceView, error) {
+	s.resolveCalls++
+	return s.resolveView, nil
+}
+
+func (s *refreshAwareDiscovery) RefreshPeer(context.Context, string) (discovery.PeerPresenceView, error) {
+	s.refreshCalls++
+	return s.refreshView, nil
+}
+
+func (s *refreshAwareDiscovery) PublishSelf(context.Context) error { return nil }
+
+type presenceDrivenPlanner struct {
+	lastPresence discovery.PeerPresenceView
+}
+
+func (s *presenceDrivenPlanner) PlanSend(_ context.Context, _ routing.ContactRuntimeView, presence discovery.PeerPresenceView) ([]transport.RouteCandidate, error) {
+	s.lastPresence = presence
+	return append([]transport.RouteCandidate(nil), s.lastPresence.RouteCandidates...), nil
+}
+
+func (s *presenceDrivenPlanner) PlanRecover(context.Context, routing.ContactRuntimeView, discovery.PeerPresenceView) ([]transport.RouteCandidate, error) {
+	return nil, nil
+}
+
+func (s *presenceDrivenPlanner) RecordOutcome(context.Context, routing.RouteOutcome) error {
+	return nil
+}
+
 type stubPlanner struct {
 	sendRoutes    []transport.RouteCandidate
 	recoverRoutes []transport.RouteCandidate
@@ -529,6 +565,89 @@ func TestServiceListDiscoveryDelegatesToQueryService(t *testing.T) {
 	}
 	if got, want := query.lastFind.Source, "import"; got != want {
 		t.Fatalf("delegated source = %q, want %q", got, want)
+	}
+}
+
+func TestServiceConnectPeerRefreshUsesRefreshedPresenceForRoutePlanning(t *testing.T) {
+	planner := &presenceDrivenPlanner{}
+	discoverySvc := &refreshAwareDiscovery{
+		resolveView: discovery.PeerPresenceView{
+			CanonicalID: "did:key:test",
+			ResolvedAt:  time.Now().Add(-2 * time.Hour),
+			FreshUntil:  time.Now().Add(-time.Hour),
+			Source:      "stale-cache",
+		},
+		refreshView: discovery.PeerPresenceView{
+			CanonicalID: "did:key:test",
+			ResolvedAt:  time.Now(),
+			FreshUntil:  time.Now().Add(5 * time.Minute),
+			Source:      "refresh",
+			RouteCandidates: []transport.RouteCandidate{
+				{Type: transport.RouteTypeStoreForward, Label: "relay", Priority: 1, Target: "https://relay.example"},
+			},
+		},
+	}
+	service := NewService(
+		planner,
+		discoverySvc,
+		&stubTransport{name: "store_forward_ready", routeType: transport.RouteTypeStoreForward},
+	)
+	service.Trust = stubTrustInspector{
+		found: true,
+		profile: trust.TrustProfile{
+			CanonicalID: "did:key:test",
+			TrustLevel:  "seen",
+			Summary: trust.TrustSummary{
+				CanonicalID: "did:key:test",
+				TrustLevel:  "seen",
+			},
+		},
+	}
+
+	staleResult, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
+		Peer: routing.ContactRuntimeView{
+			CanonicalID: "did:key:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ConnectPeer() stale error = %v", err)
+	}
+	if staleResult.Connected {
+		t.Fatalf("ConnectPeer() stale connected = true, want false")
+	}
+	if got, want := discoverySvc.resolveCalls, 1; got != want {
+		t.Fatalf("ResolvePeer() calls = %d, want %d", got, want)
+	}
+	if got, want := discoverySvc.refreshCalls, 0; got != want {
+		t.Fatalf("RefreshPeer() calls = %d, want %d", got, want)
+	}
+	if planner.lastPresence.Source != "stale-cache" {
+		t.Fatalf("planner stale presence source = %q, want stale-cache", planner.lastPresence.Source)
+	}
+
+	freshResult, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
+		Peer: routing.ContactRuntimeView{
+			CanonicalID: "did:key:test",
+		},
+		Refresh: true,
+	})
+	if err != nil {
+		t.Fatalf("ConnectPeer() refresh error = %v", err)
+	}
+	if !freshResult.Connected {
+		t.Fatalf("ConnectPeer() refresh connected = false, want true; result=%#v", freshResult)
+	}
+	if got, want := freshResult.Transport, "store_forward_ready"; got != want {
+		t.Fatalf("ConnectPeer() refresh transport = %q, want %q", got, want)
+	}
+	if got, want := discoverySvc.refreshCalls, 1; got != want {
+		t.Fatalf("RefreshPeer() calls = %d, want %d", got, want)
+	}
+	if planner.lastPresence.Source != "refresh" {
+		t.Fatalf("planner refresh presence source = %q, want refresh", planner.lastPresence.Source)
+	}
+	if got := len(planner.lastPresence.RouteCandidates); got != 1 {
+		t.Fatalf("planner refresh routes = %d, want 1", got)
 	}
 }
 

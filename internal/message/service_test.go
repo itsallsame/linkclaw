@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/card"
+	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/relayserver"
@@ -400,6 +401,134 @@ func TestConnectPeerSupportsDiscoveryRecordWithoutContact(t *testing.T) {
 	}
 	if got, want := result.Transport, "store_forward_ready"; got != want {
 		t.Fatalf("connect transport = %q, want %q", got, want)
+	}
+}
+
+func TestConnectPeerRefreshDistinguishesStaleAndFreshPresence(t *testing.T) {
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	selfHome := filepath.Join(t.TempDir(), "self-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        selfHome,
+		CanonicalID: "did:key:z6MkRefreshSelf",
+		DisplayName: "Refresh Self",
+	}); err != nil {
+		t.Fatalf("init self home: %v", err)
+	}
+
+	peerHome := filepath.Join(t.TempDir(), "peer-home")
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        peerHome,
+		CanonicalID: "did:key:z6MkRefreshPeer",
+		DisplayName: "Refresh Peer",
+	}); err != nil {
+		t.Fatalf("init peer home: %v", err)
+	}
+	exportedPeer, err := cardService.Export(context.Background(), card.Options{Home: peerHome})
+	if err != nil {
+		t.Fatalf("export peer card: %v", err)
+	}
+	peerCardJSON, err := json.Marshal(exportedPeer.Card)
+	if err != nil {
+		t.Fatalf("marshal peer card: %v", err)
+	}
+	imported, err := cardService.Import(context.Background(), card.ImportOptions{
+		Home:  selfHome,
+		Input: string(peerCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import peer card: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(selfHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	relayURL := "https://relay.refresh.example"
+	if _, err := db.Exec(
+		`UPDATE contacts SET relay_url = ?, recipient_id = ?, direct_url = '', direct_token = '' WHERE contact_id = ?`,
+		relayURL,
+		"refresh-peer-recipient",
+		imported.ContactID,
+	); err != nil {
+		t.Fatalf("update contact relay hint: %v", err)
+	}
+
+	staleNow := time.Now().UTC().Add(-2 * time.Hour)
+	discoveryStore := agentdiscovery.NewStoreWithDB(db, staleNow)
+	if err := discoveryStore.Upsert(context.Background(), agentdiscovery.Record{
+		CanonicalID: imported.Card.ID,
+		PeerID:      "stale-peer",
+		Source:      "stale-cache",
+		Reachable:   false,
+		ResolvedAt:  staleNow.Format(time.RFC3339Nano),
+		FreshUntil:  staleNow.Add(-30 * time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("upsert stale discovery record: %v", err)
+	}
+
+	service := NewService()
+	staleResult, err := service.ConnectPeer(context.Background(), ConnectPeerOptions{
+		Home:    selfHome,
+		PeerRef: imported.ContactID,
+	})
+	if err != nil {
+		t.Fatalf("connect stale presence: %v", err)
+	}
+	if staleResult.Connected {
+		t.Fatalf("stale connect connected = true, want false; result=%+v", staleResult)
+	}
+	if got := len(staleResult.Routes); got != 0 {
+		t.Fatalf("stale connect routes = %d, want 0", got)
+	}
+	if got, want := staleResult.Presence.Source, "stale-cache"; got != want {
+		t.Fatalf("stale connect source = %q, want %q", got, want)
+	}
+
+	freshResult, err := service.ConnectPeer(context.Background(), ConnectPeerOptions{
+		Home:    selfHome,
+		PeerRef: imported.ContactID,
+		Refresh: true,
+	})
+	if err != nil {
+		t.Fatalf("connect refresh presence: %v", err)
+	}
+	if !freshResult.Connected {
+		t.Fatalf("refresh connect connected = false, want true; result=%+v", freshResult)
+	}
+	if got, want := freshResult.Transport, "store_forward_ready"; got != want {
+		t.Fatalf("refresh connect transport = %q, want %q", got, want)
+	}
+	if !freshResult.Presence.ResolvedAt.After(staleResult.Presence.ResolvedAt) {
+		t.Fatalf("refresh resolved_at = %s, stale resolved_at = %s; want refresh newer", freshResult.Presence.ResolvedAt, staleResult.Presence.ResolvedAt)
+	}
+	foundStoreForward := false
+	for _, route := range freshResult.Routes {
+		if route.Type == transport.RouteTypeStoreForward && route.Target == relayURL {
+			foundStoreForward = true
+			break
+		}
+	}
+	if !foundStoreForward {
+		t.Fatalf("refresh routes = %#v, want store-forward route to %q", freshResult.Routes, relayURL)
+	}
+
+	updatedStore := agentdiscovery.NewStoreWithDB(db, time.Now().UTC())
+	record, ok, err := updatedStore.Get(context.Background(), imported.Card.ID)
+	if err != nil {
+		t.Fatalf("load refreshed discovery record: %v", err)
+	}
+	if !ok {
+		t.Fatalf("refreshed discovery record missing for %q", imported.Card.ID)
+	}
+	if record.Source == "stale-cache" {
+		t.Fatalf("refreshed discovery source = %q, want non-stale source", record.Source)
+	}
+	if !hasStoreForwardRoute(record.RouteCandidates, relayURL) {
+		t.Fatalf("refreshed discovery routes = %#v, want store-forward route to %q", record.RouteCandidates, relayURL)
 	}
 }
 
@@ -801,4 +930,13 @@ func requireRouteAttemptWithNonEmptyCursor(t *testing.T, attempts []runtimeRoute
 	}
 	t.Fatalf("route attempt (%s,%s,<non-empty cursor>) not found, got %#v", routeType, outcome, attempts)
 	return ""
+}
+
+func hasStoreForwardRoute(routes []transport.RouteCandidate, target string) bool {
+	for _, route := range routes {
+		if route.Type == transport.RouteTypeStoreForward && route.Target == target {
+			return true
+		}
+	}
+	return false
 }
