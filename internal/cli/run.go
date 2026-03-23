@@ -756,7 +756,7 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		if *jsonOutput {
 			return writeMessageJSON(errOut, out, "send", result)
 		}
-		headline := "Message queued for relay delivery."
+		headline := "Message queued for delivery."
 		switch result.Message.TransportStatus {
 		case message.TransportStatusDirect:
 			headline = "Message delivered via direct transport."
@@ -927,7 +927,7 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 		fmt.Fprintln(out, "LinkClaw sync completed")
 		fmt.Fprintf(out, "synced: %d\n", result.Synced)
-		fmt.Fprintf(out, "relay calls: %d\n", result.RelayCalls)
+		fmt.Fprintf(out, "recovery checks: %d\n", result.RelayCalls)
 		fmt.Fprintln(out, "Next:")
 		if result.Synced > 0 {
 			fmt.Fprintln(out, "- run `linkclaw message inbox` to read new messages")
@@ -976,25 +976,18 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintf(out, "pending outbox: %d\n", result.PendingOutbox)
 		fmt.Fprintf(out, "message transport status: direct=%d deferred=%d recovered=%d\n", result.MessageStatusDirect, result.MessageStatusDeferred, result.MessageStatusRecovered)
 		fmt.Fprintf(out, "presence cache: %d\n", result.PresenceEntries)
-		fmt.Fprintf(out, "store-forward routes: %d\n", result.StoreForwardRoutes)
+		fmt.Fprintf(out, "offline recovery paths: %d\n", result.StoreForwardRoutes)
 		fmt.Fprintf(out, "direct enabled: %t\n", result.DirectEnabled)
 		if result.LastStoreForwardSyncAt != "" {
-			fmt.Fprintf(out, "last store-forward sync: %s | result=%s | recovered=%d\n", result.LastStoreForwardSyncAt, result.LastStoreForwardResult, result.LastRecoveredCount)
+			fmt.Fprintf(out, "last recovery check: %s | result=%s | recovered=%d\n", result.LastStoreForwardSyncAt, result.LastStoreForwardResult, result.LastRecoveredCount)
 		}
 		if result.LastStoreForwardError != "" {
-			fmt.Fprintf(out, "last store-forward error: %s\n", result.LastStoreForwardError)
+			fmt.Fprintf(out, "last recovery issue: %s\n", result.LastStoreForwardError)
 		}
 		if len(result.RecentRouteOutcomes) > 0 {
-			fmt.Fprintln(out, "recent route outcomes:")
+			fmt.Fprintln(out, "recent delivery outcomes:")
 			for _, item := range result.RecentRouteOutcomes {
-				fmt.Fprintf(out, "- %s | %s | %s", item.RouteType, item.Outcome, item.AttemptedAt)
-				if strings.TrimSpace(item.Cursor) != "" {
-					fmt.Fprintf(out, " | cursor=%s", item.Cursor)
-				}
-				if strings.TrimSpace(item.Error) != "" {
-					fmt.Fprintf(out, " | error=%s", item.Error)
-				}
-				fmt.Fprintln(out)
+				fmt.Fprintf(out, "- %s | %s | %s\n", humanRouteOutcomeLabel(item.RouteType), item.Outcome, item.AttemptedAt)
 			}
 		}
 		fmt.Fprintln(out, "Next:")
@@ -1540,6 +1533,17 @@ func splitCSV(raw string) []string {
 		return nil
 	}
 	return strings.Split(raw, ",")
+}
+
+func humanRouteOutcomeLabel(routeType string) string {
+	switch strings.ToLower(strings.TrimSpace(routeType)) {
+	case "direct":
+		return "direct transport"
+	case "store_forward":
+		return "offline recovery"
+	default:
+		return "delivery path"
+	}
 }
 
 func printKnownContactSummary(out io.Writer, contact known.ContactSummary) {

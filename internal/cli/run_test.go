@@ -788,6 +788,47 @@ func TestRunMessageStatusJSON(t *testing.T) {
 	}
 }
 
+func TestRunMessageStatusAndSyncHumanOutputUsesProductTerms(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "linkclaw-status-human-home")
+	initCode, _, initErr := runForTest(t, []string{
+		"init",
+		"--home", home,
+		"--canonical-id", "did:key:z6MkMessageStatusHuman",
+		"--display-name", "MessageStatusHuman",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if initCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", initCode, initErr)
+	}
+
+	statusCode, statusOut, statusErr := runForTest(t, []string{"message", "status", "--home", home}, "")
+	if statusCode != 0 {
+		t.Fatalf("message status exit code = %d, stderr = %s, stdout = %s", statusCode, statusErr, statusOut)
+	}
+	if !strings.Contains(statusOut, "offline recovery paths: 0") {
+		t.Fatalf("expected product-language recovery summary in status output, got %q", statusOut)
+	}
+	lowerStatus := strings.ToLower(statusOut)
+	if strings.Contains(lowerStatus, "store-forward") {
+		t.Fatalf("status output should not expose store-forward internals: %q", statusOut)
+	}
+	if strings.Contains(lowerStatus, "relay calls") {
+		t.Fatalf("status output should not expose relay call internals: %q", statusOut)
+	}
+
+	syncCode, syncOut, syncErr := runForTest(t, []string{"message", "sync", "--home", home}, "")
+	if syncCode != 0 {
+		t.Fatalf("message sync exit code = %d, stderr = %s, stdout = %s", syncCode, syncErr, syncOut)
+	}
+	if !strings.Contains(syncOut, "recovery checks: 0") {
+		t.Fatalf("expected product-language recovery checks in sync output, got %q", syncOut)
+	}
+	if strings.Contains(strings.ToLower(syncOut), "relay calls") {
+		t.Fatalf("sync output should not expose relay call internals: %q", syncOut)
+	}
+}
+
 func TestRunMessageRuntimeInspectDiscoveryConnectJSON(t *testing.T) {
 	home, imported := setupImportedContact(t)
 
