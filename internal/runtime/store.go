@@ -745,12 +745,16 @@ func (s *Store) LoadStatusSummary(ctx context.Context) (StatusSummary, error) {
 	`).Scan(&summary.PendingOutbox); err != nil {
 		return StatusSummary{}, fmt.Errorf("count runtime pending outbox: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_presence_cache`).Scan(&summary.PresenceEntries); err != nil {
-		return StatusSummary{}, fmt.Errorf("count runtime presence cache: %w", err)
+	peerPresenceEntries, err := s.countPeerPresence(ctx, false)
+	if err != nil {
+		return StatusSummary{}, fmt.Errorf("count runtime peer presence cache: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_presence_cache WHERE reachable = 1`).Scan(&summary.ReachablePresence); err != nil {
-		return StatusSummary{}, fmt.Errorf("count reachable runtime presence cache: %w", err)
+	summary.PresenceEntries = peerPresenceEntries
+	reachablePeerPresence, err := s.countPeerPresence(ctx, true)
+	if err != nil {
+		return StatusSummary{}, fmt.Errorf("count reachable runtime peer presence cache: %w", err)
 	}
+	summary.ReachablePresence = reachablePeerPresence
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_store_forward_state`).Scan(&summary.StoreForwardRoutes); err != nil {
 		return StatusSummary{}, fmt.Errorf("count runtime store-forward routes: %w", err)
 	}
@@ -786,6 +790,37 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func (s *Store) countPeerPresence(ctx context.Context, reachableOnly bool) (int, error) {
+	var query string
+	if reachableOnly {
+		query = `
+			SELECT COUNT(*)
+			FROM runtime_presence_cache
+			WHERE reachable = 1
+			  AND canonical_id NOT IN (
+			    SELECT canonical_id
+			    FROM self_identities
+			    WHERE TRIM(canonical_id) <> ''
+			  )
+		`
+	} else {
+		query = `
+			SELECT COUNT(*)
+			FROM runtime_presence_cache
+			WHERE canonical_id NOT IN (
+			  SELECT canonical_id
+			  FROM self_identities
+			  WHERE TRIM(canonical_id) <> ''
+			)
+		`
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func boolToOutcome(success bool) string {

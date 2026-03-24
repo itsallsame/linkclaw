@@ -64,6 +64,12 @@ Suggested result shape:
 - `last_sync_at`
 - `presence_summary`
 
+Readiness contract:
+
+- `identity_ready`: self identity exists in runtime state (`self_id` is available).
+- `transport_ready`: identity is ready and runtime transport capabilities are registered.
+- `discovery_ready`: runtime has peer discovery/presence facts (peer presence cache entries), not just transport feature toggles.
+
 ### 3. ExportCard
 
 Purpose:

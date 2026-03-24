@@ -571,6 +571,78 @@ func TestStatusSummary(t *testing.T) {
 	if len(result.TransportCapabilities) == 0 {
 		t.Fatalf("expected transport capabilities, got none")
 	}
+	if result.DiscoveryReady {
+		t.Fatalf("discovery ready = %t, want false without peer presence", result.DiscoveryReady)
+	}
+}
+
+func TestStatusSummaryDiscoveryReadyRequiresPeerPresence(t *testing.T) {
+	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relay.Shutdown(context.Background())
+
+	t.Setenv(card.EnvRelayURL, relayResult.URL)
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
+
+	home := filepath.Join(t.TempDir(), "status-discovery-ready-home")
+	initService := initflow.NewService()
+	if _, err := initService.Init(context.Background(), initflow.Options{
+		Home:        home,
+		CanonicalID: "did:key:z6MkStatusDiscoveryReady",
+		DisplayName: "Status Discovery Ready",
+	}); err != nil {
+		t.Fatalf("init home: %v", err)
+	}
+
+	service := NewService()
+	initial, err := service.Status(context.Background(), ListOptions{Home: home})
+	if err != nil {
+		t.Fatalf("initial status: %v", err)
+	}
+	if !initial.IdentityReady || !initial.TransportReady {
+		t.Fatalf("expected identity/transport ready, got identity=%t transport=%t", initial.IdentityReady, initial.TransportReady)
+	}
+	if initial.DiscoveryReady {
+		t.Fatalf("initial discovery ready = %t, want false without peer discovery", initial.DiscoveryReady)
+	}
+	if initial.PresenceEntries != 0 || initial.ReachablePresence != 0 {
+		t.Fatalf("initial peer presence counters = (%d,%d), want (0,0)", initial.PresenceEntries, initial.ReachablePresence)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`
+		INSERT INTO runtime_presence_cache (
+			canonical_id, peer_id, source, reachable, fresh_until, resolved_at
+		) VALUES (?, ?, ?, ?, ?, ?)
+	`,
+		"did:key:z6MkStatusPeerPresence",
+		"peer-status-ready",
+		"refresh",
+		1,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert peer presence: %v", err)
+	}
+
+	withPeerPresence, err := service.Status(context.Background(), ListOptions{Home: home})
+	if err != nil {
+		t.Fatalf("status with peer presence: %v", err)
+	}
+	if !withPeerPresence.DiscoveryReady {
+		t.Fatalf("discovery ready = %t, want true with peer presence", withPeerPresence.DiscoveryReady)
+	}
+	if withPeerPresence.PresenceEntries < 1 || withPeerPresence.ReachablePresence < 1 {
+		t.Fatalf("peer presence counters = (%d,%d), want >=1", withPeerPresence.PresenceEntries, withPeerPresence.ReachablePresence)
+	}
 }
 
 func TestStatusSummaryTracksRecoveryState(t *testing.T) {

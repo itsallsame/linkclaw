@@ -626,7 +626,7 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 	}
 	identityReady := strings.TrimSpace(summary.SelfID) != ""
 	transportReady := identityReady && len(summary.TransportCapabilities) > 0
-	discoveryReady := summary.PresenceEntries > 0 || summary.ReachablePresence > 0 || directTransportEnabled()
+	discoveryReady := summary.PresenceEntries > 0 || summary.ReachablePresence > 0
 
 	return StatusResult{
 		Home:                   home,

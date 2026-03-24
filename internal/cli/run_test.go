@@ -778,12 +778,13 @@ func TestRunMessageStatusJSON(t *testing.T) {
 	if statusCode != 0 {
 		t.Fatalf("message status exit code = %d, stderr = %s, stdout = %s", statusCode, statusErr, statusOut)
 	}
-	var out struct {
+	type statusOutput struct {
 		OK     bool `json:"ok"`
 		Result struct {
 			DisplayName        string `json:"display_name"`
 			IdentityReady      bool   `json:"identity_ready"`
 			TransportReady     bool   `json:"transport_ready"`
+			DiscoveryReady     bool   `json:"discovery_ready"`
 			Contacts           int    `json:"contacts"`
 			Conversations      int    `json:"conversations"`
 			PendingOutbox      int    `json:"pending_outbox"`
@@ -791,6 +792,7 @@ func TestRunMessageStatusJSON(t *testing.T) {
 			StoreForwardRoutes int    `json:"store_forward_routes"`
 		} `json:"result"`
 	}
+	var out statusOutput
 	if err := json.Unmarshal([]byte(statusOut), &out); err != nil {
 		t.Fatalf("unmarshal status output: %v", err)
 	}
@@ -803,6 +805,9 @@ func TestRunMessageStatusJSON(t *testing.T) {
 	if !out.Result.IdentityReady || !out.Result.TransportReady {
 		t.Fatalf("expected identity/transport ready, got identity=%t transport=%t", out.Result.IdentityReady, out.Result.TransportReady)
 	}
+	if out.Result.DiscoveryReady {
+		t.Fatalf("discovery ready = %t, want false without peer discovery", out.Result.DiscoveryReady)
+	}
 	if out.Result.Contacts != 0 || out.Result.Conversations != 0 || out.Result.PendingOutbox != 0 {
 		t.Fatalf("unexpected status counts: %+v", out.Result)
 	}
@@ -811,6 +816,42 @@ func TestRunMessageStatusJSON(t *testing.T) {
 	}
 	if out.Result.StoreForwardRoutes != 0 {
 		t.Fatalf("store forward routes = %d, want 0", out.Result.StoreForwardRoutes)
+	}
+
+	store, _, err := agentruntime.OpenStore(context.Background(), home, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("open runtime store: %v", err)
+	}
+	if err := store.UpsertPresence(context.Background(), agentruntime.PresenceRecord{
+		CanonicalID: "did:key:z6MkMessageStatusPeer",
+		PeerID:      "peer-message-status",
+		Source:      "refresh",
+		Reachable:   true,
+		ResolvedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		FreshUntil:  time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339Nano),
+	}); err != nil {
+		store.Close()
+		t.Fatalf("upsert runtime peer presence: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close runtime store: %v", err)
+	}
+
+	statusWithDiscoveryCode, statusWithDiscoveryOut, statusWithDiscoveryErr := runForTest(t, []string{"message", "status", "--home", home, "--json"}, "")
+	if statusWithDiscoveryCode != 0 {
+		t.Fatalf(
+			"message status with discovery exit code = %d, stderr = %s, stdout = %s",
+			statusWithDiscoveryCode,
+			statusWithDiscoveryErr,
+			statusWithDiscoveryOut,
+		)
+	}
+	var withDiscovery statusOutput
+	if err := json.Unmarshal([]byte(statusWithDiscoveryOut), &withDiscovery); err != nil {
+		t.Fatalf("unmarshal status output with discovery: %v", err)
+	}
+	if !withDiscovery.Result.DiscoveryReady {
+		t.Fatalf("discovery ready = %t, want true with peer discovery", withDiscovery.Result.DiscoveryReady)
 	}
 }
 

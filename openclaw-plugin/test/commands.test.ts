@@ -758,6 +758,7 @@ test("runStatusCommand summarizes health and local state after initialization", 
     assert.match(result.message, /messaging: ready/);
     assert.match(result.message, /identity ready: yes/);
     assert.match(result.message, /transport ready: yes/);
+    assert.match(result.message, /discovery ready: no/);
     assert.match(result.message, /queued outgoing: 0/);
     assert.match(result.message, /message status: direct=0 deferred=0 recovered=0/);
     assert.match(result.message, /offline recovery: not configured/);
@@ -991,6 +992,7 @@ test("runStatusCommand reflects offline recovery state after sync", async () => 
     assert.match(statusResult.message, /unread: 1/);
     assert.match(statusResult.message, /message status: direct=0 deferred=0 recovered=1/);
     assert.match(statusResult.message, /offline recovery: ready \(1 path\)/);
+    assert.match(statusResult.message, /discovery ready: no/);
     assert.match(statusResult.message, /runtime mode: host-managed/);
     assert.match(statusResult.message, /last recovery: .*recovered=1/);
     assert.match(statusResult.message, /recent route outcomes:/);
