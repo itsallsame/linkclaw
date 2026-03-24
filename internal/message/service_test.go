@@ -402,6 +402,69 @@ func TestConnectPeerSupportsDiscoveryRecordWithoutContact(t *testing.T) {
 	if got, want := result.Transport, "store_forward_ready"; got != want {
 		t.Fatalf("connect transport = %q, want %q", got, want)
 	}
+	if !result.Promotion.ContactCreated {
+		t.Fatalf("connect promotion contact_created = false, want true; promotion=%+v", result.Promotion)
+	}
+	if result.Promotion.ContactID == "" {
+		t.Fatalf("connect promotion contact_id is empty")
+	}
+	if !result.Promotion.TrustLinked {
+		t.Fatalf("connect promotion trust_linked = false, want true")
+	}
+	if result.Promotion.NoteWritten {
+		t.Fatalf("connect promotion note_written = true, want false")
+	}
+	if result.Promotion.PinWritten {
+		t.Fatalf("connect promotion pin_written = true, want false")
+	}
+	if result.Promotion.EventID == "" {
+		t.Fatalf("connect promotion event_id is empty")
+	}
+
+	var promotedContactID string
+	var promotedStatus string
+	if err := db.QueryRow(
+		`SELECT contact_id, status FROM contacts WHERE canonical_id = ?`,
+		peerCanonicalID,
+	).Scan(&promotedContactID, &promotedStatus); err != nil {
+		t.Fatalf("load promoted contact: %v", err)
+	}
+	if promotedContactID != result.Promotion.ContactID {
+		t.Fatalf("promoted contact id = %q, want %q", promotedContactID, result.Promotion.ContactID)
+	}
+	if promotedStatus == "" {
+		t.Fatalf("promoted contact status is empty")
+	}
+
+	var trustCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM trust_records WHERE contact_id = ?`, promotedContactID).Scan(&trustCount); err != nil {
+		t.Fatalf("count trust records: %v", err)
+	}
+	if trustCount != 1 {
+		t.Fatalf("trust_records count = %d, want 1", trustCount)
+	}
+
+	var runtimeTrustContactID string
+	if err := db.QueryRow(
+		`SELECT contact_id FROM runtime_trust_records WHERE canonical_id = ?`,
+		peerCanonicalID,
+	).Scan(&runtimeTrustContactID); err != nil {
+		t.Fatalf("load runtime trust record: %v", err)
+	}
+	if runtimeTrustContactID != promotedContactID {
+		t.Fatalf("runtime trust contact_id = %q, want %q", runtimeTrustContactID, promotedContactID)
+	}
+
+	var connectEventCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM interaction_events WHERE contact_id = ? AND event_type = 'connect'`,
+		promotedContactID,
+	).Scan(&connectEventCount); err != nil {
+		t.Fatalf("count connect events: %v", err)
+	}
+	if connectEventCount != 1 {
+		t.Fatalf("connect event count = %d, want 1", connectEventCount)
+	}
 }
 
 func TestConnectPeerRefreshDistinguishesStaleAndFreshPresence(t *testing.T) {

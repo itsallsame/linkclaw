@@ -84,6 +84,21 @@ type ConnectPeerRequest struct {
 	Refresh bool                       `json:"refresh"`
 }
 
+type ConnectPeerPromotion struct {
+	ContactID              string `json:"contact_id,omitempty"`
+	ContactStatus          string `json:"contact_status,omitempty"`
+	ContactCreated         bool   `json:"contact_created"`
+	TrustLinked            bool   `json:"trust_linked"`
+	TrustLevel             string `json:"trust_level,omitempty"`
+	TrustVerificationState string `json:"trust_verification_state,omitempty"`
+	TrustSource            string `json:"trust_source,omitempty"`
+	DiscoveryUpdated       bool   `json:"discovery_updated"`
+	DiscoverySource        string `json:"discovery_source,omitempty"`
+	NoteWritten            bool   `json:"note_written"`
+	PinWritten             bool   `json:"pin_written"`
+	EventID                string `json:"event_id,omitempty"`
+}
+
 type ConnectPeerResult struct {
 	CanonicalID   string                     `json:"canonical_id"`
 	Trust         trust.TrustSummary         `json:"trust"`
@@ -94,4 +109,5 @@ type ConnectPeerResult struct {
 	Connected     bool                       `json:"connected"`
 	Reason        string                     `json:"reason,omitempty"`
 	ConnectedAt   string                     `json:"connected_at"`
+	Promotion     ConnectPeerPromotion       `json:"promotion"`
 }

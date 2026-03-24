@@ -994,6 +994,18 @@ func TestRunMessageRuntimeInspectDiscoveryConnectJSON(t *testing.T) {
 	if connectOut.Result.Trust.TrustLevel == "" {
 		t.Fatalf("connect trust level = empty, want non-empty")
 	}
+	if connectOut.Result.Promotion.ContactID == "" {
+		t.Fatalf("connect promotion contact_id = empty, want non-empty")
+	}
+	if !connectOut.Result.Promotion.TrustLinked {
+		t.Fatalf("connect promotion trust_linked = false, want true")
+	}
+	if connectOut.Result.Promotion.NoteWritten {
+		t.Fatalf("connect promotion note_written = true, want false")
+	}
+	if connectOut.Result.Promotion.PinWritten {
+		t.Fatalf("connect promotion pin_written = true, want false")
+	}
 }
 
 func TestRunMessageConnectPeerRefreshUsesDiscoveryRefreshPath(t *testing.T) {

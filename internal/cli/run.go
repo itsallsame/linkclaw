@@ -1104,6 +1104,30 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		if result.Reason != "" {
 			fmt.Fprintf(out, "reason: %s\n", result.Reason)
 		}
+		if result.Promotion.ContactID != "" {
+			fmt.Fprintf(out, "local contact: %s\n", result.Promotion.ContactID)
+			fmt.Fprintf(out, "contact created: %t\n", result.Promotion.ContactCreated)
+			if result.Promotion.ContactStatus != "" {
+				fmt.Fprintf(out, "contact status: %s\n", result.Promotion.ContactStatus)
+			}
+		}
+		if result.Promotion.TrustLevel != "" {
+			fmt.Fprintf(out, "trust level: %s\n", result.Promotion.TrustLevel)
+		}
+		if result.Promotion.TrustVerificationState != "" {
+			fmt.Fprintf(out, "trust verification: %s\n", result.Promotion.TrustVerificationState)
+		}
+		if result.Promotion.TrustSource != "" {
+			fmt.Fprintf(out, "trust source: %s\n", result.Promotion.TrustSource)
+		}
+		if result.Promotion.DiscoverySource != "" {
+			fmt.Fprintf(out, "discovery source: %s\n", result.Promotion.DiscoverySource)
+		}
+		fmt.Fprintf(out, "notes written: %t\n", result.Promotion.NoteWritten)
+		fmt.Fprintf(out, "pins written: %t\n", result.Promotion.PinWritten)
+		if result.Promotion.EventID != "" {
+			fmt.Fprintf(out, "event: %s\n", result.Promotion.EventID)
+		}
 		return 0
 	case "receive-direct":
 		fs := newFlagSet("message receive-direct", errOut, jsonRequested)

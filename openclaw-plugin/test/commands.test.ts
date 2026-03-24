@@ -1981,6 +1981,13 @@ test("message connect-peer reports blocked readiness when no transport route is 
     const connectResult = connectEnvelope.result as Record<string, unknown>;
     assert.equal(connectResult.connected, false);
     assert.match(String(connectResult.reason ?? ""), /no usable transport route/i);
+    const promotion = connectResult.promotion as Record<string, unknown>;
+    assert.equal(typeof promotion.contact_id, "string");
+    assert.ok(String(promotion.contact_id ?? "").length > 0);
+    assert.equal(promotion.contact_created, true);
+    assert.equal(promotion.trust_linked, true);
+    assert.equal(promotion.note_written, false);
+    assert.equal(promotion.pin_written, false);
   } finally {
     await fixture.close();
   }

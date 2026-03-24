@@ -576,10 +576,17 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 	runtimeSvc.DiscoveryQuery = querySvc
 	runtimeSvc.Now = func() time.Time { return now }
 
-	return runtimeSvc.ConnectPeer(ctx, agentruntime.ConnectPeerRequest{
+	result, err := runtimeSvc.ConnectPeer(ctx, agentruntime.ConnectPeerRequest{
 		Peer:    peer,
 		Refresh: opts.Refresh,
 	})
+	if err != nil {
+		return agentruntime.ConnectPeerResult{}, err
+	}
+	if err := applyConnectPeerPromotion(ctx, db, target, &result, now); err != nil {
+		return agentruntime.ConnectPeerResult{}, err
+	}
+	return result, nil
 }
 
 func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, error) {
@@ -940,6 +947,762 @@ func resolveContact(ctx context.Context, tx *sql.Tx, ref string) (contactRecord,
 		return contactRecord{}, fmt.Errorf("contact %q is missing an encryption key; re-import the identity card", needle)
 	}
 	return matches[0], nil
+}
+
+func applyConnectPeerPromotion(
+	ctx context.Context,
+	db *sql.DB,
+	target connectPeerTarget,
+	connectResult *agentruntime.ConnectPeerResult,
+	now time.Time,
+) error {
+	if connectResult == nil {
+		return fmt.Errorf("connect result is nil")
+	}
+	canonicalID := strings.TrimSpace(connectResult.CanonicalID)
+	if canonicalID == "" {
+		return fmt.Errorf("connect result canonical_id is required")
+	}
+
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	displayName := canonicalID
+	if target.contact != nil {
+		if value := strings.TrimSpace(target.contact.DisplayName); value != "" {
+			displayName = value
+		}
+	}
+
+	verificationState := normalizeConnectVerificationState(connectResult.Trust.VerificationState)
+	if verificationState == "" {
+		verificationState = "discovered"
+	}
+	trustLevel := normalizeConnectTrustLevel(connectResult.Trust.TrustLevel)
+	trustSource := strings.TrimSpace(connectResult.Trust.Source)
+	if trustSource == "" {
+		trustSource = "connect-peer"
+	}
+	connectReason := summarizeConnectPromotionReason(*connectResult)
+	decidedAt := firstNonEmptyString(strings.TrimSpace(connectResult.Trust.AsOf), strings.TrimSpace(connectResult.ConnectedAt), stamp)
+
+	peerID := strings.TrimSpace(connectResult.Presence.PeerID)
+	if peerID == "" && target.contact != nil {
+		peerID = strings.TrimSpace(target.contact.RecipientID)
+	}
+	if peerID == "" && target.discovery != nil {
+		peerID = strings.TrimSpace(target.discovery.PeerID)
+	}
+	relayURL := firstStoreForwardHint(connectResult.Presence, connectResult.Routes)
+	if relayURL == "" && target.contact != nil {
+		relayURL = strings.TrimSpace(target.contact.RelayURL)
+	}
+	if relayURL == "" && target.discovery != nil {
+		relayURL = firstStoreForwardRouteTarget(target.discovery.RouteCandidates)
+		if relayURL == "" {
+			relayURL = firstNonEmptyString(target.discovery.StoreForwardHints...)
+		}
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connect promotion transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	contact, contactCreated, err := ensureConnectContactTx(
+		ctx,
+		tx,
+		canonicalID,
+		displayName,
+		peerID,
+		relayURL,
+		verificationState,
+		stamp,
+	)
+	if err != nil {
+		return err
+	}
+
+	if _, err := ensureConnectTrustRecordTx(
+		ctx,
+		tx,
+		contact.ContactID,
+		trustLevel,
+		verificationState,
+		connectReason,
+		stamp,
+	); err != nil {
+		return err
+	}
+
+	if err := upsertConnectRuntimeTrustTx(
+		ctx,
+		tx,
+		canonicalID,
+		contact.ContactID,
+		trustLevel,
+		connectResult.Trust.RiskFlags,
+		verificationState,
+		trustSource,
+		connectReason,
+		decidedAt,
+		stamp,
+	); err != nil {
+		return err
+	}
+
+	discoverySource, err := upsertConnectRuntimeDiscoveryTx(ctx, tx, canonicalID, *connectResult, now.UTC(), stamp)
+	if err != nil {
+		return err
+	}
+
+	eventID, err := insertConnectEventTx(ctx, tx, contact.ContactID, canonicalID, *connectResult, discoverySource, stamp)
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit connect promotion transaction: %w", err)
+	}
+
+	trustSvc := trust.NewServiceWithDB(db, now)
+	if summary, ok, err := trustSvc.Summary(ctx, canonicalID); err != nil {
+		return err
+	} else if ok {
+		connectResult.Trust = summary
+	}
+
+	connectResult.Promotion = agentruntime.ConnectPeerPromotion{
+		ContactID:              contact.ContactID,
+		ContactStatus:          contact.Status,
+		ContactCreated:         contactCreated,
+		TrustLinked:            true,
+		TrustLevel:             firstNonEmptyString(connectResult.Trust.TrustLevel, trustLevel),
+		TrustVerificationState: firstNonEmptyString(connectResult.Trust.VerificationState, verificationState),
+		TrustSource:            firstNonEmptyString(connectResult.Trust.Source, trustSource),
+		DiscoveryUpdated:       true,
+		DiscoverySource:        discoverySource,
+		NoteWritten:            false,
+		PinWritten:             false,
+		EventID:                eventID,
+	}
+	return nil
+}
+
+func ensureConnectContactTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	canonicalID string,
+	displayName string,
+	peerID string,
+	relayURL string,
+	status string,
+	stamp string,
+) (contactRecord, bool, error) {
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return contactRecord{}, false, fmt.Errorf("connect promotion requires canonical_id")
+	}
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		displayName = canonicalID
+	}
+	status = normalizeConnectVerificationState(status)
+	if status == "" {
+		status = "discovered"
+	}
+	peerID = strings.TrimSpace(peerID)
+	relayURL = strings.TrimSpace(relayURL)
+
+	var contact contactRecord
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, status
+		 FROM contacts
+		 WHERE canonical_id = ?
+		 LIMIT 1`,
+		canonicalID,
+	).Scan(
+		&contact.ContactID,
+		&contact.CanonicalID,
+		&contact.DisplayName,
+		&contact.RecipientID,
+		&contact.SigningPublicKey,
+		&contact.EncryptionPublicKey,
+		&contact.RelayURL,
+		&contact.DirectURL,
+		&contact.DirectToken,
+		&contact.Status,
+	)
+	switch {
+	case err == nil:
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE contacts
+			 SET display_name = CASE WHEN display_name = '' AND ? <> '' THEN ? ELSE display_name END,
+			     recipient_id = CASE WHEN recipient_id = '' AND ? <> '' THEN ? ELSE recipient_id END,
+			     relay_url = CASE WHEN relay_url = '' AND ? <> '' THEN ? ELSE relay_url END,
+			     status = CASE WHEN status = '' AND ? <> '' THEN ? ELSE status END,
+			     last_seen_at = ?
+			 WHERE contact_id = ?`,
+			displayName, displayName,
+			peerID, peerID,
+			relayURL, relayURL,
+			status, status,
+			stamp,
+			contact.ContactID,
+		); err != nil {
+			return contactRecord{}, false, fmt.Errorf("update connect promotion contact: %w", err)
+		}
+
+		updated := contact
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT contact_id, canonical_id, display_name, recipient_id, signing_public_key, encryption_public_key, relay_url, direct_url, direct_token, status
+			 FROM contacts
+			 WHERE contact_id = ?
+			 LIMIT 1`,
+			contact.ContactID,
+		).Scan(
+			&updated.ContactID,
+			&updated.CanonicalID,
+			&updated.DisplayName,
+			&updated.RecipientID,
+			&updated.SigningPublicKey,
+			&updated.EncryptionPublicKey,
+			&updated.RelayURL,
+			&updated.DirectURL,
+			&updated.DirectToken,
+			&updated.Status,
+		); err != nil {
+			return contactRecord{}, false, fmt.Errorf("reload connect promotion contact: %w", err)
+		}
+		if strings.TrimSpace(updated.Status) == "" {
+			updated.Status = status
+		}
+		return updated, false, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return contactRecord{}, false, fmt.Errorf("query connect promotion contact: %w", err)
+	}
+
+	contactID, err := ids.New("contact")
+	if err != nil {
+		return contactRecord{}, false, err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO contacts (
+			contact_id, canonical_id, display_name, recipient_id, relay_url, status, last_seen_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		contactID,
+		canonicalID,
+		displayName,
+		peerID,
+		relayURL,
+		status,
+		stamp,
+		stamp,
+	); err != nil {
+		return contactRecord{}, false, fmt.Errorf("insert connect promotion contact: %w", err)
+	}
+
+	return contactRecord{
+		ContactID:   contactID,
+		CanonicalID: canonicalID,
+		DisplayName: displayName,
+		RecipientID: peerID,
+		RelayURL:    relayURL,
+		Status:      status,
+	}, true, nil
+}
+
+func ensureConnectTrustRecordTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	contactID string,
+	trustLevel string,
+	verificationState string,
+	reason string,
+	stamp string,
+) (bool, error) {
+	contactID = strings.TrimSpace(contactID)
+	if contactID == "" {
+		return false, fmt.Errorf("connect promotion trust record requires contact_id")
+	}
+	trustLevel = normalizeConnectTrustLevel(trustLevel)
+	verificationState = normalizeConnectVerificationState(verificationState)
+	if verificationState == "" {
+		verificationState = "discovered"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "connect-peer promotion"
+	}
+
+	var trustID string
+	var existingLevel string
+	var existingVerification string
+	var existingReason string
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT trust_id, trust_level, verification_state, decision_reason
+		 FROM trust_records
+		 WHERE contact_id = ?
+		 LIMIT 1`,
+		contactID,
+	).Scan(&trustID, &existingLevel, &existingVerification, &existingReason)
+	switch {
+	case err == nil:
+		nextLevel := mergeConnectTrustLevel(existingLevel, trustLevel)
+		nextVerification := mergeConnectVerificationState(existingVerification, verificationState)
+		nextReason := firstNonEmptyString(strings.TrimSpace(existingReason), reason)
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE trust_records
+			 SET trust_level = ?, verification_state = ?, decision_reason = ?, updated_at = ?
+			 WHERE trust_id = ?`,
+			nextLevel,
+			nextVerification,
+			nextReason,
+			stamp,
+			trustID,
+		); err != nil {
+			return false, fmt.Errorf("update connect promotion trust record: %w", err)
+		}
+		return false, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, fmt.Errorf("query connect promotion trust record: %w", err)
+	}
+
+	trustID, err = ids.New("trust")
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO trust_records (
+			trust_id, contact_id, trust_level, risk_flags, verification_state, decision_reason, updated_at, created_at
+		) VALUES (?, ?, ?, '[]', ?, ?, ?, ?)`,
+		trustID,
+		contactID,
+		trustLevel,
+		verificationState,
+		reason,
+		stamp,
+		stamp,
+	); err != nil {
+		return false, fmt.Errorf("insert connect promotion trust record: %w", err)
+	}
+	return true, nil
+}
+
+func upsertConnectRuntimeTrustTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	canonicalID string,
+	contactID string,
+	trustLevel string,
+	riskFlags []string,
+	verificationState string,
+	source string,
+	decisionReason string,
+	decidedAt string,
+	stamp string,
+) error {
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return fmt.Errorf("runtime trust upsert requires canonical_id")
+	}
+	contactID = strings.TrimSpace(contactID)
+	trustLevel = normalizeConnectTrustLevel(trustLevel)
+	verificationState = normalizeConnectVerificationState(verificationState)
+	if verificationState == "" {
+		verificationState = "discovered"
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "connect-peer"
+	}
+	decisionReason = strings.TrimSpace(decisionReason)
+	if decisionReason == "" {
+		decisionReason = "connect-peer promotion"
+	}
+	decidedAt = firstNonEmptyString(strings.TrimSpace(decidedAt), stamp)
+	normalizedRiskFlags := normalizeConnectStringList(riskFlags)
+
+	var existingTrustLevel string
+	var existingRiskFlagsJSON string
+	var existingVerification string
+	var existingReason string
+	var existingSource string
+	var existingDecidedAt string
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT trust_level, risk_flags_json, verification_state, decision_reason, source, decided_at
+		 FROM runtime_trust_records
+		 WHERE canonical_id = ?
+		 LIMIT 1`,
+		canonicalID,
+	).Scan(
+		&existingTrustLevel,
+		&existingRiskFlagsJSON,
+		&existingVerification,
+		&existingReason,
+		&existingSource,
+		&existingDecidedAt,
+	)
+	switch {
+	case err == nil:
+		trustLevel = mergeConnectTrustLevel(existingTrustLevel, trustLevel)
+		if len(normalizedRiskFlags) == 0 {
+			normalizedRiskFlags = decodeConnectStringList(existingRiskFlagsJSON)
+		}
+		verificationState = mergeConnectVerificationState(existingVerification, verificationState)
+		decisionReason = firstNonEmptyString(strings.TrimSpace(existingReason), decisionReason)
+		source = firstNonEmptyString(strings.TrimSpace(existingSource), source)
+		decidedAt = firstNonEmptyString(strings.TrimSpace(existingDecidedAt), decidedAt, stamp)
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("query runtime trust record for connect promotion: %w", err)
+	}
+
+	riskFlagsJSON, err := json.Marshal(normalizedRiskFlags)
+	if err != nil {
+		return fmt.Errorf("marshal connect promotion trust risk flags: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO runtime_trust_records (
+			canonical_id, contact_id, trust_level, risk_flags_json, verification_state,
+			decision_reason, source, decided_at, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(canonical_id) DO UPDATE SET
+			contact_id = excluded.contact_id,
+			trust_level = excluded.trust_level,
+			risk_flags_json = excluded.risk_flags_json,
+			verification_state = excluded.verification_state,
+			decision_reason = excluded.decision_reason,
+			source = excluded.source,
+			decided_at = excluded.decided_at,
+			updated_at = excluded.updated_at`,
+		canonicalID,
+		contactID,
+		trustLevel,
+		string(riskFlagsJSON),
+		verificationState,
+		decisionReason,
+		source,
+		decidedAt,
+		stamp,
+		stamp,
+	); err != nil {
+		return fmt.Errorf("upsert connect promotion runtime trust: %w", err)
+	}
+	return nil
+}
+
+func upsertConnectRuntimeDiscoveryTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	canonicalID string,
+	connectResult agentruntime.ConnectPeerResult,
+	now time.Time,
+	stamp string,
+) (string, error) {
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return "", fmt.Errorf("runtime discovery upsert requires canonical_id")
+	}
+
+	routes := append([]transport.RouteCandidate(nil), connectResult.Presence.RouteCandidates...)
+	if len(routes) == 0 {
+		routes = append(routes, connectResult.Routes...)
+	}
+	routes = appendHintsToRoutes(routes, connectResult.Presence.DirectHints, connectResult.Presence.StoreForwardHints)
+
+	transportCaps := normalizeConnectStringList(connectResult.Presence.TransportCapabilities)
+	for _, route := range routes {
+		transportCaps = appendConnectString(transportCaps, string(route.Type))
+	}
+	if len(connectResult.Presence.DirectHints) > 0 {
+		transportCaps = appendConnectString(transportCaps, string(transport.RouteTypeDirect))
+	}
+	if len(connectResult.Presence.StoreForwardHints) > 0 {
+		transportCaps = appendConnectString(transportCaps, string(transport.RouteTypeStoreForward))
+	}
+
+	directHints := normalizeConnectStringList(connectResult.Presence.DirectHints)
+	storeForwardHints := normalizeConnectStringList(connectResult.Presence.StoreForwardHints)
+	if len(storeForwardHints) == 0 {
+		if fallback := firstStoreForwardRouteTarget(routes); fallback != "" {
+			storeForwardHints = append(storeForwardHints, fallback)
+		}
+	}
+
+	peerID := strings.TrimSpace(connectResult.Presence.PeerID)
+	source := agentdiscovery.NormalizeSource(connectResult.Presence.Source)
+	if source == agentdiscovery.SourceUnknown && strings.TrimSpace(connectResult.Presence.Source) == "" {
+		source = agentdiscovery.SourceManual
+	}
+	resolvedAt := formatOptionalTime(connectResult.Presence.ResolvedAt)
+	if resolvedAt == "" {
+		resolvedAt = stamp
+	}
+	freshUntil := formatOptionalTime(connectResult.Presence.FreshUntil)
+	if freshUntil == "" {
+		freshUntil = now.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	}
+	announcedAt := formatOptionalTime(connectResult.Presence.AnnouncedAt)
+	reachable := connectResult.Presence.Reachable || connectResult.Connected || len(routes) > 0
+
+	routeCandidatesJSON, err := json.Marshal(routes)
+	if err != nil {
+		return "", fmt.Errorf("marshal connect promotion discovery routes: %w", err)
+	}
+	transportCapsJSON, err := json.Marshal(transportCaps)
+	if err != nil {
+		return "", fmt.Errorf("marshal connect promotion discovery capabilities: %w", err)
+	}
+	directHintsJSON, err := json.Marshal(directHints)
+	if err != nil {
+		return "", fmt.Errorf("marshal connect promotion discovery direct hints: %w", err)
+	}
+	storeForwardHintsJSON, err := json.Marshal(storeForwardHints)
+	if err != nil {
+		return "", fmt.Errorf("marshal connect promotion discovery store-forward hints: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO runtime_discovery_records (
+			canonical_id, peer_id, route_candidates_json, transport_capabilities_json, direct_hints_json,
+			store_forward_hints_json, signed_peer_record, source, reachable, resolved_at, fresh_until,
+			announced_at, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(canonical_id) DO UPDATE SET
+			peer_id = excluded.peer_id,
+			route_candidates_json = excluded.route_candidates_json,
+			transport_capabilities_json = excluded.transport_capabilities_json,
+			direct_hints_json = excluded.direct_hints_json,
+			store_forward_hints_json = excluded.store_forward_hints_json,
+			signed_peer_record = excluded.signed_peer_record,
+			source = excluded.source,
+			reachable = excluded.reachable,
+			resolved_at = excluded.resolved_at,
+			fresh_until = excluded.fresh_until,
+			announced_at = excluded.announced_at,
+			updated_at = excluded.updated_at`,
+		canonicalID,
+		peerID,
+		string(routeCandidatesJSON),
+		string(transportCapsJSON),
+		string(directHintsJSON),
+		string(storeForwardHintsJSON),
+		strings.TrimSpace(connectResult.Presence.SignedPeerRecord),
+		source,
+		boolToInt(reachable),
+		resolvedAt,
+		freshUntil,
+		announcedAt,
+		stamp,
+		stamp,
+	); err != nil {
+		return "", fmt.Errorf("upsert connect promotion runtime discovery: %w", err)
+	}
+	return source, nil
+}
+
+func insertConnectEventTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	contactID string,
+	canonicalID string,
+	connectResult agentruntime.ConnectPeerResult,
+	discoverySource string,
+	stamp string,
+) (string, error) {
+	eventID, err := ids.New("event")
+	if err != nil {
+		return "", err
+	}
+	summary := fmt.Sprintf(
+		"connect canonical_id=%s connected=%t transport=%s source=%s",
+		strings.TrimSpace(canonicalID),
+		connectResult.Connected,
+		firstNonEmptyString(strings.TrimSpace(connectResult.Transport), "none"),
+		firstNonEmptyString(strings.TrimSpace(discoverySource), "unknown"),
+	)
+	if reason := strings.TrimSpace(connectResult.Reason); reason != "" {
+		summary += " reason=" + reason
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO interaction_events (
+			event_id, contact_id, channel, event_type, summary, event_at, created_at
+		) VALUES (?, ?, 'linkclaw', 'connect', ?, ?, ?)`,
+		eventID,
+		contactID,
+		summary,
+		stamp,
+		stamp,
+	); err != nil {
+		return "", fmt.Errorf("insert connect interaction event: %w", err)
+	}
+	return eventID, nil
+}
+
+func summarizeConnectPromotionReason(result agentruntime.ConnectPeerResult) string {
+	reason := fmt.Sprintf("connect-peer promotion connected=%t", result.Connected)
+	if transportName := strings.TrimSpace(result.Transport); transportName != "" {
+		reason += " transport=" + transportName
+	}
+	if detail := strings.TrimSpace(result.Reason); detail != "" {
+		reason += " reason=" + detail
+	}
+	return reason
+}
+
+func firstStoreForwardHint(presence agentdiscovery.PeerPresenceView, routes []transport.RouteCandidate) string {
+	if hint := firstNonEmptyString(presence.StoreForwardHints...); hint != "" {
+		return hint
+	}
+	if hint := firstStoreForwardRouteTarget(presence.RouteCandidates); hint != "" {
+		return hint
+	}
+	return firstStoreForwardRouteTarget(routes)
+}
+
+func firstStoreForwardRouteTarget(routes []transport.RouteCandidate) string {
+	for _, route := range routes {
+		if route.Type != transport.RouteTypeStoreForward {
+			continue
+		}
+		if target := strings.TrimSpace(route.Target); target != "" {
+			return target
+		}
+		if label := strings.TrimSpace(route.Label); label != "" {
+			return label
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeConnectTrustLevel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "seen", "verified", "trusted", "pinned":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
+}
+
+func mergeConnectTrustLevel(existing string, candidate string) string {
+	existing = normalizeConnectTrustLevel(existing)
+	candidate = normalizeConnectTrustLevel(candidate)
+	if candidate == "unknown" && existing != "" {
+		return existing
+	}
+	if candidate == "" {
+		return firstNonEmptyString(existing, "unknown")
+	}
+	return candidate
+}
+
+func normalizeConnectVerificationState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "discovered", "resolved", "consistent", "mismatch":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func mergeConnectVerificationState(existing string, candidate string) string {
+	existing = normalizeConnectVerificationState(existing)
+	candidate = normalizeConnectVerificationState(candidate)
+	if candidate == "" {
+		return existing
+	}
+	if existing == "" {
+		return candidate
+	}
+	if connectVerificationStatePriority(candidate) >= connectVerificationStatePriority(existing) {
+		return candidate
+	}
+	return existing
+}
+
+func connectVerificationStatePriority(value string) int {
+	switch normalizeConnectVerificationState(value) {
+	case "mismatch":
+		return 4
+	case "consistent":
+		return 3
+	case "resolved":
+		return 2
+	case "discovered":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func normalizeConnectStringList(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func appendConnectString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.TrimSpace(existing) == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func decodeConnectStringList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return []string{}
+	}
+	return normalizeConnectStringList(values)
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func ensureConversation(ctx context.Context, tx *sql.Tx, contact contactRecord, now time.Time) (Conversation, error) {
