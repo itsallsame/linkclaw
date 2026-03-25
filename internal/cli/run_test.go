@@ -17,7 +17,6 @@ import (
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	"github.com/xiewanpeng/claw-identity/internal/indexer"
 	"github.com/xiewanpeng/claw-identity/internal/known"
-	"github.com/xiewanpeng/claw-identity/internal/relayserver"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 
@@ -169,7 +168,6 @@ func TestRunInitNonInteractiveAutoGeneratesCanonicalID(t *testing.T) {
 
 func TestRunInitTextOutputUsesProductMessagingLanguage(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "linkclaw-home")
-	t.Setenv(card.EnvRelayURL, "http://relay.example:8788")
 
 	code, stdout, stderr := runForTest(
 		t,
@@ -181,9 +179,6 @@ func TestRunInitTextOutputUsesProductMessagingLanguage(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "messaging: runtime-managed") {
 		t.Fatalf("expected runtime-managed messaging label in init output, got %q", stdout)
-	}
-	if !strings.Contains(stdout, "offline recovery endpoint: http://relay.example:8788") {
-		t.Fatalf("expected product-language recovery endpoint in init output, got %q", stdout)
 	}
 	lower := strings.ToLower(stdout)
 	if strings.Contains(lower, "relay:") || strings.Contains(lower, "linkclaw-relay") {
@@ -397,9 +392,8 @@ func TestRunCardExportAndVerifyJSON(t *testing.T) {
 	}
 }
 
-func TestRunInitSeedsRelayIntoExportedCard(t *testing.T) {
+func TestRunInitDoesNotSeedRelayIntoExportedCard(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "linkclaw-home")
-	t.Setenv(card.EnvRelayURL, "http://relay.example:8788")
 
 	initCode, _, initErr := runForTest(
 		t,
@@ -429,7 +423,7 @@ func TestRunInitSeedsRelayIntoExportedCard(t *testing.T) {
 	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
 		t.Fatalf("unmarshal card export output: %v, output=%s", err, exportOut)
 	}
-	if exported.Result.Card.Messaging.RelayURL != "http://relay.example:8788" {
+	if exported.Result.Card.Messaging.RelayURL != "" {
 		t.Fatalf("relay url = %q", exported.Result.Card.Messaging.RelayURL)
 	}
 	if exported.Result.Card.Messaging.RecipientID == "" {
@@ -644,119 +638,6 @@ func TestRunMessageSendAndOutboxJSON(t *testing.T) {
 	}
 	if outbox.Result.Messages[0].Body != "hello alice" {
 		t.Fatalf("outbox body = %q, want hello alice", outbox.Result.Messages[0].Body)
-	}
-}
-
-func TestRunMessageSyncJSONWithRelay(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
-
-	aliceHome := filepath.Join(t.TempDir(), "alice-home")
-	aliceInitCode, _, aliceInitErr := runForTest(t, []string{
-		"init",
-		"--home", aliceHome,
-		"--canonical-id", "did:key:z6MkAlice",
-		"--display-name", "Alice",
-		"--non-interactive",
-		"--json",
-	}, "")
-	if aliceInitCode != 0 {
-		t.Fatalf("alice init exit code = %d, stderr = %s", aliceInitCode, aliceInitErr)
-	}
-	aliceExportCode, aliceExportOut, aliceExportErr := runForTest(t, []string{"card", "export", "--home", aliceHome, "--json"}, "")
-	if aliceExportCode != 0 {
-		t.Fatalf("alice card export exit code = %d, stderr = %s", aliceExportCode, aliceExportErr)
-	}
-	var aliceExported struct {
-		Result struct {
-			Card card.Card `json:"card"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(aliceExportOut), &aliceExported); err != nil {
-		t.Fatalf("unmarshal alice card: %v", err)
-	}
-	aliceCardJSON, err := json.Marshal(aliceExported.Result.Card)
-	if err != nil {
-		t.Fatalf("marshal alice card: %v", err)
-	}
-
-	bobHome := filepath.Join(t.TempDir(), "bob-home")
-	bobInitCode, _, bobInitErr := runForTest(t, []string{
-		"init",
-		"--home", bobHome,
-		"--canonical-id", "did:key:z6MkBob",
-		"--display-name", "Bob",
-		"--non-interactive",
-		"--json",
-	}, "")
-	if bobInitCode != 0 {
-		t.Fatalf("bob init exit code = %d, stderr = %s", bobInitCode, bobInitErr)
-	}
-	bobExportCode, bobExportOut, bobExportErr := runForTest(t, []string{"card", "export", "--home", bobHome, "--json"}, "")
-	if bobExportCode != 0 {
-		t.Fatalf("bob card export exit code = %d, stderr = %s", bobExportCode, bobExportErr)
-	}
-	var bobExported struct {
-		Result struct {
-			Card card.Card `json:"card"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(bobExportOut), &bobExported); err != nil {
-		t.Fatalf("unmarshal bob card: %v", err)
-	}
-	bobCardJSON, err := json.Marshal(bobExported.Result.Card)
-	if err != nil {
-		t.Fatalf("marshal bob card: %v", err)
-	}
-
-	importAliceCode, importAliceOut, importAliceErr := runForTest(t, []string{"card", "import", "--home", bobHome, "--json", string(aliceCardJSON)}, "")
-	if importAliceCode != 0 {
-		t.Fatalf("import alice into bob exit code = %d, stderr = %s, stdout = %s", importAliceCode, importAliceErr, importAliceOut)
-	}
-	var importedAlice struct {
-		Result struct {
-			ContactID string `json:"contact_id"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(importAliceOut), &importedAlice); err != nil {
-		t.Fatalf("unmarshal alice import: %v", err)
-	}
-	importBobCode, importBobOut, importBobErr := runForTest(t, []string{"card", "import", "--home", aliceHome, "--json", string(bobCardJSON)}, "")
-	if importBobCode != 0 {
-		t.Fatalf("import bob into alice exit code = %d, stderr = %s, stdout = %s", importBobCode, importBobErr, importBobOut)
-	}
-
-	sendCode, sendOut, sendErr := runForTest(t, []string{
-		"message", "send",
-		"--home", bobHome,
-		"--body", "hello from bob",
-		"--json",
-		importedAlice.Result.ContactID,
-	}, "")
-	if sendCode != 0 {
-		t.Fatalf("message send exit code = %d, stderr = %s, stdout = %s", sendCode, sendErr, sendOut)
-	}
-
-	syncCode, syncOut, syncErr := runForTest(t, []string{"message", "sync", "--home", aliceHome, "--json"}, "")
-	if syncCode != 0 {
-		t.Fatalf("message sync exit code = %d, stderr = %s, stdout = %s", syncCode, syncErr, syncOut)
-	}
-	var synced struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Synced int `json:"synced"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(syncOut), &synced); err != nil {
-		t.Fatalf("unmarshal sync output: %v", err)
-	}
-	if !synced.OK || synced.Result.Synced != 1 {
-		t.Fatalf("sync result = %+v, want ok with synced=1", synced)
 	}
 }
 

@@ -246,24 +246,33 @@ func (r directInboxReceiver) ReceiveDirect(ctx context.Context, env transport.En
 
 func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 	caps := []string{}
+	directHints := []string{}
+	storeForwardHints := []string{}
+	peerID := strings.TrimSpace(contact.RecipientID)
+	if directTarget := buildDirectRouteTarget(contact.DirectURL, contact.DirectToken); directTarget != "" {
+		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
+		directHints = appendIfMissing(directHints, directTarget)
+	}
 	if peerIdentity, err := derivePeerIdentity(contact.CanonicalID, contact.SigningPublicKey, contact.EncryptionPublicKey); err == nil {
-		caps = append(caps, string(transport.RouteTypeDirect))
-		return routing.ContactRuntimeView{
-			ContactID:             contact.ContactID,
-			CanonicalID:           contact.CanonicalID,
-			DisplayName:           contact.DisplayName,
-			PeerID:                peerIdentity.PeerID,
-			TransportCapabilities: caps,
-		}
+		peerID = peerIdentity.PeerID
+		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
+		directHints = appendIfMissing(directHints, "libp2p://"+peerIdentity.PeerID)
 	}
 	if contact.RelayURL != "" {
-		caps = append(caps, string(transport.RouteTypeStoreForward))
+		caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
+		storeForwardHints = appendIfMissing(storeForwardHints, contact.RelayURL)
 	}
 	return routing.ContactRuntimeView{
 		ContactID:             contact.ContactID,
 		CanonicalID:           contact.CanonicalID,
 		DisplayName:           contact.DisplayName,
-		PeerID:                contact.RecipientID,
+		PeerID:                peerID,
+		RecipientID:           contact.RecipientID,
+		DirectURL:             strings.TrimSpace(contact.DirectURL),
+		DirectToken:           strings.TrimSpace(contact.DirectToken),
+		RelayURL:              strings.TrimSpace(contact.RelayURL),
+		DirectHints:           directHints,
+		StoreForwardHints:     storeForwardHints,
 		TransportCapabilities: caps,
 	}
 }
@@ -289,8 +298,11 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 		FreshUntil:  now.UTC().Add(5 * time.Minute),
 		Source:      "runtime-send",
 	}
+	directTarget := buildDirectRouteTarget(contact.DirectURL, contact.DirectToken)
+	directEnabled := directTransportEnabled() || directTarget != ""
+	var directSession *discoverylibp2p.Session
 
-	if directTransportEnabled() {
+	if directEnabled {
 		session, err := discoverylibp2p.BootSession(discoverylibp2p.SessionConfig{
 			Enabled:             true,
 			CanonicalID:         selfProfile.CanonicalID,
@@ -299,24 +311,43 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 			Now:                 now,
 		})
 		if err == nil && session != nil && session.Enabled {
-			if contactPeer, contactErr := derivePeerIdentity(contact.CanonicalID, contact.SigningPublicKey, contact.EncryptionPublicKey); contactErr == nil {
-				directDiscovery := discoverylibp2p.NewService(discoverylibp2p.PresenceConfig{
-					Peer:          contactPeer,
-					DirectAddress: buildDirectRouteTarget(contact.DirectURL, contact.DirectToken),
-					Reachable:     true,
-					ResolvedAt:    now.UTC(),
-				})
-				if directView, resolveErr := directDiscovery.ResolvePeer(context.Background(), contact.CanonicalID); resolveErr == nil {
-					view.PeerID = directView.PeerID
-					view.Reachable = directView.Reachable
-					view.SignedPeerRecord = directView.SignedPeerRecord
-					view.TransportCapabilities = append(view.TransportCapabilities, directView.TransportCapabilities...)
-					view.DirectHints = append(view.DirectHints, directView.DirectHints...)
-					view.RouteCandidates = append(view.RouteCandidates, directView.RouteCandidates...)
-					routes = append(routes, directView.RouteCandidates...)
-					transports = append(transports, transportlibp2p.New(session))
-				}
+			directSession = session
+			transports = append(transports, transportlibp2p.New(session))
+		}
+	}
+
+	if directTarget != "" {
+		route := transport.RouteCandidate{
+			Type:     transport.RouteTypeDirect,
+			Label:    contact.CanonicalID,
+			Priority: 100,
+			Target:   directTarget,
+		}
+		routes = append(routes, route)
+		view.RouteCandidates = append(view.RouteCandidates, route)
+		view.TransportCapabilities = appendIfMissing(view.TransportCapabilities, string(transport.RouteTypeDirect))
+		view.DirectHints = appendIfMissing(view.DirectHints, directTarget)
+		view.Reachable = true
+	}
+
+	if contactPeer, contactErr := derivePeerIdentity(contact.CanonicalID, contact.SigningPublicKey, contact.EncryptionPublicKey); contactErr == nil {
+		view.PeerID = contactPeer.PeerID
+		view.SignedPeerRecord = contactPeer.SignedPeerRecord
+		view.TransportCapabilities = appendIfMissing(view.TransportCapabilities, string(transport.RouteTypeDirect))
+		if directTarget == "" {
+			libp2pTarget := "libp2p://" + contactPeer.PeerID
+			view.DirectHints = appendIfMissing(view.DirectHints, libp2pTarget)
+			route := transport.RouteCandidate{
+				Type:     transport.RouteTypeDirect,
+				Label:    contactPeer.PeerID,
+				Priority: 100,
+				Target:   libp2pTarget,
 			}
+			routes = append(routes, route)
+			view.RouteCandidates = append(view.RouteCandidates, route)
+		}
+		if directSession != nil {
+			view.Reachable = true
 		}
 	}
 
@@ -344,6 +375,8 @@ func runtimePeerViewFromDiscovery(record agentdiscovery.Record) routing.ContactR
 	return routing.ContactRuntimeView{
 		CanonicalID:           strings.TrimSpace(record.CanonicalID),
 		PeerID:                strings.TrimSpace(record.PeerID),
+		DirectHints:           append([]string(nil), record.DirectHints...),
+		StoreForwardHints:     append([]string(nil), record.StoreForwardHints...),
 		TransportCapabilities: append([]string(nil), record.TransportCapabilities...),
 	}
 }
@@ -620,15 +653,21 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 	storeForwardHints := []string{}
 	peerID := contact.RecipientID
 	signedPeerRecord := ""
+	if directTarget := buildDirectRouteTarget(contact.DirectURL, contact.DirectToken); directTarget != "" {
+		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
+		directHints = appendIfMissing(directHints, directTarget)
+	}
 	if peerIdentity, err := derivePeerIdentity(contact.CanonicalID, contact.SigningPublicKey, contact.EncryptionPublicKey); err == nil {
 		peerID = peerIdentity.PeerID
-		signedPeerRecord = peerIdentity.SignedPeerRecord
-		caps = append(caps, string(transport.RouteTypeDirect))
-		directHints = append(directHints, "libp2p://"+peerIdentity.PeerID)
+		if signedPeerRecord == "" {
+			signedPeerRecord = peerIdentity.SignedPeerRecord
+		}
+		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
+		directHints = appendIfMissing(directHints, "libp2p://"+peerIdentity.PeerID)
 	}
 	if contact.RelayURL != "" {
-		caps = append(caps, string(transport.RouteTypeStoreForward))
-		storeForwardHints = append(storeForwardHints, contact.RelayURL)
+		caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
+		storeForwardHints = appendIfMissing(storeForwardHints, contact.RelayURL)
 	}
 	if err := store.UpsertContact(ctx, agentruntime.ContactRecord{
 		ContactID:             contact.ContactID,

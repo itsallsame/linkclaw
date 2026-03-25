@@ -13,10 +13,6 @@
         "type": "string",
         "description": "Default LINKCLAW_HOME passed to commands that support --home. Defaults to ~/.linkclaw when omitted."
       },
-      "relayUrl": {
-        "type": "string",
-        "description": "Optional legacy HTTP store-and-forward fallback URL. Omit it for the normal runtime-driven path."
-      },
       "directUrl": {
         "type": "string",
         "description": "Optional public direct receive endpoint used for online host-to-host delivery."
@@ -24,6 +20,10 @@
       "directToken": {
         "type": "string",
         "description": "Optional shared secret expected by the direct receive endpoint."
+      },
+      "registryUrl": {
+        "type": "string",
+        "description": "Base URL for the central LinkClaw agent registry used by /linkclaw-publish and /linkclaw-search."
       },
       "publishOrigin": {
         "type": "string",
@@ -56,10 +56,6 @@
       "label": "LinkClaw Home",
       "placeholder": "/absolute/path/to/.linkclaw"
     },
-    "relayUrl": {
-      "label": "Legacy Fallback URL",
-      "placeholder": "http://127.0.0.1:8788"
-    },
     "directUrl": {
       "label": "Direct Receive URL",
       "placeholder": "http://host:8907/plugins/linkclaw/direct"
@@ -67,6 +63,10 @@
     "directToken": {
       "label": "Direct Receive Token",
       "placeholder": "shared-secret"
+    },
+    "registryUrl": {
+      "label": "Agent Registry URL",
+      "placeholder": "http://registry.example:8940"
     },
     "publishOrigin": {
       "label": "Default Publish Origin",

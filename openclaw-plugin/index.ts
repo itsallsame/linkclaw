@@ -16,6 +16,9 @@ import {
   runInspectCommand,
   runMessageCommand,
   runOnboardingCommand,
+  runRegistryConnectCommand,
+  runRegistryPublishCommand,
+  runRegistrySearchCommand,
   runReplyCommand,
   runSetupCommand,
   runShareCommand,
@@ -681,6 +684,27 @@ const plugin = {
       "linkclaw-status",
       "Show LinkClaw readiness, health checks, contacts, and inbox summary for the configured home.",
       async (args) => runStatusCommand(loadConfig(api), args, pluginRoot),
+    );
+
+    registerPluginCommand(
+      api,
+      "linkclaw-publish",
+      "Publish the local LinkClaw identity into the configured central agent registry.",
+      async (args) => runRegistryPublishCommand(loadConfig(api), args, pluginRoot),
+    );
+
+    registerPluginCommand(
+      api,
+      "linkclaw-search",
+      "Search the configured central agent registry for agents by query, capability, or tag.",
+      async (args) => runRegistrySearchCommand(loadConfig(api), args, pluginRoot),
+    );
+
+    registerPluginCommand(
+      api,
+      "linkclaw-connect-agent",
+      "Import one agent directly from the configured registry by agent id.",
+      async (args) => runRegistryConnectCommand(loadConfig(api), args, pluginRoot),
     );
 
     registerPluginCommand(

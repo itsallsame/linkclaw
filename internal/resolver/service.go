@@ -776,9 +776,6 @@ func applyAgentCardHints(result *Result, card *agentCardDocument) {
 	if directURL := withTransportToken(card.Messaging.DirectURL, card.Messaging.DirectToken); directURL != "" {
 		directHints = appendUnique(directHints, directURL)
 	}
-	if relayURL := strings.TrimSpace(card.Messaging.RelayURL); relayURL != "" {
-		storeForwardHints = appendUnique(storeForwardHints, relayURL)
-	}
 	if peerID == "" {
 		peerID = strings.TrimSpace(card.Messaging.RecipientID)
 	}

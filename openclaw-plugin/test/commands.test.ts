@@ -1,66 +1,63 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer } from "node:http";
 import test from "node:test";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import { runLinkClaw } from "../src/bridge.ts";
 import {
   runConnectCommand,
   runContactsCommand,
-  runDiscoverCommand,
-  runFindCommand,
-  runImportCommand,
-  runInboxCommand,
-  runInspectCommand,
-  runMessageCommand,
-  runOnboardingCommand,
-  runReplyCommand,
-  runSetupCommand,
-  runShareCommand,
+    runDiscoverCommand,
+    runFindCommand,
+    runImportCommand,
+    runInboxCommand,
+    runInspectCommand,
+    runMessageCommand,
+    runOnboardingCommand,
+    runRegistryConnectCommand,
+    runRegistryPublishCommand,
+    runRegistrySearchCommand,
+    runReplyCommand,
+    runSetupCommand,
+    runShareCommand,
   runStatusCommand,
   runSyncCommand,
   runThreadCommand,
 } from "../src/commands.ts";
 import {
   buildLinkClawBinary,
-  buildLinkClawRelayBinary,
   createResolverFixtureServer,
   pluginRoot,
 } from "./helpers.ts";
 
 let binaryPath = "";
-let relayBinaryPath = "";
 
 test.before(async () => {
   binaryPath = await buildLinkClawBinary();
-  relayBinaryPath = await buildLinkClawRelayBinary();
 });
 
-async function reservePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    server.once("error", rejectPromise);
-    server.listen(0, "127.0.0.1", () => resolvePromise());
+async function createRegistryFixture(handler: (req: import("node:http").IncomingMessage, body: string) => { status?: number; payload: unknown }) {
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const result = handler(req, Buffer.concat(chunks).toString("utf8"));
+    res.statusCode = result.status ?? 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(result.payload));
   });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const address = server.address();
   if (!address || typeof address === "string") {
-    server.close();
-    throw new Error("unable to allocate test port");
+    throw new Error("failed to bind registry fixture");
   }
-  const { port } = address;
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    server.close((error) => {
-      if (error) {
-        rejectPromise(error);
-        return;
-      }
-      resolvePromise();
-    });
-  });
-  return port;
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  };
 }
 
 test("runImportCommand imports a contact and summarizes the result", async () => {
@@ -205,43 +202,136 @@ test("runShareCommand can emit a signed identity card directly", async () => {
   assert.match(result.message, /\/linkclaw-connect '/);
 });
 
-test("runShareCommand falls back to LINKCLAW_RELAY_URL when relayUrl config is omitted", async () => {
-  const home = await mkdtemp(join(tmpdir(), "linkclaw-share-card-relay-home-"));
-  await runLinkClaw(
-    { binaryPath, home },
-    {
-      command: "init",
-      canonicalId: "did:key:z6MkShareRelay",
-      displayName: "Share Relay",
-    },
-    pluginRoot,
-  );
-
-  const previousRelay = process.env.LINKCLAW_RELAY_URL;
-  process.env.LINKCLAW_RELAY_URL = "http://127.0.0.1:8788";
-  try {
-    const result = await runShareCommand(
-      { binaryPath, home },
-      "--card",
-      pluginRoot,
-    );
-
-    assert.equal(result.type, "message");
-    assert.match(result.message, /"relay_url":"http:\/\/127\.0\.0\.1:8788"/);
-  } finally {
-    if (previousRelay === undefined) {
-      delete process.env.LINKCLAW_RELAY_URL;
-    } else {
-      process.env.LINKCLAW_RELAY_URL = previousRelay;
-    }
-  }
-});
-
 test("runShareCommand requires an origin when publishOrigin is not configured", async () => {
   const result = await runShareCommand({ binaryPath }, "", pluginRoot);
   assert.equal(result.type, "message");
   assert.match(result.message, /publishOrigin/);
   assert.match(result.message, /\/linkclaw-share --card/);
+});
+
+test("runRegistryPublishCommand exports the local card and publishes it to the registry", async () => {
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-registry-publish-home-"));
+  await runLinkClaw(
+    { binaryPath, home },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkRegistryPublisher",
+      displayName: "Registry Publisher",
+    },
+    pluginRoot,
+  );
+
+  const registry = await createRegistryFixture((req, body) => {
+    assert.equal(req.url, "/api/agents/publish");
+    const payload = JSON.parse(body) as { identity_card?: { id?: string; display_name?: string } };
+    return {
+      payload: {
+        agent_id: "agent_test123",
+        canonical_id: payload.identity_card?.id,
+        display_name: payload.identity_card?.display_name,
+        profile_url: "http://registry.test/api/agents/agent_test123",
+        card_url: "http://registry.test/api/agents/agent_test123/card",
+      },
+    };
+  });
+
+  try {
+    const result = await runRegistryPublishCommand(
+      { binaryPath, home, registryUrl: registry.url },
+      "--summary 'security coordination agent' --capabilities ops,coordination --tags security,ops",
+      pluginRoot,
+    );
+    assert.equal(result.type, "message");
+    assert.match(result.message, /LinkClaw registry publish/);
+    assert.match(result.message, /agent id: agent_test123/);
+    assert.match(result.message, /name: Registry Publisher/);
+  } finally {
+    await registry.close();
+  }
+});
+
+test("runRegistrySearchCommand lists registry hits and next-step guidance", async () => {
+  const registry = await createRegistryFixture((req) => {
+    assert.match(req.url ?? "", /\/api\/agents\/search/);
+    return {
+      payload: {
+        records: [
+          {
+            agent_id: "agent_alpha",
+            display_name: "Alpha Agent",
+            canonical_id: "did:key:z6MkAlpha",
+            summary: "translation specialist",
+            capabilities: ["translation", "zh-en"],
+          },
+        ],
+      },
+    };
+  });
+
+  try {
+    const result = await runRegistrySearchCommand(
+      { binaryPath, registryUrl: registry.url },
+      "translation",
+      pluginRoot,
+    );
+    assert.equal(result.type, "message");
+    assert.match(result.message, /LinkClaw agent search/);
+    assert.match(result.message, /agent_alpha \| Alpha Agent \| translation specialist/);
+    assert.match(result.message, /\/linkclaw-connect-agent <agent-id>/);
+  } finally {
+    await registry.close();
+  }
+});
+
+test("runRegistryConnectCommand imports the identity card from the registry record", async () => {
+  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-registry-alice-home-"));
+  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-registry-bob-home-"));
+  await runLinkClaw(
+    { binaryPath, home: aliceHome },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkRegistryAlice",
+      displayName: "Registry Alice",
+    },
+    pluginRoot,
+  );
+  const exported = await runLinkClaw(
+    { binaryPath, home: aliceHome },
+    { command: "card_export" },
+    pluginRoot,
+  );
+  await runLinkClaw(
+    { binaryPath, home: bobHome },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkRegistryBob",
+      displayName: "Registry Bob",
+    },
+    pluginRoot,
+  );
+
+  const registry = await createRegistryFixture((req) => {
+    assert.equal(req.url, "/api/agents/agent_registry_alice");
+    return {
+      payload: {
+        agent_id: "agent_registry_alice",
+        identity_card: (exported.result as { card: unknown }).card,
+      },
+    };
+  });
+
+  try {
+    const result = await runRegistryConnectCommand(
+      { binaryPath, home: bobHome, registryUrl: registry.url },
+      "agent_registry_alice",
+      pluginRoot,
+    );
+    assert.equal(result.type, "message");
+    assert.match(result.message, /LinkClaw contact saved/);
+    assert.match(result.message, /name: Registry Alice/);
+  } finally {
+    await registry.close();
+  }
 });
 
 test("runConnectCommand imports an identity card into contacts", async () => {
@@ -585,7 +675,6 @@ test("runSetupCommand initializes an uninitialized home", async () => {
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: 正常/);
-  assert.match(result.message, /offline recovery: not configured/);
   assert.match(result.message, /publish origin: not configured/);
 });
 
@@ -602,7 +691,6 @@ test("runOnboardingCommand defaults to a readiness check when no args are provid
   assert.match(result.message, /LinkClaw 首次引导/);
   assert.match(result.message, /LinkClaw 检查完成/);
   assert.match(result.message, /状态：未初始化/);
-  assert.match(result.message, /offline recovery: not configured/);
 });
 
 test("runSetupCommand can locate the binary through LINKCLAW_BINARY", async () => {
@@ -643,35 +731,7 @@ test("runSetupCommand supports check-only mode before initialization", async () 
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: 正常/);
-  assert.match(result.message, /offline recovery: not configured/);
   assert.match(result.message, /运行 \/linkclaw-setup --display-name <name>/);
-});
-
-test("runSetupCommand reports relay reachability when configured", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-  const home = await mkdtemp(join(tmpdir(), "linkclaw-setup-relay-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const result = await runSetupCommand(
-      { binaryPath, home, relayUrl: `http://127.0.0.1:${relayPort}` },
-      "--display-name SetupRelay",
-      pluginRoot,
-    );
-
-    assert.equal(result.type, "message");
-    assert.match(result.message, /LinkClaw 初始化完成/);
-    assert.match(result.message, /offline recovery: ok \(404\) http:\/\/127\.0\.0\.1:/);
-    assert.match(result.message, /publish origin: not configured/);
-  } finally {
-    relayProc.kill();
-  }
 });
 
 test("runSetupCommand reports publish origin readiness when configured", async () => {
@@ -718,55 +778,41 @@ test("runSetupCommand reports ready state in check-only mode after initializatio
 });
 
 test("runStatusCommand summarizes health and local state after initialization", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
   const home = await mkdtemp(join(tmpdir(), "linkclaw-status-home-"));
 
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    await runLinkClaw(
-      { binaryPath, home },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkStatus",
-        displayName: "Status",
-      },
-      pluginRoot,
-    );
+  await runLinkClaw(
+    { binaryPath, home },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkStatus",
+      displayName: "Status",
+    },
+    pluginRoot,
+  );
 
-    const result = await runStatusCommand(
-      { binaryPath, home, relayUrl: `http://127.0.0.1:${relayPort}` },
-      "",
-      pluginRoot,
-    );
+  const result = await runStatusCommand(
+    { binaryPath, home },
+    "",
+    pluginRoot,
+  );
 
-    assert.equal(result.type, "message");
-    assert.match(result.message, /LinkClaw status/);
-    assert.match(result.message, /state: ready/);
-    assert.match(result.message, /--- status-summary-begin ---/);
-    assert.match(result.message, /--- status-summary-end ---/);
-    assert.match(result.message, /--- health-checks-begin ---/);
-    assert.match(result.message, /--- health-checks-end ---/);
-    assert.match(result.message, /contacts: 0/);
-    assert.match(result.message, /conversations: 0/);
-    assert.match(result.message, /unread: 0/);
-    assert.match(result.message, /messaging: ready/);
-    assert.match(result.message, /identity ready: yes/);
-    assert.match(result.message, /transport ready: yes/);
-    assert.match(result.message, /discovery ready: no/);
-    assert.match(result.message, /queued outgoing: 0/);
-    assert.match(result.message, /message status: direct=0 deferred=0 recovered=0/);
-    assert.match(result.message, /offline recovery: not configured/);
-    assert.match(result.message, /runtime mode: host-managed/);
-    assert.match(result.message, /offline recovery: ok \(404\) http:\/\/127\.0\.0\.1:/);
-  } finally {
-    relayProc.kill();
-  }
+  assert.equal(result.type, "message");
+  assert.match(result.message, /LinkClaw status/);
+  assert.match(result.message, /state: ready/);
+  assert.match(result.message, /--- status-summary-begin ---/);
+  assert.match(result.message, /--- status-summary-end ---/);
+  assert.match(result.message, /--- health-checks-begin ---/);
+  assert.match(result.message, /--- health-checks-end ---/);
+  assert.match(result.message, /contacts: 0/);
+  assert.match(result.message, /conversations: 0/);
+  assert.match(result.message, /unread: 0/);
+  assert.match(result.message, /messaging: ready/);
+  assert.match(result.message, /identity ready: yes/);
+  assert.match(result.message, /transport ready: yes/);
+  assert.match(result.message, /discovery ready: no/);
+  assert.match(result.message, /queued outgoing: 0/);
+  assert.match(result.message, /message status: direct=0 deferred=0 recovered=0/);
+  assert.match(result.message, /runtime mode: host-managed/);
 });
 
 test("runStatusCommand reports not initialized state", async () => {
@@ -784,395 +830,6 @@ test("runStatusCommand reports not initialized state", async () => {
   assert.match(result.message, /--- health-checks-begin ---/);
   assert.match(result.message, /--- health-checks-end ---/);
   assert.match(result.message, /binary: 正常/);
-});
-
-test("runMessageCommand and inbox/sync summarize messaging workflows", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkAlice",
-        displayName: "Alice",
-      },
-      pluginRoot,
-    );
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCardPath = join(bobHome, "alice.card.json");
-    await writeFile(
-      aliceCardPath,
-      JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBob",
-        displayName: "Bob",
-      },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCardPath = join(aliceHome, "bob.card.json");
-    await writeFile(
-      bobCardPath,
-      JSON.stringify((bobCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-
-    const bobImportsAlice = await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-    assert.match(bobImportsAlice.message, /contact:/);
-    const contactMatch = bobImportsAlice.message.match(/contact: ([^\n]+)/);
-    assert.ok(contactMatch);
-
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobCardPath,
-      pluginRoot,
-    );
-
-    const sendResult = await runMessageCommand(
-      { ...relayConfig, home: bobHome },
-      `${contactMatch[1]} hello from bob`,
-      pluginRoot,
-    );
-    assert.equal(sendResult.type, "message");
-    assert.match(sendResult.message, /LinkClaw message queued/);
-    assert.match(sendResult.message, /transport status: deferred/);
-
-    const syncResult = await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    assert.equal(syncResult.type, "message");
-    assert.match(syncResult.message, /LinkClaw sync completed/);
-    assert.match(syncResult.message, /recovery checks: \d+/);
-    assert.doesNotMatch(syncResult.message, /relay calls/i);
-    assert.match(syncResult.message, /\/linkclaw-inbox/);
-
-    const inboxResult = await runInboxCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    assert.equal(inboxResult.type, "message");
-    assert.match(inboxResult.message, /LinkClaw inbox/);
-    assert.match(inboxResult.message, /did:key:z6MkBob/);
-    assert.match(inboxResult.message, /--- inbox-conversations-begin ---/);
-    assert.match(inboxResult.message, /--- inbox-conversations-end ---/);
-    assert.match(inboxResult.message, /\/linkclaw-thread <contact>/);
-    assert.match(inboxResult.message, /\/linkclaw-reply <contact> <text>/);
-
-    const threadResult = await runThreadCommand(
-      { ...relayConfig, home: aliceHome },
-      "did:key:z6MkBob",
-      pluginRoot,
-    );
-    assert.equal(threadResult.type, "message");
-    assert.match(threadResult.message, /LinkClaw thread/);
-    assert.match(threadResult.message, /hello from bob/);
-    assert.match(threadResult.message, /--- thread-messages-begin ---/);
-    assert.match(threadResult.message, /--- thread-messages-end ---/);
-    assert.match(threadResult.message, /\/linkclaw-reply did:key:z6MkBob <text>/);
-
-    const inboxAfterThread = await runInboxCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    assert.match(inboxAfterThread.message, /unread=0/);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("runStatusCommand reflects offline recovery state after sync", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-status-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-status-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "init", canonicalId: "did:key:z6MkAliceStatusFlow", displayName: "Alice Status Flow" },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "init", canonicalId: "did:key:z6MkBobStatusFlow", displayName: "Bob Status Flow" },
-      pluginRoot,
-    );
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCardPath = join(bobHome, "alice-status.card.json");
-    const bobCardPath = join(aliceHome, "bob-status.card.json");
-    await writeFile(aliceCardPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
-    await writeFile(bobCardPath, JSON.stringify((bobCard.result as { card: unknown }).card, null, 2), "utf8");
-
-    const bobImportsAlice = await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-    const contactMatch = bobImportsAlice.message.match(/contact: ([^\n]+)/);
-    assert.ok(contactMatch);
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobCardPath,
-      pluginRoot,
-    );
-
-    await runMessageCommand(
-      { ...relayConfig, home: bobHome },
-      `${contactMatch[1]} hello for status`,
-      pluginRoot,
-    );
-    await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-
-    const statusResult = await runStatusCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    assert.equal(statusResult.type, "message");
-    assert.match(statusResult.message, /LinkClaw status/);
-    assert.match(statusResult.message, /conversations: 1/);
-    assert.match(statusResult.message, /unread: 1/);
-    assert.match(statusResult.message, /message status: direct=0 deferred=0 recovered=1/);
-    assert.match(statusResult.message, /offline recovery: ready \(1 path\)/);
-    assert.match(statusResult.message, /discovery ready: no/);
-    assert.match(statusResult.message, /runtime mode: host-managed/);
-    assert.match(statusResult.message, /last recovery: .*recovered=1/);
-    assert.match(statusResult.message, /recent route outcomes:/);
-    assert.doesNotMatch(statusResult.message, /store_forward/i);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("runReplyCommand mirrors message send for an existing contact", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkAliceReply",
-        displayName: "Alice Reply",
-      },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBobReply",
-        displayName: "Bob Reply",
-      },
-      pluginRoot,
-    );
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCardPath = join(bobHome, "alice-reply.card.json");
-    const bobCardPath = join(aliceHome, "bob-reply.card.json");
-    await writeFile(
-      aliceCardPath,
-      JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-    await writeFile(
-      bobCardPath,
-      JSON.stringify((bobCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-
-    await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobCardPath,
-      pluginRoot,
-    );
-
-    const replyResult = await runReplyCommand(
-      { ...relayConfig, home: aliceHome },
-      "\"Bob Reply\" hello back",
-      pluginRoot,
-    );
-    assert.equal(replyResult.type, "message");
-    assert.match(replyResult.message, /LinkClaw message queued/);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("runReplyCommand can target the most recent known conversation when contact is omitted", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkAliceRecent",
-        displayName: "Alice Recent",
-      },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBobRecent",
-        displayName: "Bob Recent",
-      },
-      pluginRoot,
-    );
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCardPath = join(bobHome, "alice-recent.card.json");
-    const bobCardPath = join(aliceHome, "bob-recent.card.json");
-    await writeFile(
-      aliceCardPath,
-      JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-    await writeFile(
-      bobCardPath,
-      JSON.stringify((bobCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-
-    await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobCardPath,
-      pluginRoot,
-    );
-
-    await runMessageCommand(
-      { ...relayConfig, home: bobHome },
-      "\"Alice Recent\" hello first",
-      pluginRoot,
-    );
-    await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-
-    const replyResult = await runReplyCommand(
-      { ...relayConfig, home: aliceHome },
-      "hello latest thread",
-      pluginRoot,
-    );
-    assert.equal(replyResult.type, "message");
-    assert.match(replyResult.message, /LinkClaw message queued/);
-  } finally {
-    relayProc.kill();
-  }
 });
 
 test("runReplyCommand reports when no recent known conversation exists", async () => {
@@ -1195,231 +852,6 @@ test("runReplyCommand reports when no recent known conversation exists", async (
   );
   assert.equal(result.type, "message");
   assert.match(result.message, /no recent known conversation is available/);
-});
-
-test("runReplyCommand prefers the last opened thread over the most recent conversation", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobOneHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-one-home-"));
-  const bobTwoHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-two-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkAliceCtx",
-        displayName: "Alice Ctx",
-      },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobOneHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBobCtxOne",
-        displayName: "Bob One",
-      },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobTwoHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBobCtxTwo",
-        displayName: "Bob Two",
-      },
-      pluginRoot,
-    );
-
-    const bobOneCard = await runLinkClaw(
-      { ...relayConfig, home: bobOneHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobTwoCard = await runLinkClaw(
-      { ...relayConfig, home: bobTwoHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-
-    const bobOneCardPath = join(aliceHome, "bob-one.card.json");
-    const bobTwoCardPath = join(aliceHome, "bob-two.card.json");
-    const aliceCardForBobOnePath = join(bobOneHome, "alice.card.json");
-    const aliceCardForBobTwoPath = join(bobTwoHome, "alice.card.json");
-    await writeFile(
-      bobOneCardPath,
-      JSON.stringify((bobOneCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-    await writeFile(
-      bobTwoCardPath,
-      JSON.stringify((bobTwoCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-    await writeFile(
-      aliceCardForBobOnePath,
-      JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-    await writeFile(
-      aliceCardForBobTwoPath,
-      JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobOneCardPath,
-      pluginRoot,
-    );
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobTwoCardPath,
-      pluginRoot,
-    );
-    await runConnectCommand(
-      { ...relayConfig, home: bobOneHome },
-      aliceCardForBobOnePath,
-      pluginRoot,
-    );
-    await runConnectCommand(
-      { ...relayConfig, home: bobTwoHome },
-      aliceCardForBobTwoPath,
-      pluginRoot,
-    );
-
-    await runMessageCommand(
-      { ...relayConfig, home: bobOneHome },
-      "\"Alice Ctx\" hello from one",
-      pluginRoot,
-    );
-    await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-    await runMessageCommand(
-      { ...relayConfig, home: bobTwoHome },
-      "\"Alice Ctx\" hello from two",
-      pluginRoot,
-    );
-    await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-
-    await runThreadCommand(
-      { ...relayConfig, home: aliceHome },
-      "did:key:z6MkBobCtxOne",
-      pluginRoot,
-    );
-
-    const replyResult = await runReplyCommand(
-      { ...relayConfig, home: aliceHome },
-      "hello from context",
-      pluginRoot,
-    );
-    assert.equal(replyResult.type, "message");
-    assert.match(replyResult.message, /LinkClaw message queued/);
-
-    const bobOneSync = await runSyncCommand(
-      { ...relayConfig, home: bobOneHome },
-      "",
-      pluginRoot,
-    );
-    const bobTwoSync = await runSyncCommand(
-      { ...relayConfig, home: bobTwoHome },
-      "",
-      pluginRoot,
-    );
-    assert.match(bobOneSync.message, /synced: 1/);
-    assert.match(bobTwoSync.message, /synced: 0/);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("runMessageCommand resolves a unique saved display name before sending", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkAliceResolve",
-        displayName: "Alice",
-      },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBobResolve",
-        displayName: "Bob",
-      },
-      pluginRoot,
-    );
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCardPath = join(bobHome, "alice-resolve.card.json");
-    await writeFile(
-      aliceCardPath,
-      JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2),
-      "utf8",
-    );
-
-    await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-
-    const sendResult = await runMessageCommand(
-      { ...relayConfig, home: bobHome },
-      "alice hello by name",
-      pluginRoot,
-    );
-    assert.equal(sendResult.type, "message");
-    assert.match(sendResult.message, /LinkClaw message queued/);
-  } finally {
-    relayProc.kill();
-  }
 });
 
 test("runMessageCommand reports ambiguous saved contact names with candidates", async () => {
@@ -1578,362 +1010,6 @@ test("runThreadCommand reports ambiguous saved contact names with suggested comm
   assert.match(threadResult.message, /matched multiple saved contacts/);
   assert.match(threadResult.message, /\/linkclaw-thread did:key:z6MkAliceThreadOne/);
   assert.match(threadResult.message, /\/linkclaw-thread did:key:z6MkAliceThreadTwo/);
-});
-
-test("runInboxCommand marks discovered senders as new sender", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkAlice",
-        displayName: "Alice",
-      },
-      pluginRoot,
-    );
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const aliceCardPath = join(bobHome, "alice.card.json");
-    await writeFile(
-      aliceCardPath,
-      JSON.stringify((aliceCard.result as { card: Record<string, unknown> }).card, null, 2),
-      "utf8",
-    );
-
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      {
-        command: "init",
-        canonicalId: "did:key:z6MkBob",
-        displayName: "Bob",
-      },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const connectResult = await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-    assert.match(connectResult.message, /name: Alice/);
-    const sendResult = await runMessageCommand(
-      { ...relayConfig, home: bobHome },
-      "Alice hello stranger",
-      pluginRoot,
-    );
-    assert.match(sendResult.message, /LinkClaw message queued/);
-
-    let syncResult = await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    for (let attempt = 0; attempt < 3 && !/synced: 1/.test(syncResult.message); attempt += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-      syncResult = await runSyncCommand(
-        { ...relayConfig, home: aliceHome },
-        "",
-        pluginRoot,
-      );
-    }
-    assert.match(syncResult.message, /synced: 1/);
-
-    const inboxResult = await runInboxCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    assert.match(inboxResult.message, /new sender/);
-    assert.match(inboxResult.message, /did:key:z6MkBob/);
-    assert.match(inboxResult.message, /\/linkclaw-connect <card>/);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("runInboxCommand filters conversations by contact query", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-  const carolHome = await mkdtemp(join(tmpdir(), "linkclaw-carol-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "init", canonicalId: "did:key:z6MkAliceInbox", displayName: "Alice Inbox" },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "init", canonicalId: "did:key:z6MkBobInbox", displayName: "Bob Inbox" },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: carolHome },
-      { command: "init", canonicalId: "did:key:z6MkCarolInbox", displayName: "Carol Inbox" },
-      pluginRoot,
-    );
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const carolCard = await runLinkClaw(
-      { ...relayConfig, home: carolHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-
-    const bobCardPath = join(aliceHome, "bob-inbox.card.json");
-    const carolCardPath = join(aliceHome, "carol-inbox.card.json");
-    const aliceForBobPath = join(bobHome, "alice-inbox.card.json");
-    const aliceForCarolPath = join(carolHome, "alice-inbox.card.json");
-    await writeFile(bobCardPath, JSON.stringify((bobCard.result as { card: unknown }).card, null, 2), "utf8");
-    await writeFile(carolCardPath, JSON.stringify((carolCard.result as { card: unknown }).card, null, 2), "utf8");
-    await writeFile(aliceForBobPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
-    await writeFile(aliceForCarolPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
-
-    await runConnectCommand({ ...relayConfig, home: aliceHome }, bobCardPath, pluginRoot);
-    await runConnectCommand({ ...relayConfig, home: aliceHome }, carolCardPath, pluginRoot);
-    await runConnectCommand({ ...relayConfig, home: bobHome }, aliceForBobPath, pluginRoot);
-    await runConnectCommand({ ...relayConfig, home: carolHome }, aliceForCarolPath, pluginRoot);
-
-    await runMessageCommand({ ...relayConfig, home: bobHome }, "\"Alice Inbox\" hello from bob inbox", pluginRoot);
-    await runMessageCommand({ ...relayConfig, home: carolHome }, "\"Alice Inbox\" hello from carol inbox", pluginRoot);
-    await runSyncCommand({ ...relayConfig, home: aliceHome }, "", pluginRoot);
-
-    const inboxResult = await runInboxCommand(
-      { ...relayConfig, home: aliceHome },
-      "bob",
-      pluginRoot,
-    );
-    assert.equal(inboxResult.type, "message");
-    assert.match(inboxResult.message, /query: bob/);
-    assert.match(inboxResult.message, /Bob Inbox/);
-    assert.doesNotMatch(inboxResult.message, /Carol Inbox/);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("runInboxCommand filters conversations by preview query", async () => {
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "init", canonicalId: "did:key:z6MkAliceInboxPreview", displayName: "Alice Preview" },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "init", canonicalId: "did:key:z6MkBobInboxPreview", displayName: "Bob Preview" },
-      pluginRoot,
-    );
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-
-    const bobCardPath = join(aliceHome, "bob-preview.card.json");
-    const aliceCardPath = join(bobHome, "alice-preview.card.json");
-    await writeFile(bobCardPath, JSON.stringify((bobCard.result as { card: unknown }).card, null, 2), "utf8");
-    await writeFile(aliceCardPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
-
-    await runConnectCommand({ ...relayConfig, home: aliceHome }, bobCardPath, pluginRoot);
-    await runConnectCommand({ ...relayConfig, home: bobHome }, aliceCardPath, pluginRoot);
-    await runMessageCommand({ ...relayConfig, home: bobHome }, "\"Alice Preview\" shipment status green", pluginRoot);
-    await runSyncCommand({ ...relayConfig, home: aliceHome }, "", pluginRoot);
-
-    const inboxResult = await runInboxCommand(
-      { ...relayConfig, home: aliceHome },
-      "shipment",
-      pluginRoot,
-    );
-    assert.equal(inboxResult.type, "message");
-    assert.match(inboxResult.message, /query: shipment/);
-    assert.match(inboxResult.message, /last=shipment status green/);
-  } finally {
-    relayProc.kill();
-  }
-});
-
-test("discover inspect connect message recover flow stays healthy end-to-end", async () => {
-  const fixture = await createResolverFixtureServer();
-  const relayPort = await reservePort();
-  const relayDir = await mkdtemp(join(tmpdir(), "linkclaw-relay-"));
-  const relayDb = join(relayDir, "relay.db");
-  const relayProc = execFile(relayBinaryPath, ["--db", relayDb, "--listen", `127.0.0.1:${relayPort}`], {
-    cwd: resolve(pluginRoot, ".."),
-    env: { ...process.env },
-  });
-
-  const aliceHome = await mkdtemp(join(tmpdir(), "linkclaw-alice-home-"));
-  const bobHome = await mkdtemp(join(tmpdir(), "linkclaw-bob-home-"));
-
-  try {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
-    const relayConfig = { binaryPath, relayUrl: `http://127.0.0.1:${relayPort}` };
-
-    await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "init", canonicalId: "did:key:z6MkAliceE2EChain", displayName: "Alice E2E Chain" },
-      pluginRoot,
-    );
-    await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "init", canonicalId: "did:key:z6MkBobE2EChain", displayName: "Bob E2E Chain" },
-      pluginRoot,
-    );
-
-    const inspectResult = await runInspectCommand(
-      { binaryPath },
-      `${fixture.origin}/.well-known/agent-card.json`,
-      pluginRoot,
-    );
-    assert.equal(inspectResult.type, "message");
-    assert.match(inspectResult.message, /LinkClaw inspect/);
-    assert.match(inspectResult.message, /status: consistent/);
-    assert.match(inspectResult.message, /importable: yes/);
-
-    const importResult = await runImportCommand(
-      { binaryPath, home: bobHome },
-      `${fixture.origin}/.well-known/agent-card.json`,
-      pluginRoot,
-    );
-    assert.equal(importResult.type, "message");
-    assert.match(importResult.message, /Identity imported/);
-
-    const discoverResult = await runDiscoverCommand(
-      { binaryPath, home: bobHome },
-      "--limit 10",
-      pluginRoot,
-    );
-    assert.equal(discoverResult.type, "message");
-    assert.match(discoverResult.message, /LinkClaw discovery/);
-    assert.match(discoverResult.message, /did:web:fixture\.example/);
-
-    const aliceCard = await runLinkClaw(
-      { ...relayConfig, home: aliceHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-    const bobCard = await runLinkClaw(
-      { ...relayConfig, home: bobHome },
-      { command: "card_export" },
-      pluginRoot,
-    );
-
-    const aliceCardPath = join(bobHome, "alice-e2e-chain.card.json");
-    const bobCardPath = join(aliceHome, "bob-e2e-chain.card.json");
-    await writeFile(aliceCardPath, JSON.stringify((aliceCard.result as { card: unknown }).card, null, 2), "utf8");
-    await writeFile(bobCardPath, JSON.stringify((bobCard.result as { card: unknown }).card, null, 2), "utf8");
-
-    const bobConnectsAlice = await runConnectCommand(
-      { ...relayConfig, home: bobHome },
-      aliceCardPath,
-      pluginRoot,
-    );
-    const contactMatch = bobConnectsAlice.message.match(/contact: ([^\n]+)/);
-    assert.ok(contactMatch);
-    await runConnectCommand(
-      { ...relayConfig, home: aliceHome },
-      bobCardPath,
-      pluginRoot,
-    );
-
-    const sendResult = await runMessageCommand(
-      { ...relayConfig, home: bobHome },
-      `${contactMatch[1]} hello e2e chain`,
-      pluginRoot,
-    );
-    assert.equal(sendResult.type, "message");
-    assert.match(sendResult.message, /LinkClaw message (queued|delivered)/);
-
-    let syncResult = await runSyncCommand(
-      { ...relayConfig, home: aliceHome },
-      "",
-      pluginRoot,
-    );
-    for (let attempt = 0; attempt < 3 && !/synced: 1/.test(syncResult.message); attempt += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-      syncResult = await runSyncCommand(
-        { ...relayConfig, home: aliceHome },
-        "",
-        pluginRoot,
-      );
-    }
-    assert.match(syncResult.message, /synced: 1/);
-    assert.match(syncResult.message, /recovery checks: \d+/);
-
-    const threadResult = await runThreadCommand(
-      { ...relayConfig, home: aliceHome },
-      "did:key:z6MkBobE2EChain",
-      pluginRoot,
-    );
-    assert.equal(threadResult.type, "message");
-    assert.match(threadResult.message, /LinkClaw thread/);
-    assert.match(threadResult.message, /hello e2e chain/);
-  } finally {
-    relayProc.kill();
-    await fixture.close();
-  }
 });
 
 test("message connect-peer reports blocked readiness when no transport route is usable", async () => {

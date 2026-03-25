@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xiewanpeng/claw-identity/internal/card"
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	"github.com/xiewanpeng/claw-identity/internal/ids"
 	"github.com/xiewanpeng/claw-identity/internal/layout"
@@ -415,10 +414,7 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error
 	}
 	relayURL := selfProfile.RelayURL
 	if relayURL == "" {
-		relayURL = strings.TrimSpace(os.Getenv(card.EnvRelayURL))
-		if relayURL == "" {
-			return SyncResult{Home: home, Synced: 0, RelayCalls: 0, SyncedAt: now.Format(time.RFC3339Nano)}, nil
-		}
+		return SyncResult{Home: home, Synced: 0, RelayCalls: 0, SyncedAt: now.Format(time.RFC3339Nano)}, nil
 	}
 	syncResult, err := s.syncThroughRuntime(ctx, home, selfProfile, relayURL, now)
 	if err != nil {
@@ -598,6 +594,7 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 	defer db.Close()
 
 	store := agentruntime.NewStoreWithDB(db, now)
+	selfDirectConfigured := false
 	if err := syncRuntimeSelfIdentity(ctx, db, store); err != nil {
 		return StatusResult{}, err
 	}
@@ -605,6 +602,7 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 		if err := s.ensureDirectRuntimeRegistration(ctx, home, selfProfile, now); err != nil {
 			return StatusResult{}, err
 		}
+		selfDirectConfigured = strings.TrimSpace(selfProfile.DirectURL) != ""
 	}
 	summary, err := store.LoadStatusSummary(ctx)
 	if err != nil {
@@ -661,7 +659,7 @@ func (s *Service) Status(ctx context.Context, opts ListOptions) (StatusResult, e
 		LastAnnounceAt:         summary.LastAnnounceAt,
 		RuntimeMode:            agentruntime.RuntimeMode(),
 		BackgroundRuntime:      agentruntime.BackgroundRuntimeEnabled(),
-		DirectEnabled:          directTransportEnabled(),
+		DirectEnabled:          directTransportEnabled() || selfDirectConfigured,
 		RecentRouteOutcomes:    recentOutcomes,
 		StatusAt:               now.Format(time.RFC3339Nano),
 	}, nil

@@ -38,7 +38,6 @@ type IdentityStatus struct {
 
 type MessagingStatus struct {
 	Transport   string `json:"transport"`
-	RelayURL    string `json:"relay_url,omitempty"`
 	RecipientID string `json:"recipient_id"`
 	Created     bool   `json:"created"`
 	Ready       bool   `json:"ready"`
@@ -211,7 +210,6 @@ func (s *Service) Init(ctx context.Context, opts Options) (Result, error) {
 func buildMessagingStatus(profile messagingprofile.Profile, created bool) MessagingStatus {
 	return MessagingStatus{
 		Transport:   profile.Transport,
-		RelayURL:    profile.RelayURL,
 		RecipientID: profile.RecipientID,
 		Created:     created,
 		Ready:       strings.TrimSpace(profile.RecipientID) != "",

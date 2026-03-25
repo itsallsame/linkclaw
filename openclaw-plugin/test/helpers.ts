@@ -22,17 +22,6 @@ export async function buildLinkClawBinary(): Promise<string> {
   return binaryPath;
 }
 
-export async function buildLinkClawRelayBinary(): Promise<string> {
-  const outputDir = await mkdtemp(join(tmpdir(), "linkclaw-plugin-relay-bin-"));
-  const binaryPath = join(outputDir, process.platform === "win32" ? "linkclaw-relay.exe" : "linkclaw-relay");
-  await execFileAsync("go", ["build", "-o", binaryPath, "./openclaw-plugin/testdata/relayshim"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  return binaryPath;
-}
-
 export async function createResolverFixtureServer(): Promise<{
   close: () => Promise<void>;
   origin: string;

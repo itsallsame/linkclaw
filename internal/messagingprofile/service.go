@@ -14,7 +14,6 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 )
 
-const EnvRelayURL = "LINKCLAW_RELAY_URL"
 const EnvDirectURL = "LINKCLAW_DIRECT_URL"
 const EnvDirectToken = "LINKCLAW_DIRECT_TOKEN"
 
@@ -34,7 +33,6 @@ func EnsureSelfProfile(
 	home string,
 	now time.Time,
 ) (Profile, string, error) {
-	envRelayURL := strings.TrimSpace(os.Getenv(EnvRelayURL))
 	envDirectURL := strings.TrimSpace(os.Getenv(EnvDirectURL))
 	envDirectToken := strings.TrimSpace(os.Getenv(EnvDirectToken))
 	var profile Profile
@@ -53,10 +51,7 @@ func EnsureSelfProfile(
 	).Scan(&profile.RecipientID, &relayURL, &directURL, &directToken, &encryptionPublicKey, &privateKeyRef)
 	switch {
 	case err == nil:
-		if (relayURL == "" && envRelayURL != "") || (directURL == "" && envDirectURL != "") || (directToken == "" && envDirectToken != "") {
-			if relayURL == "" && envRelayURL != "" {
-				relayURL = envRelayURL
-			}
+		if (directURL == "" && envDirectURL != "") || (directToken == "" && envDirectToken != "") {
 			if directURL == "" && envDirectURL != "" {
 				directURL = envDirectURL
 			}
@@ -66,9 +61,8 @@ func EnsureSelfProfile(
 			if _, err := db.ExecContext(
 				ctx,
 				`UPDATE self_messaging_profiles
-				 SET relay_url = ?, direct_url = ?, direct_token = ?, updated_at = ?
+				 SET direct_url = ?, direct_token = ?, updated_at = ?
 				 WHERE self_id = ?`,
-				relayURL,
 				directURL,
 				directToken,
 				now.Format(time.RFC3339Nano),
@@ -84,8 +78,8 @@ func EnsureSelfProfile(
 				return Profile{}, "", ensureErr
 			}
 		}
-		profile.Transport = "linkclaw-relay"
-		profile.RelayURL = relayURL
+		profile.Transport = "runtime-managed"
+		profile.RelayURL = ""
 		profile.DirectURL = directURL
 		profile.DirectToken = directToken
 		return profile, encryptionPublicKey, nil
@@ -110,7 +104,7 @@ func EnsureSelfProfile(
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		selfID,
 		recipientID,
-		envRelayURL,
+		"",
 		envDirectURL,
 		envDirectToken,
 		signingKeyID,
@@ -122,8 +116,8 @@ func EnsureSelfProfile(
 		return Profile{}, "", fmt.Errorf("insert self messaging profile: %w", err)
 	}
 	return Profile{
-		Transport:   "linkclaw-relay",
-		RelayURL:    envRelayURL,
+		Transport:   "runtime-managed",
+		RelayURL:    "",
 		DirectURL:   envDirectURL,
 		DirectToken: envDirectToken,
 		RecipientID: recipientID,

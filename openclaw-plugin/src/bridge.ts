@@ -9,9 +9,9 @@ const execFileAsync = promisify(execFile);
 export type LinkClawPluginConfig = {
   binaryPath?: string;
   home?: string;
-  relayUrl?: string;
   directUrl?: string;
   directToken?: string;
+  registryUrl?: string;
   publishOrigin?: string;
   publishOutput?: string;
   publishTier?: "minimum" | "recommended" | "full";
@@ -35,6 +35,9 @@ export type LinkClawCommand =
   | "message_list_discovery"
   | "message_connect_peer"
   | "message_receive_direct"
+  | "registry_publish"
+  | "registry_search"
+  | "registry_show"
   | "known_ls"
   | "known_show"
   | "known_trust"
@@ -67,6 +70,12 @@ export type LinkClawBridgeRequest = {
   allowDiscovered?: boolean;
   allowMismatch?: boolean;
   payload?: string;
+  registry?: string;
+  query?: string;
+  tag?: string;
+  agentId?: string;
+  summary?: string;
+  tags?: string[];
 };
 
 export type LinkClawEnvelopeError = {
@@ -134,7 +143,6 @@ export async function runLinkClaw(
   pluginRoot: string,
 ): Promise<LinkClawEnvelope> {
   const prepared = await prepareLinkClawCommand(config, request, pluginRoot);
-  const relayUrl = resolveRelayUrl(config);
   const directUrl = resolveDirectUrl(config);
   const directToken = resolveDirectToken(config);
   try {
@@ -143,7 +151,6 @@ export async function runLinkClaw(
       env: {
         ...process.env,
         LINKCLAW_HOME: prepared.home,
-        ...(relayUrl ? { LINKCLAW_RELAY_URL: relayUrl } : {}),
         ...(directUrl ? { LINKCLAW_DIRECT_URL: directUrl, LINKCLAW_EXPERIMENTAL_DIRECT: "1" } : {}),
         ...(directToken ? { LINKCLAW_DIRECT_TOKEN: directToken } : {}),
       },
@@ -228,15 +235,6 @@ export function resolveLinkClawHome(
 ): string {
   const raw = overrideHome ?? config.home ?? process.env.LINKCLAW_HOME ?? join(homedir(), ".linkclaw");
   return resolve(raw);
-}
-
-export function resolveRelayUrl(config: LinkClawPluginConfig): string | undefined {
-  const raw = config.relayUrl ?? process.env.LINKCLAW_RELAY_URL;
-  if (typeof raw !== "string") {
-    return undefined;
-  }
-  const trimmed = raw.trim();
-  return trimmed === "" ? undefined : trimmed;
 }
 
 export function resolveDirectUrl(config: LinkClawPluginConfig): string | undefined {
@@ -389,11 +387,44 @@ export function buildLinkClawArgs(
       }
       args.push(request.identifier);
       return args;
-    case "message_receive_direct":
-      requireField(request.payload, "payload");
-      return ["message", "receive-direct", "--home", home, "--json", "--input", request.payload];
-    case "known_ls":
-      return ["known", "ls", "--home", home, "--json"];
+	    case "message_receive_direct":
+	      requireField(request.payload, "payload");
+	      return ["message", "receive-direct", "--home", home, "--json", "--input", request.payload];
+	    case "registry_publish":
+	      requireField(request.registry, "registry");
+	      args.push("registry", "publish", "--home", home, "--registry", request.registry, "--json");
+	      if (request.summary) {
+	        args.push("--summary", request.summary);
+	      }
+	      if (request.capabilities && request.capabilities.length > 0) {
+	        args.push("--capabilities", request.capabilities.join(","));
+	      }
+	      if (request.tags && request.tags.length > 0) {
+	        args.push("--tags", request.tags.join(","));
+	      }
+	      return args;
+	    case "registry_search":
+	      requireField(request.registry, "registry");
+	      args.push("registry", "search", "--registry", request.registry, "--json");
+	      if (request.capability) {
+	        args.push("--capability", request.capability);
+	      }
+	      if (request.tag) {
+	        args.push("--tag", request.tag);
+	      }
+	      if (typeof request.limit === "number" && Number.isFinite(request.limit)) {
+	        args.push("--limit", String(Math.floor(request.limit)));
+	      }
+	      if (request.query) {
+	        args.push(request.query);
+	      }
+	      return args;
+	    case "registry_show":
+	      requireField(request.registry, "registry");
+	      requireField(request.agentId, "agentId");
+	      return ["registry", "show", "--registry", request.registry, "--json", request.agentId];
+	    case "known_ls":
+	      return ["known", "ls", "--home", home, "--json"];
     case "known_show":
       requireField(request.identifier, "identifier");
       return ["known", "show", "--home", home, "--json", request.identifier];
@@ -548,8 +579,11 @@ function normalizeCommand(raw: string): LinkClawCommand {
     case "known_trust":
     case "known_note":
     case "known_refresh":
-    case "known_rm":
-      return raw;
+	    case "known_rm":
+	    case "registry_publish":
+	    case "registry_search":
+	    case "registry_show":
+	      return raw;
     default:
       throw new Error(`unsupported linkclaw command: ${raw}`);
   }

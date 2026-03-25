@@ -13,6 +13,12 @@ type ContactRuntimeView struct {
 	CanonicalID           string
 	DisplayName           string
 	PeerID                string
+	RecipientID           string
+	DirectURL             string
+	DirectToken           string
+	RelayURL              string
+	DirectHints           []string
+	StoreForwardHints     []string
 	TransportCapabilities []string
 	LastSuccessfulRoute   string
 	LastSeenAt            time.Time

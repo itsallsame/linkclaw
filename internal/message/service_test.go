@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
-	"github.com/xiewanpeng/claw-identity/internal/relayserver"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 )
 
@@ -97,226 +97,6 @@ func TestSendAndOutbox(t *testing.T) {
 	}
 }
 
-func TestSendAndSyncWithRelay(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
-
-	aliceHome := filepath.Join(t.TempDir(), "alice-home")
-	initService := initflow.NewService()
-	if _, err := initService.Init(context.Background(), initflow.Options{
-		Home:        aliceHome,
-		CanonicalID: "did:key:z6MkAlice",
-		DisplayName: "Alice",
-	}); err != nil {
-		t.Fatalf("init alice home: %v", err)
-	}
-	cardService := card.NewService()
-	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("export alice card: %v", err)
-	}
-	aliceCardJSON, err := json.Marshal(aliceCard.Card)
-	if err != nil {
-		t.Fatalf("marshal alice card: %v", err)
-	}
-
-	bobHome := filepath.Join(t.TempDir(), "bob-home")
-	if _, err := initService.Init(context.Background(), initflow.Options{
-		Home:        bobHome,
-		CanonicalID: "did:key:z6MkBob",
-		DisplayName: "Bob",
-	}); err != nil {
-		t.Fatalf("init bob home: %v", err)
-	}
-	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
-	if err != nil {
-		t.Fatalf("export bob card: %v", err)
-	}
-	bobCardJSON, err := json.Marshal(bobCard.Card)
-	if err != nil {
-		t.Fatalf("marshal bob card: %v", err)
-	}
-
-	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
-		Home:  bobHome,
-		Input: string(aliceCardJSON),
-	})
-	if err != nil {
-		t.Fatalf("import alice into bob: %v", err)
-	}
-	if _, err := cardService.Import(context.Background(), card.ImportOptions{
-		Home:  aliceHome,
-		Input: string(bobCardJSON),
-	}); err != nil {
-		t.Fatalf("import bob into alice: %v", err)
-	}
-
-	service := NewService()
-	sent, err := service.Send(context.Background(), SendOptions{
-		Home:       bobHome,
-		ContactRef: aliceImportedIntoBob.ContactID,
-		Body:       "hello from bob",
-	})
-	if err != nil {
-		t.Fatalf("send message through relay: %v", err)
-	}
-	if sent.Message.Status != StatusQueued {
-		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
-	}
-	if sent.Message.TransportStatus != TransportStatusDeferred {
-		t.Fatalf("transport status = %q, want %q", sent.Message.TransportStatus, TransportStatusDeferred)
-	}
-
-	synced, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("sync alice inbox: %v", err)
-	}
-	if synced.Synced != 1 {
-		t.Fatalf("synced count = %d, want 1", synced.Synced)
-	}
-
-	inbox, err := service.Inbox(context.Background(), ListOptions{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("load alice inbox: %v", err)
-	}
-	if len(inbox.Conversations) != 1 {
-		t.Fatalf("inbox conversations = %d, want 1", len(inbox.Conversations))
-	}
-	if inbox.Conversations[0].ContactCanonicalID != "did:key:z6MkBob" {
-		t.Fatalf("incoming contact canonical id = %q, want bob", inbox.Conversations[0].ContactCanonicalID)
-	}
-	if inbox.Conversations[0].LastMessagePreview != "hello from bob" {
-		t.Fatalf("incoming preview = %q", inbox.Conversations[0].LastMessagePreview)
-	}
-
-	thread, err := service.Thread(context.Background(), ThreadOptions{
-		Home:       aliceHome,
-		ContactRef: "did:key:z6MkBob",
-		Limit:      10,
-		MarkRead:   true,
-	})
-	if err != nil {
-		t.Fatalf("load alice thread: %v", err)
-	}
-	if len(thread.Conversation.Messages) != 1 {
-		t.Fatalf("thread messages = %d, want 1", len(thread.Conversation.Messages))
-	}
-	if thread.Conversation.Messages[0].Body != "hello from bob" {
-		t.Fatalf("thread body = %q, want %q", thread.Conversation.Messages[0].Body, "hello from bob")
-	}
-	if thread.Conversation.Messages[0].TransportStatus != TransportStatusRecovered {
-		t.Fatalf("thread transport status = %q, want %q", thread.Conversation.Messages[0].TransportStatus, TransportStatusRecovered)
-	}
-	if thread.Conversation.UnreadCount != 0 {
-		t.Fatalf("thread unread count = %d, want 0", thread.Conversation.UnreadCount)
-	}
-
-	inboxAfterThread, err := service.Inbox(context.Background(), ListOptions{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("load alice inbox after thread: %v", err)
-	}
-	if inboxAfterThread.Conversations[0].UnreadCount != 0 {
-		t.Fatalf("inbox unread after thread = %d, want 0", inboxAfterThread.Conversations[0].UnreadCount)
-	}
-}
-
-func TestSendAndSyncWithRelayAndExperimentalDirectFallback(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
-	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
-
-	aliceHome := filepath.Join(t.TempDir(), "alice-home")
-	initService := initflow.NewService()
-	if _, err := initService.Init(context.Background(), initflow.Options{
-		Home:        aliceHome,
-		CanonicalID: "did:key:z6MkAlice",
-		DisplayName: "Alice",
-	}); err != nil {
-		t.Fatalf("init alice home: %v", err)
-	}
-	cardService := card.NewService()
-	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("export alice card: %v", err)
-	}
-	aliceCardJSON, err := json.Marshal(aliceCard.Card)
-	if err != nil {
-		t.Fatalf("marshal alice card: %v", err)
-	}
-
-	bobHome := filepath.Join(t.TempDir(), "bob-home")
-	if _, err := initService.Init(context.Background(), initflow.Options{
-		Home:        bobHome,
-		CanonicalID: "did:key:z6MkBob",
-		DisplayName: "Bob",
-	}); err != nil {
-		t.Fatalf("init bob home: %v", err)
-	}
-	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
-	if err != nil {
-		t.Fatalf("export bob card: %v", err)
-	}
-	bobCardJSON, err := json.Marshal(bobCard.Card)
-	if err != nil {
-		t.Fatalf("marshal bob card: %v", err)
-	}
-
-	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
-		Home:  bobHome,
-		Input: string(aliceCardJSON),
-	})
-	if err != nil {
-		t.Fatalf("import alice into bob: %v", err)
-	}
-	if _, err := cardService.Import(context.Background(), card.ImportOptions{
-		Home:  aliceHome,
-		Input: string(bobCardJSON),
-	}); err != nil {
-		t.Fatalf("import bob into alice: %v", err)
-	}
-
-	service := NewService()
-	sent, err := service.Send(context.Background(), SendOptions{
-		Home:       bobHome,
-		ContactRef: aliceImportedIntoBob.ContactID,
-		Body:       "hello from bob with direct fallback",
-	})
-	if err != nil {
-		t.Fatalf("send message through relay with direct fallback: %v", err)
-	}
-	if sent.Message.Status != StatusQueued {
-		t.Fatalf("message status = %q, want %q", sent.Message.Status, StatusQueued)
-	}
-	if sent.Message.TransportStatus != TransportStatusDeferred {
-		t.Fatalf("transport status = %q, want %q", sent.Message.TransportStatus, TransportStatusDeferred)
-	}
-
-	synced, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("sync alice inbox: %v", err)
-	}
-	if synced.Synced != 1 {
-		t.Fatalf("synced count = %d, want 1", synced.Synced)
-	}
-
-	bobAttempts := loadRuntimeRouteAttempts(t, bobHome)
-	requireRouteAttempt(t, bobAttempts, "direct", "failed", "")
-	requireRouteAttempt(t, bobAttempts, "store_forward", "queued", "")
-
-	aliceAttempts := loadRuntimeRouteAttempts(t, aliceHome)
-	recoveryCursor := requireRouteAttemptWithNonEmptyCursor(t, aliceAttempts, "recovery", "recovered")
-	requireRouteAttempt(t, aliceAttempts, "recovery", "acked", recoveryCursor)
-}
 
 func TestConnectPeerSupportsDiscoveryRecordWithoutContact(t *testing.T) {
 	initService := initflow.NewService()
@@ -596,14 +376,6 @@ func TestConnectPeerRefreshDistinguishesStaleAndFreshPresence(t *testing.T) {
 }
 
 func TestStatusSummary(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
-
 	home := filepath.Join(t.TempDir(), "status-home")
 	initService := initflow.NewService()
 	if _, err := initService.Init(context.Background(), initflow.Options{
@@ -640,13 +412,6 @@ func TestStatusSummary(t *testing.T) {
 }
 
 func TestStatusSummaryDiscoveryReadyRequiresPeerPresence(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
 	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
 
 	home := filepath.Join(t.TempDir(), "status-discovery-ready-home")
@@ -708,110 +473,7 @@ func TestStatusSummaryDiscoveryReadyRequiresPeerPresence(t *testing.T) {
 	}
 }
 
-func TestStatusSummaryTracksRecoveryState(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
-
-	initService := initflow.NewService()
-	cardService := card.NewService()
-
-	aliceHome := filepath.Join(t.TempDir(), "alice-home")
-	if _, err := initService.Init(context.Background(), initflow.Options{
-		Home:        aliceHome,
-		CanonicalID: "did:key:z6MkAliceStatusRecovery",
-		DisplayName: "Alice Status Recovery",
-	}); err != nil {
-		t.Fatalf("init alice home: %v", err)
-	}
-	aliceCard, err := cardService.Export(context.Background(), card.Options{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("export alice card: %v", err)
-	}
-	aliceCardJSON, err := json.Marshal(aliceCard.Card)
-	if err != nil {
-		t.Fatalf("marshal alice card: %v", err)
-	}
-
-	bobHome := filepath.Join(t.TempDir(), "bob-home")
-	if _, err := initService.Init(context.Background(), initflow.Options{
-		Home:        bobHome,
-		CanonicalID: "did:key:z6MkBobStatusRecovery",
-		DisplayName: "Bob Status Recovery",
-	}); err != nil {
-		t.Fatalf("init bob home: %v", err)
-	}
-	bobCard, err := cardService.Export(context.Background(), card.Options{Home: bobHome})
-	if err != nil {
-		t.Fatalf("export bob card: %v", err)
-	}
-	bobCardJSON, err := json.Marshal(bobCard.Card)
-	if err != nil {
-		t.Fatalf("marshal bob card: %v", err)
-	}
-
-	aliceImportedIntoBob, err := cardService.Import(context.Background(), card.ImportOptions{
-		Home:  bobHome,
-		Input: string(aliceCardJSON),
-	})
-	if err != nil {
-		t.Fatalf("import alice into bob: %v", err)
-	}
-	if _, err := cardService.Import(context.Background(), card.ImportOptions{
-		Home:  aliceHome,
-		Input: string(bobCardJSON),
-	}); err != nil {
-		t.Fatalf("import bob into alice: %v", err)
-	}
-
-	service := NewService()
-	if _, err := service.Send(context.Background(), SendOptions{
-		Home:       bobHome,
-		ContactRef: aliceImportedIntoBob.ContactID,
-		Body:       "hello with recovery state",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if _, err := service.Sync(context.Background(), SyncOptions{Home: aliceHome}); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-
-	status, err := service.Status(context.Background(), ListOptions{Home: aliceHome})
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if status.Conversations != 1 || status.Unread != 1 {
-		t.Fatalf("unexpected conversation counters: %+v", status)
-	}
-	if status.StoreForwardRoutes != 1 {
-		t.Fatalf("store forward routes = %d, want 1", status.StoreForwardRoutes)
-	}
-	if status.LastRecoveredCount != 1 {
-		t.Fatalf("last recovered count = %d, want 1", status.LastRecoveredCount)
-	}
-	if status.LastStoreForwardResult != "success" {
-		t.Fatalf("last store-forward result = %q, want success", status.LastStoreForwardResult)
-	}
-	if status.MessageStatusRecovered < 1 {
-		t.Fatalf("message recovered counter = %d, want >= 1", status.MessageStatusRecovered)
-	}
-	if len(status.RecentRouteOutcomes) == 0 {
-		t.Fatal("recent route outcomes should not be empty after sync")
-	}
-}
-
 func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
 	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
 
 	initService := initflow.NewService()
@@ -902,13 +564,6 @@ func TestDirectDeliveryWhenBothHostsAreOnline(t *testing.T) {
 }
 
 func TestDirectDeliveryPreservesMultipleMessages(t *testing.T) {
-	relay, relayResult, err := relayserver.Start(filepath.Join(t.TempDir(), "relay.db"), "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	defer relay.Shutdown(context.Background())
-
-	t.Setenv(card.EnvRelayURL, relayResult.URL)
 	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "1")
 
 	initService := initflow.NewService()
@@ -1012,6 +667,81 @@ func TestDirectDeliveryPreservesMultipleMessages(t *testing.T) {
 	}
 }
 
+func TestRuntimeContactViewPreservesHTTPDirectHints(t *testing.T) {
+	contact := contactRecord{
+		ContactID:           "contact_http_direct",
+		CanonicalID:         "did:key:z6MkHTTPDirect",
+		DisplayName:         "HTTP Direct",
+		RecipientID:         "rcpt_http_direct",
+		SigningPublicKey:    "signing-key",
+		EncryptionPublicKey: "enc-key",
+		DirectURL:           "http://127.0.0.1:8907/plugins/linkclaw/direct",
+		DirectToken:         "shared-secret",
+		RelayURL:            "https://relay.example",
+	}
+
+	view := runtimeContactView(contact)
+
+	if view.DirectURL != contact.DirectURL {
+		t.Fatalf("DirectURL = %q, want %q", view.DirectURL, contact.DirectURL)
+	}
+	if view.DirectToken != contact.DirectToken {
+		t.Fatalf("DirectToken = %q, want %q", view.DirectToken, contact.DirectToken)
+	}
+	if view.RecipientID != contact.RecipientID {
+		t.Fatalf("RecipientID = %q, want %q", view.RecipientID, contact.RecipientID)
+	}
+	if !slices.Contains(view.TransportCapabilities, string(transport.RouteTypeDirect)) {
+		t.Fatalf("TransportCapabilities = %#v, want direct", view.TransportCapabilities)
+	}
+	if !slices.Contains(view.TransportCapabilities, string(transport.RouteTypeStoreForward)) {
+		t.Fatalf("TransportCapabilities = %#v, want store_forward", view.TransportCapabilities)
+	}
+	directTarget := buildDirectRouteTarget(contact.DirectURL, contact.DirectToken)
+	if !slices.Contains(view.DirectHints, directTarget) {
+		t.Fatalf("DirectHints = %#v, want %q", view.DirectHints, directTarget)
+	}
+	if !slices.Contains(view.StoreForwardHints, contact.RelayURL) {
+		t.Fatalf("StoreForwardHints = %#v, want %q", view.StoreForwardHints, contact.RelayURL)
+	}
+}
+
+func TestBuildSendRuntimeBoundaryUsesHTTPDirectWithoutExperimentalDirect(t *testing.T) {
+	contact := contactRecord{
+		ContactID:           "contact_http_direct",
+		CanonicalID:         "did:key:z6MkHTTPDirect",
+		DisplayName:         "HTTP Direct",
+		RecipientID:         "rcpt_http_direct",
+		SigningPublicKey:    "signing-key",
+		EncryptionPublicKey: "enc-key",
+		DirectURL:           "http://127.0.0.1:8907/plugins/linkclaw/direct",
+		DirectToken:         "shared-secret",
+	}
+	selfProfile := selfMessagingProfile{
+		CanonicalID:      "did:key:z6MkSelf",
+		SigningPublicKey: "self-signing-key",
+	}
+
+	view, transports, routes := buildSendRuntimeBoundary(selfProfile, contact, time.Now().UTC())
+	directTarget := buildDirectRouteTarget(contact.DirectURL, contact.DirectToken)
+
+	if !slices.Contains(view.DirectHints, directTarget) {
+		t.Fatalf("DirectHints = %#v, want %q", view.DirectHints, directTarget)
+	}
+	if !slices.Contains(view.TransportCapabilities, string(transport.RouteTypeDirect)) {
+		t.Fatalf("TransportCapabilities = %#v, want direct", view.TransportCapabilities)
+	}
+	if !hasDirectRoute(routes, directTarget) {
+		t.Fatalf("routes = %#v, want direct target %q", routes, directTarget)
+	}
+	if len(transports) != 1 {
+		t.Fatalf("transports len = %d, want 1", len(transports))
+	}
+	if !view.Reachable {
+		t.Fatal("view.Reachable = false, want true")
+	}
+}
+
 type runtimeRouteAttempt struct {
 	RouteType string
 	Outcome   string
@@ -1070,6 +800,15 @@ func requireRouteAttemptWithNonEmptyCursor(t *testing.T, attempts []runtimeRoute
 func hasStoreForwardRoute(routes []transport.RouteCandidate, target string) bool {
 	for _, route := range routes {
 		if route.Type == transport.RouteTypeStoreForward && route.Target == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDirectRoute(routes []transport.RouteCandidate, target string) bool {
+	for _, route := range routes {
+		if route.Type == transport.RouteTypeDirect && route.Target == target {
 			return true
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/known"
 	"github.com/xiewanpeng/claw-identity/internal/message"
 	"github.com/xiewanpeng/claw-identity/internal/publish"
+	"github.com/xiewanpeng/claw-identity/internal/registry"
 	"github.com/xiewanpeng/claw-identity/internal/resolver"
 )
 
@@ -163,6 +164,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return runMessage(ctx, args[1:], out, errOut)
 	case "index":
 		return runIndex(ctx, args[1:], out, errOut)
+	case "registry":
+		return runRegistry(ctx, args[1:], out, errOut)
 	case "known":
 		return runKnown(ctx, args[1:], out, errOut)
 	default:
@@ -232,9 +235,6 @@ func runInit(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	fmt.Fprintf(out, "self: %s (%s)\n", result.Identity.DisplayName, result.Identity.CanonicalID)
 	fmt.Fprintf(out, "key: %s (%s)\n", result.Key.KeyID, result.Key.Algorithm)
 	fmt.Fprintf(out, "messaging: %s | ready=%t | recipient=%s\n", humanMessagingTransportLabel(result.Messaging.Transport), result.Messaging.Ready, result.Messaging.RecipientID)
-	if strings.TrimSpace(result.Messaging.RelayURL) != "" {
-		fmt.Fprintf(out, "offline recovery endpoint: %s\n", result.Messaging.RelayURL)
-	}
 	return 0
 }
 
@@ -715,6 +715,154 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 }
 
+func runRegistry(ctx context.Context, args []string, out, errOut io.Writer) int {
+	jsonRequested := hasJSONFlag(args)
+	if len(args) == 0 {
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "registry", nil, "registry requires a subcommand")
+		}
+		printRegistryUsage(out)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		printRegistryUsage(out)
+		return 0
+	case "publish":
+		fs := newFlagSet("registry publish", errOut, jsonRequested)
+		home := fs.String("home", "", "set LINKCLAW_HOME explicitly")
+		registryURL := fs.String("registry", "", "registry base url (for example http://127.0.0.1:8940)")
+		summary := fs.String("summary", "", "short searchable summary")
+		capabilities := fs.String("capabilities", "", "comma-separated capability tags")
+		tags := fs.String("tags", "", "comma-separated free-form tags")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "registry", stringPtr("publish"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if len(fs.Args()) > 0 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "registry", stringPtr("publish"), "registry publish does not accept positional arguments")
+		}
+		if strings.TrimSpace(*registryURL) == "" {
+			return writeValidationFailure(errOut, out, *jsonOutput, "registry", stringPtr("publish"), "registry publish requires --registry <url>")
+		}
+		exported, err := card.NewService().Export(ctx, card.Options{Home: *home})
+		if err != nil {
+			return writeRegistryError[registry.AgentRecord](errOut, out, *jsonOutput, "publish", err)
+		}
+		client := registry.NewClient(*registryURL)
+		record, err := client.Publish(ctx, registry.PublishRequest{
+			IdentityCard: exported.Card,
+			Summary:      strings.TrimSpace(*summary),
+			Capabilities: splitCSV(*capabilities),
+			Tags:         splitCSV(*tags),
+		})
+		if err != nil {
+			return writeRegistryError[registry.AgentRecord](errOut, out, *jsonOutput, "publish", err)
+		}
+		if *jsonOutput {
+			return writeRegistryJSON(errOut, out, "publish", record)
+		}
+		fmt.Fprintln(out, "linkclaw registry publish completed")
+		fmt.Fprintf(out, "agent id: %s\n", record.AgentID)
+		fmt.Fprintf(out, "name: %s\n", record.DisplayName)
+		fmt.Fprintf(out, "canonical id: %s\n", record.CanonicalID)
+		if record.ProfileURL != "" {
+			fmt.Fprintf(out, "profile: %s\n", record.ProfileURL)
+		}
+		if record.CardURL != "" {
+			fmt.Fprintf(out, "card: %s\n", record.CardURL)
+		}
+		return 0
+	case "search":
+		fs := newFlagSet("registry search", errOut, jsonRequested)
+		registryURL := fs.String("registry", "", "registry base url (for example http://127.0.0.1:8940)")
+		capability := fs.String("capability", "", "filter by one capability")
+		tag := fs.String("tag", "", "filter by one tag")
+		limit := fs.Int("limit", 10, "max records to return")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "registry", stringPtr("search"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if strings.TrimSpace(*registryURL) == "" {
+			return writeValidationFailure(errOut, out, *jsonOutput, "registry", stringPtr("search"), "registry search requires --registry <url>")
+		}
+		if len(fs.Args()) > 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "registry", stringPtr("search"), "registry search accepts at most one query")
+		}
+		query := ""
+		if len(fs.Args()) == 1 {
+			query = fs.Args()[0]
+		}
+		client := registry.NewClient(*registryURL)
+		result, err := client.Search(ctx, registry.SearchOptions{
+			Query:      query,
+			Capability: *capability,
+			Tag:        *tag,
+			Limit:      *limit,
+		})
+		if err != nil {
+			return writeRegistryError[registry.SearchResult](errOut, out, *jsonOutput, "search", err)
+		}
+		if *jsonOutput {
+			return writeRegistryJSON(errOut, out, "search", result)
+		}
+		fmt.Fprintln(out, "linkclaw registry search")
+		if query != "" {
+			fmt.Fprintf(out, "query: %s\n", query)
+		}
+		fmt.Fprintf(out, "records: %d\n", len(result.Records))
+		for _, record := range result.Records {
+			fmt.Fprintln(out)
+			printRegistryRecord(out, record)
+		}
+		return 0
+	case "show":
+		fs := newFlagSet("registry show", errOut, jsonRequested)
+		registryURL := fs.String("registry", "", "registry base url (for example http://127.0.0.1:8940)")
+		jsonOutput := fs.Bool("json", false, "emit JSON result")
+		fs.BoolVar(jsonOutput, "j", false, "emit JSON result")
+		if err := fs.Parse(args[1:]); err != nil {
+			if jsonRequested {
+				return writeJSONCommandError(errOut, out, "registry", stringPtr("show"), newFlagParseError(err))
+			}
+			return 1
+		}
+		if strings.TrimSpace(*registryURL) == "" {
+			return writeValidationFailure(errOut, out, *jsonOutput, "registry", stringPtr("show"), "registry show requires --registry <url>")
+		}
+		if len(fs.Args()) != 1 {
+			return writeValidationFailure(errOut, out, *jsonOutput, "registry", stringPtr("show"), "registry show requires exactly one agent id")
+		}
+		client := registry.NewClient(*registryURL)
+		record, err := client.Show(ctx, fs.Args()[0])
+		if err != nil {
+			return writeRegistryError[registry.AgentRecord](errOut, out, *jsonOutput, "show", err)
+		}
+		if *jsonOutput {
+			return writeRegistryJSON(errOut, out, "show", record)
+		}
+		fmt.Fprintln(out, "linkclaw registry show")
+		printRegistryRecord(out, record)
+		return 0
+	default:
+		if jsonRequested {
+			return writeValidationFailure(errOut, out, true, "registry", stringPtr(args[0]), fmt.Sprintf("unknown registry subcommand %q", args[0]))
+		}
+		fmt.Fprintf(errOut, "unknown registry subcommand %q\n", args[0])
+		printRegistryUsage(errOut)
+		return 1
+	}
+}
+
 func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 	jsonRequested := hasJSONFlag(args)
 	if len(args) == 0 {
@@ -775,6 +923,9 @@ func runMessage(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, "Next:")
 		if result.Message.TransportStatus == message.TransportStatusDirect {
 			fmt.Fprintln(out, "- the recipient can open `linkclaw message thread <contact>` immediately")
+		} else if result.Message.TransportStatus == message.TransportStatusFailed {
+			fmt.Fprintln(out, "- the message was kept in local history only; it did not enter a recovery queue")
+			fmt.Fprintln(out, "- verify the recipient's direct endpoint is reachable or configure a store-forward route")
 		} else {
 			fmt.Fprintln(out, "- the recipient needs to run `linkclaw message sync` to receive it")
 		}
@@ -1378,6 +1529,18 @@ func writeIndexError[T any](errOut, out io.Writer, jsonOutput bool, subcommand s
 	return 1
 }
 
+func writeRegistryJSON[T any](errOut, out io.Writer, subcommand string, result T) int {
+	return writeJSONCommandResult(errOut, out, "registry", stringPtr(subcommand), nil, result)
+}
+
+func writeRegistryError[T any](errOut, out io.Writer, jsonOutput bool, subcommand string, err error) int {
+	if jsonOutput {
+		return writeJSONCommandError(errOut, out, "registry", stringPtr(subcommand), newCommandError(err))
+	}
+	fmt.Fprintf(errOut, "registry %s failed: %v\n", subcommand, err)
+	return 1
+}
+
 func writeJSONCommandResult(errOut, out io.Writer, command string, subcommand *string, warnings []string, result any) int {
 	return writeJSONEnvelope(errOut, out, jsonEnvelope{
 		SchemaVersion: cliSchemaVersion,
@@ -1677,6 +1840,18 @@ func printIndexUsage(out io.Writer) {
 	fmt.Fprintln(out, "  search  Search index records and show freshness/conflict/source urls")
 }
 
+func printRegistryUsage(out io.Writer) {
+	fmt.Fprintln(out, "LinkClaw registry")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  linkclaw registry <subcommand> [flags] [query|agent-id]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  publish  Publish the local signed identity card to one central registry")
+	fmt.Fprintln(out, "  search   Search registry agents by name, summary, capability, or tag")
+	fmt.Fprintln(out, "  show     Fetch one registry agent record and embedded identity card")
+}
+
 func printCardUsage(out io.Writer) {
 	fmt.Fprintln(out, "LinkClaw card")
 	fmt.Fprintln(out, "")
@@ -1706,4 +1881,25 @@ func printMessageUsage(out io.Writer) {
 	fmt.Fprintln(out, "  list-discovery  List cached discovery records")
 	fmt.Fprintln(out, "  connect-peer    Evaluate runtime connect readiness for one peer")
 	fmt.Fprintln(out, "  receive-direct  Accept one direct-envelope payload")
+}
+
+func printRegistryRecord(out io.Writer, record registry.AgentRecord) {
+	fmt.Fprintf(out, "agent id: %s\n", record.AgentID)
+	fmt.Fprintf(out, "name: %s\n", record.DisplayName)
+	fmt.Fprintf(out, "canonical id: %s\n", record.CanonicalID)
+	if record.Summary != "" {
+		fmt.Fprintf(out, "summary: %s\n", record.Summary)
+	}
+	if len(record.Capabilities) > 0 {
+		fmt.Fprintf(out, "capabilities: %s\n", strings.Join(record.Capabilities, ", "))
+	}
+	if len(record.Tags) > 0 {
+		fmt.Fprintf(out, "tags: %s\n", strings.Join(record.Tags, ", "))
+	}
+	if record.ProfileURL != "" {
+		fmt.Fprintf(out, "profile: %s\n", record.ProfileURL)
+	}
+	if record.CardURL != "" {
+		fmt.Fprintf(out, "card: %s\n", record.CardURL)
+	}
 }

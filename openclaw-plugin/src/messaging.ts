@@ -1,5 +1,5 @@
 import type { LinkClawPluginConfig } from "./bridge.ts";
-import { resolveRelayUrl, runLinkClaw } from "./bridge.ts";
+import { runLinkClaw } from "./bridge.ts";
 import { runSyncCommand } from "./commands.ts";
 
 const DEFAULT_BACKGROUND_SYNC_INTERVAL_MS = 30_000;
@@ -58,10 +58,6 @@ export function createBackgroundSyncService(params: {
   return {
     id: "linkclaw-background-sync",
     start: async () => {
-      if (!resolveRelayUrl(params.config)) {
-        return;
-      }
-
       const intervalMs = resolveSyncInterval(params.config.syncIntervalMs);
       const tick = async () => {
         try {

@@ -5,7 +5,6 @@ import {
   type LinkClawPluginConfig,
   resolveLinkClawBinary,
   resolveLinkClawHome,
-  resolveRelayUrl,
   runLinkClaw,
 } from "./bridge.ts";
 import {
@@ -58,6 +57,25 @@ type DiscoverOptions = {
   limit?: number;
 };
 
+type RegistryPublishOptions = {
+  home?: string;
+  summary?: string;
+  capabilities?: string[];
+  tags?: string[];
+};
+
+type RegistrySearchOptions = {
+  query?: string;
+  capability?: string;
+  tag?: string;
+  limit?: number;
+};
+
+type RegistryConnectOptions = {
+  agentId: string;
+  home?: string;
+};
+
 type ConnectOptions = {
   input: string;
   home?: string;
@@ -105,11 +123,11 @@ type InboxConversation = {
 
 type SetupHealth = {
   binaryPath: string;
-  relayStatus: string;
   publishStatus: string;
 };
 
 const replyContextByHome = new Map<string, string>();
+const registrySearchResultsByHome = new Map<string, string[]>();
 
 type ContactResolutionContext =
   | { command: "message"; body?: string }
@@ -293,16 +311,12 @@ function describeMessagingReadiness(result: Record<string, unknown> | undefined)
   const lines: string[] = [];
   const transport = readString(messaging.transport);
   const recipientId = readString(messaging.recipient_id);
-  const relayUrl = readString(messaging.relay_url);
   const ready = typeof messaging.ready === "boolean" ? messaging.ready : undefined;
   if (transport) {
     lines.push(`messaging: ${humanMessagingTransportLabel(transport)}${ready !== undefined ? ` | ready=${ready}` : ""}`);
   }
   if (recipientId) {
     lines.push(`recipient id: ${recipientId}`);
-  }
-  if (relayUrl) {
-    lines.push(`offline recovery endpoint: ${relayUrl}`);
   }
   return lines;
 }
@@ -527,6 +541,165 @@ export async function runDiscoverCommand(
     return {
       type: "message",
       message: formatCommandError("linkclaw discover", error),
+    };
+  }
+}
+
+export async function runRegistryPublishCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: RegistryPublishOptions;
+  try {
+    options = parseRegistryPublishCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw publish command failed: ${(error as Error).message}`,
+    };
+  }
+
+  const registryUrl = config.registryUrl?.trim();
+  if (!registryUrl) {
+    return {
+      type: "message",
+      message: "Set plugins.entries.linkclaw.config.registryUrl before using /linkclaw-publish.",
+    };
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "registry_publish",
+        home: options.home,
+        registry: registryUrl,
+        summary: options.summary,
+        capabilities: options.capabilities,
+        tags: options.tags,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatRegistryPublish(envelope.result),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw publish", error),
+    };
+  }
+}
+
+export async function runRegistrySearchCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: RegistrySearchOptions;
+  try {
+    options = parseRegistrySearchCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw search command failed: ${(error as Error).message}`,
+    };
+  }
+
+  const registryUrl = config.registryUrl?.trim();
+  if (!registryUrl) {
+    return {
+      type: "message",
+      message: "Set plugins.entries.linkclaw.config.registryUrl before using /linkclaw-search.",
+    };
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "registry_search",
+        registry: registryUrl,
+        query: options.query,
+        capability: options.capability,
+        tag: options.tag,
+        limit: options.limit,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatRegistrySearch(resolveLinkClawHome(undefined, config), envelope.result),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw search", error),
+    };
+  }
+}
+
+export async function runRegistryConnectCommand(
+  config: LinkClawPluginConfig,
+  rawArgs: string,
+  pluginRoot: string,
+): Promise<CommandResult> {
+  let options: RegistryConnectOptions;
+  try {
+    options = parseRegistryConnectCommand(rawArgs);
+  } catch (error) {
+    return {
+      type: "message",
+      message: `linkclaw connect-agent command failed: ${(error as Error).message}`,
+    };
+  }
+
+  const registryUrl = config.registryUrl?.trim();
+  if (!registryUrl) {
+    return {
+      type: "message",
+      message: "Set plugins.entries.linkclaw.config.registryUrl before using /linkclaw-connect-agent.",
+    };
+  }
+
+  try {
+    const envelope = await runLinkClaw(
+      config,
+      {
+        command: "registry_show",
+        registry: registryUrl,
+        agentId: options.agentId,
+      },
+      pluginRoot,
+    );
+    const record = asObject(envelope.result);
+    const card = record?.identity_card;
+    if (!card) {
+      return {
+        type: "message",
+        message: "Registry record did not include an identity card.",
+      };
+    }
+    const cardInput = JSON.stringify(card);
+    const connectEnvelope = await runLinkClaw(
+      config,
+      {
+        command: "card_import",
+        home: options.home,
+        input: cardInput,
+      },
+      pluginRoot,
+    );
+    return {
+      type: "message",
+      message: formatConnectMessage(connectEnvelope.result),
+    };
+  } catch (error) {
+    return {
+      type: "message",
+      message: formatCommandError("linkclaw connect-agent", error),
     };
   }
 }
@@ -1097,6 +1270,134 @@ export function parseDiscoverCommand(rawArgs: string): DiscoverOptions {
   };
 }
 
+export function parseRegistryPublishCommand(rawArgs: string): RegistryPublishOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  let summary: string | undefined;
+  let capabilities: string[] = [];
+  let tags: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--summary") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --summary");
+      }
+      summary = tokens[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (token === "--capabilities") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --capabilities");
+      }
+      capabilities = capabilities.concat(parseCommaSeparatedValues(tokens[index + 1], "--capabilities"));
+      index += 1;
+      continue;
+    }
+    if (token === "--tags") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --tags");
+      }
+      tags = tags.concat(parseCommaSeparatedValues(tokens[index + 1], "--tags"));
+      index += 1;
+      continue;
+    }
+    throw new Error(`unsupported publish argument: ${token}`);
+  }
+
+  return {
+    home,
+    summary,
+    capabilities: capabilities.length > 0 ? [...new Set(capabilities)] : undefined,
+    tags: tags.length > 0 ? [...new Set(tags)] : undefined,
+  };
+}
+
+export function parseRegistrySearchCommand(rawArgs: string): RegistrySearchOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let query: string | undefined;
+  let capability: string | undefined;
+  let tag: string | undefined;
+  let limit: number | undefined;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--capability") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --capability");
+      }
+      capability = tokens[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (token === "--tag") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --tag");
+      }
+      tag = tokens[index + 1].trim();
+      index += 1;
+      continue;
+    }
+    if (token === "--limit") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --limit");
+      }
+      const parsed = Number.parseInt(tokens[index + 1] ?? "", 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error("invalid value for --limit");
+      }
+      limit = parsed;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported search argument: ${token}`);
+    }
+    if (query !== undefined) {
+      throw new Error("linkclaw-search accepts at most one query");
+    }
+    query = token;
+  }
+
+  return { query, capability, tag, limit };
+}
+
+export function parseRegistryConnectCommand(rawArgs: string): RegistryConnectOptions {
+  const tokens = tokenizeCommand(rawArgs);
+  let home: string | undefined;
+  let agentId = "";
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--home") {
+      if (index + 1 >= tokens.length) {
+        throw new Error("missing value for --home");
+      }
+      home = tokens[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`unsupported connect-agent argument: ${token}`);
+    }
+    if (agentId !== "") {
+      throw new Error("linkclaw-connect-agent accepts exactly one agent id");
+    }
+    agentId = token.trim();
+  }
+
+  return { home, agentId };
+}
+
 export function parseConnectCommand(rawArgs: string): ConnectOptions {
   const directPayload = parseDirectConnectPayload(rawArgs);
   if (directPayload) {
@@ -1477,6 +1778,69 @@ function formatDiscover(value: unknown, options: DiscoverOptions): string {
   return lines.join("\n");
 }
 
+function formatRegistryPublish(value: unknown): string {
+  const record = asObject(value);
+  const capabilities = Array.isArray(record?.capabilities) ? record.capabilities.filter((item): item is string => typeof item === "string") : [];
+  const tags = Array.isArray(record?.tags) ? record.tags.filter((item): item is string => typeof item === "string") : [];
+  const lines = ["LinkClaw registry publish"];
+  if (typeof record?.agent_id === "string" && record.agent_id.trim() !== "") {
+    lines.push(`agent id: ${record.agent_id}`);
+  }
+  if (typeof record?.display_name === "string" && record.display_name.trim() !== "") {
+    lines.push(`name: ${record.display_name}`);
+  }
+  if (typeof record?.canonical_id === "string" && record.canonical_id.trim() !== "") {
+    lines.push(`canonical id: ${record.canonical_id}`);
+  }
+  if (typeof record?.profile_url === "string" && record.profile_url.trim() !== "") {
+    lines.push(`profile: ${record.profile_url}`);
+  }
+  if (typeof record?.card_url === "string" && record.card_url.trim() !== "") {
+    lines.push(`card: ${record.card_url}`);
+  }
+  if (capabilities.length > 0) {
+    lines.push(`capabilities: ${capabilities.join(", ")}`);
+  }
+  if (tags.length > 0) {
+    lines.push(`tags: ${tags.join(", ")}`);
+  }
+  lines.push("Next:");
+  lines.push("- run /linkclaw-search <query> on another OpenClaw host to discover this agent");
+  return lines.join("\n");
+}
+
+function formatRegistrySearch(homeKey: string, value: unknown): string {
+  const record = asObject(value);
+  const rawRecords = Array.isArray(record?.records) ? record.records : [];
+  const lines = ["LinkClaw agent search", `records: ${rawRecords.length}`];
+  const agentIds: string[] = [];
+  for (const candidate of rawRecords) {
+    const item = asObject(candidate);
+    if (!item) {
+      continue;
+    }
+    const agentId = readString(item.agent_id) ?? "";
+    const name = (readString(item.display_name) ?? agentId) || "unknown";
+    const summary = readString(item.summary) ?? "no summary";
+    const capabilities = Array.isArray(item.capabilities)
+      ? item.capabilities.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+      : [];
+    const tagSummary = capabilities.length > 0 ? ` | capabilities=${capabilities.join(",")}` : "";
+    lines.push(`${agentId} | ${name} | ${summary}${tagSummary}`);
+    if (agentId !== "") {
+      agentIds.push(agentId);
+    }
+  }
+  registrySearchResultsByHome.set(homeKey, agentIds);
+  if (rawRecords.length === 0) {
+    lines.push("No agents matched the current search.");
+  } else {
+    lines.push("Next:");
+    lines.push("- run /linkclaw-connect-agent <agent-id> to import one result directly from the registry");
+  }
+  return lines.join("\n");
+}
+
 function formatConnectMessage(value: unknown): string {
   const record = asObject(value);
   const card = asObject(record?.card);
@@ -1540,7 +1904,7 @@ function formatMessageSend(value: unknown): string {
   if (status) {
     lines.push(`status: ${status}`);
     if (status === "failed") {
-      lines.push("delivery: failed before runtime handoff");
+      lines.push("delivery: no usable route was available; the message stayed in local history only");
     }
   }
   if (transportStatus) {
@@ -1552,6 +1916,7 @@ function formatMessageSend(value: unknown): string {
   lines.push("Next:");
   if (status === "failed") {
     lines.push("- run /linkclaw-setup to verify your local identity and messaging setup");
+    lines.push("- verify the recipient direct endpoint is reachable or configure an offline recovery path");
     lines.push("- confirm the contact was imported from a full identity card, not a partial profile");
   } else if (status === "delivered") {
     lines.push("- the recipient can open /linkclaw-thread <contact> to refresh the conversation");
@@ -2311,44 +2676,11 @@ async function collectSetupHealth(
   pluginRoot: string,
 ): Promise<SetupHealth> {
   const binaryPath = await resolveLinkClawBinary(config, pluginRoot);
-  const relayStatus = await checkRelayStatus(resolveRelayUrl(config));
   const publishStatus = await checkPublishOriginStatus(config, pluginRoot);
   return {
     binaryPath,
-    relayStatus,
     publishStatus,
   };
-}
-
-async function checkRelayStatus(relayUrl: string | undefined): Promise<string> {
-  const trimmed = relayUrl?.trim() ?? "";
-  if (trimmed === "") {
-    return "not configured";
-  }
-
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    try {
-      const response = await fetch(trimmed, {
-        method: "GET",
-        redirect: "follow",
-        signal: controller.signal,
-      });
-      return `ok (${response.status}) ${trimmed}`;
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch (error) {
-    return `unreachable (${formatRelayError(error)}) ${trimmed}`;
-  }
-}
-
-function formatRelayError(error: unknown): string {
-  if (error instanceof Error && error.message.trim() !== "") {
-    return error.message.trim();
-  }
-  return "request failed";
 }
 
 function formatMarkedSection(label: string, lines: string[]): string[] {
@@ -2364,7 +2696,6 @@ function formatHealthSection(health: SetupHealth): string[] {
     "检查项：",
     "--- health-checks-begin ---",
     `- binary: 正常 (${health.binaryPath})`,
-    `- offline recovery: ${health.relayStatus}`,
     `- publish origin: ${health.publishStatus}`,
     "--- health-checks-end ---",
   ];

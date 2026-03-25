@@ -20,7 +20,6 @@ import (
 )
 
 const SchemaVersion = "linkclaw.identity_card.v1"
-const EnvRelayURL = messagingprofile.EnvRelayURL
 
 type Options struct {
 	Home string
@@ -291,7 +290,6 @@ func unsignedPayload(card Card) ([]byte, error) {
 		EncryptionKey: strings.TrimSpace(card.EncryptionKey),
 		Messaging: MessagingProfile{
 			Transport:   strings.TrimSpace(card.Messaging.Transport),
-			RelayURL:    strings.TrimSpace(card.Messaging.RelayURL),
 			DirectURL:   strings.TrimSpace(card.Messaging.DirectURL),
 			DirectToken: strings.TrimSpace(card.Messaging.DirectToken),
 			RecipientID: strings.TrimSpace(card.Messaging.RecipientID),
@@ -364,7 +362,7 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 			     status = 'imported',
 			     signing_public_key = ?,
 			     encryption_public_key = ?,
-			     relay_url = ?,
+			     relay_url = '',
 			     direct_url = ?,
 			     direct_token = ?,
 			     recipient_id = ?,
@@ -373,7 +371,6 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 			card.DisplayName,
 			card.SigningKey,
 			card.EncryptionKey,
-			card.Messaging.RelayURL,
 			card.Messaging.DirectURL,
 			card.Messaging.DirectToken,
 			card.Messaging.RecipientID,
@@ -404,7 +401,7 @@ func upsertContactFromCard(ctx context.Context, tx *sql.Tx, card Card, rawCard s
 		stamp,
 		card.SigningKey,
 		card.EncryptionKey,
-		card.Messaging.RelayURL,
+		"",
 		card.Messaging.DirectURL,
 		card.Messaging.DirectToken,
 		card.Messaging.RecipientID,
