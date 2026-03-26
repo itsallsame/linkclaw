@@ -124,3 +124,48 @@ func TestApplyRelayViewToDiscoveryRecordAddsStoreForwardHintsAndRoutes(t *testin
 		t.Fatalf("route candidates = %#v, want store_forward route to relay.discovery.example", updated.RouteCandidates)
 	}
 }
+
+func TestApplyRelayViewToContactPreservesNostrRelayHints(t *testing.T) {
+	contact := contactRecord{
+		CanonicalID: "did:key:z6MkPeer",
+	}
+	view := peerRelayPubKeyView{
+		EffectiveStoreForwardRelay: "https://relay.storeforward.example",
+		StoreForwardRelayURLs: []string{
+			"https://relay.storeforward.example",
+			"wss://relay.filtered.nostr.example",
+		},
+		NostrRelayURLs: []string{
+			"wss://relay.primary.nostr.example",
+			"wss://relay.backup.nostr.example",
+		},
+	}
+
+	updated := applyRelayViewToContact(contact, view)
+
+	if got, want := updated.RelayURL, "https://relay.storeforward.example"; got != want {
+		t.Fatalf("contact relay_url = %q, want %q", got, want)
+	}
+	if got, want := updated.StoreForwardHints, []string{"https://relay.storeforward.example"}; !slices.Equal(got, want) {
+		t.Fatalf("contact store_forward_hints = %#v, want %#v", got, want)
+	}
+	if got, want := updated.NostrRelayHints, []string{"wss://relay.primary.nostr.example", "wss://relay.backup.nostr.example"}; !slices.Equal(got, want) {
+		t.Fatalf("contact nostr_relay_hints = %#v, want %#v", got, want)
+	}
+}
+
+func TestNostrTargetsFromContactFiltersStoreForwardRelayURLs(t *testing.T) {
+	contact := contactRecord{
+		RelayURL: "wss://relay.manual.nostr.example",
+		NostrRelayHints: []string{
+			"https://relay.storeforward.example",
+			"wss://relay.card.nostr.example",
+			"wss://relay.card.nostr.example",
+		},
+	}
+	got := nostrTargetsFromContact(contact)
+	want := []string{"wss://relay.card.nostr.example", "wss://relay.manual.nostr.example"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("nostr targets = %#v, want %#v", got, want)
+	}
+}

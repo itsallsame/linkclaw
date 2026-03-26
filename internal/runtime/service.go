@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/discovery"
@@ -70,7 +71,22 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 		Plaintext:   req.Plaintext,
 	}
 
-	for _, route := range routes {
+	for idx := 0; idx < len(routes); idx++ {
+		route := routes[idx]
+		if route.Type == transport.RouteTypeNostr {
+			groupEnd := idx
+			nostrRoutes := make([]transport.RouteCandidate, 0, 1)
+			for groupEnd < len(routes) && routes[groupEnd].Type == transport.RouteTypeNostr {
+				nostrRoutes = append(nostrRoutes, routes[groupEnd])
+				groupEnd++
+			}
+			result, ok := s.sendNostrFanout(ctx, envelope, nostrRoutes)
+			if ok {
+				return result, nil
+			}
+			idx = groupEnd - 1
+			continue
+		}
 		adapter := s.findTransport(route)
 		if adapter == nil {
 			continue
@@ -112,6 +128,88 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 		}, nil
 	}
 	return SendResult{}, fmt.Errorf("no usable transport route for contact %q", contact.CanonicalID)
+}
+
+type nostrSendAttempt struct {
+	route   transport.RouteCandidate
+	adapter transport.Transport
+	result  transport.SendResult
+	err     error
+}
+
+func (s *Service) sendNostrFanout(
+	ctx context.Context,
+	envelope transport.Envelope,
+	routes []transport.RouteCandidate,
+) (SendResult, bool) {
+	attempts := make([]nostrSendAttempt, len(routes))
+	var wg sync.WaitGroup
+	for idx, route := range routes {
+		adapter := s.findTransport(route)
+		attempts[idx] = nostrSendAttempt{
+			route:   route,
+			adapter: adapter,
+		}
+		if adapter == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, transportAdapter transport.Transport, candidate transport.RouteCandidate) {
+			defer wg.Done()
+			sendResult, sendErr := transportAdapter.Send(ctx, envelope, candidate)
+			attempts[i].result = sendResult
+			attempts[i].err = sendErr
+		}(idx, adapter, route)
+	}
+	wg.Wait()
+
+	var firstSuccess *SendResult
+	for _, attempt := range attempts {
+		if attempt.adapter == nil {
+			continue
+		}
+		if attempt.err != nil {
+			s.recordOutcome(ctx, attempt.route, envelope.MessageID, routing.RouteOutcomeFailed, false, true, attempt.err.Error(), "")
+			_ = s.hooks().OnDeliveryOutcome(ctx, DeliveryOutcomeEvent{
+				MessageID: envelope.MessageID,
+				Route:     attempt.route,
+				Transport: attempt.adapter.Name(),
+				Delivered: false,
+				Retryable: true,
+				Error:     attempt.err.Error(),
+			})
+			continue
+		}
+
+		// Nostr fallback is recoverable async delivery: accepted publish means queued/deferred.
+		delivery := attempt.result
+		delivery.Delivered = false
+		if !delivery.Retryable {
+			delivery.Retryable = true
+		}
+		s.recordOutcome(ctx, attempt.route, envelope.MessageID, routing.RouteOutcomeQueued, false, delivery.Retryable, "", "")
+		_ = s.hooks().OnDeliveryOutcome(ctx, DeliveryOutcomeEvent{
+			MessageID: envelope.MessageID,
+			Route:     attempt.route,
+			Transport: attempt.adapter.Name(),
+			Delivered: false,
+			Retryable: delivery.Retryable,
+		})
+
+		if firstSuccess == nil {
+			result := SendResult{
+				MessageID:     envelope.MessageID,
+				Status:        MessageStatusQueued,
+				SelectedRoute: attempt.route,
+				Transport:     attempt.adapter.Name(),
+			}
+			firstSuccess = &result
+		}
+	}
+	if firstSuccess == nil {
+		return SendResult{}, false
+	}
+	return *firstSuccess, true
 }
 
 func (s *Service) Sync(ctx context.Context, contact routing.ContactRuntimeView) (SyncResult, error) {

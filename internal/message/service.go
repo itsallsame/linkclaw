@@ -217,6 +217,7 @@ type contactRecord struct {
 	EncryptionPublicKey string
 	RelayURL            string
 	StoreForwardHints   []string
+	NostrRelayHints     []string
 	DirectURL           string
 	DirectToken         string
 	Status              string

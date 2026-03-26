@@ -17,6 +17,7 @@ import (
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 	transportlibp2p "github.com/xiewanpeng/claw-identity/internal/transport/libp2p"
+	transportnostr "github.com/xiewanpeng/claw-identity/internal/transport/nostr"
 	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 )
 
@@ -270,6 +271,9 @@ func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 			storeForwardHints = appendIfMissing(storeForwardHints, target)
 		}
 	}
+	if len(nostrTargetsFromContact(contact)) > 0 {
+		caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
+	}
 	return routing.ContactRuntimeView{
 		ContactID:             contact.ContactID,
 		CanonicalID:           contact.CanonicalID,
@@ -299,8 +303,9 @@ func directTransportEnabled() bool {
 
 func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactRecord, now time.Time) (agentdiscovery.PeerPresenceView, []transport.Transport, []transport.RouteCandidate) {
 	storeForwardTargets := storeForwardTargetsFromContact(contact)
-	routes := make([]transport.RouteCandidate, 0, len(storeForwardTargets)+2)
-	transports := make([]transport.Transport, 0, 2)
+	nostrTargets := nostrTargetsFromContact(contact)
+	routes := make([]transport.RouteCandidate, 0, len(storeForwardTargets)+len(nostrTargets)+2)
+	transports := make([]transport.Transport, 0, 3)
 	view := agentdiscovery.PeerPresenceView{
 		CanonicalID: contact.CanonicalID,
 		ResolvedAt:  now.UTC(),
@@ -358,6 +363,27 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 		if directSession != nil {
 			view.Reachable = true
 		}
+	}
+
+	if len(nostrTargets) > 0 {
+		transports = append(transports, transportnostr.New(transportnostr.NewBackend(nil)))
+		route := transport.RouteCandidate{
+			Type:     transport.RouteTypeNostr,
+			Label:    nostrTargets[0],
+			Priority: 30,
+			Target:   nostrTargets[0],
+		}
+		for _, target := range nostrTargets {
+			route.Label = target
+			route.Target = target
+			routes = append(routes, route)
+			view.RouteCandidates = append(view.RouteCandidates, route)
+		}
+		view.TransportCapabilities = appendIfMissing(view.TransportCapabilities, string(transport.RouteTypeNostr))
+		if view.PeerID == "" {
+			view.PeerID = contact.RecipientID
+		}
+		view.Reachable = true
 	}
 
 	if len(storeForwardTargets) > 0 {
@@ -681,6 +707,9 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 	for _, target := range storeForwardTargetsFromContact(contact) {
 		caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
 		storeForwardHints = appendIfMissing(storeForwardHints, target)
+	}
+	if len(nostrTargetsFromContact(contact)) > 0 {
+		caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
 	}
 	if err := store.UpsertContact(ctx, agentruntime.ContactRecord{
 		ContactID:             contact.ContactID,

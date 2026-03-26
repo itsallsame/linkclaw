@@ -741,6 +741,41 @@ func TestBuildSendRuntimeBoundaryUsesHTTPDirectWithoutExperimentalDirect(t *test
 	}
 }
 
+func TestBuildSendRuntimeBoundaryIncludesNostrFallbackRoutes(t *testing.T) {
+	contact := contactRecord{
+		ContactID:           "contact_nostr_fallback",
+		CanonicalID:         "did:key:z6MkNostrFallback",
+		DisplayName:         "Nostr Fallback",
+		RecipientID:         "rcpt_nostr_fallback",
+		SigningPublicKey:    "signing-key",
+		EncryptionPublicKey: "enc-key",
+		StoreForwardHints:   []string{"https://relay.storeforward.example"},
+		NostrRelayHints: []string{
+			"wss://relay-primary.nostr.example",
+			"wss://relay-backup.nostr.example",
+		},
+	}
+	selfProfile := selfMessagingProfile{
+		CanonicalID:      "did:key:z6MkSelf",
+		SigningPublicKey: "self-signing-key",
+	}
+
+	view, transports, routes := buildSendRuntimeBoundary(selfProfile, contact, time.Now().UTC())
+
+	if !hasNostrRoute(routes, "wss://relay-primary.nostr.example") || !hasNostrRoute(routes, "wss://relay-backup.nostr.example") {
+		t.Fatalf("routes = %#v, want both nostr fallback routes", routes)
+	}
+	if !hasStoreForwardRoute(routes, "https://relay.storeforward.example") {
+		t.Fatalf("routes = %#v, want store-forward fallback route", routes)
+	}
+	if !slices.Contains(view.TransportCapabilities, string(transport.RouteTypeNostr)) {
+		t.Fatalf("TransportCapabilities = %#v, want nostr", view.TransportCapabilities)
+	}
+	if len(transports) == 0 {
+		t.Fatal("transports len = 0, want nostr transport")
+	}
+}
+
 func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
 	if got, want := deriveTransportStatus(DirectionOutgoing, StatusRecovering, transport.RouteCandidate{}), TransportStatusDeferred; got != want {
 		t.Fatalf("deriveTransportStatus(outgoing,recovering) = %q, want %q", got, want)
@@ -823,6 +858,15 @@ func hasStoreForwardRoute(routes []transport.RouteCandidate, target string) bool
 func hasDirectRoute(routes []transport.RouteCandidate, target string) bool {
 	for _, route := range routes {
 		if route.Type == transport.RouteTypeDirect && route.Target == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNostrRoute(routes []transport.RouteCandidate, target string) bool {
+	for _, route := range routes {
+		if route.Type == transport.RouteTypeNostr && route.Target == target {
 			return true
 		}
 	}

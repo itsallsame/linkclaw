@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,6 +126,44 @@ func (s *stubTransport) Ack(_ context.Context, _ transport.RouteCandidate, curso
 		return s.ackErr
 	}
 	s.ackCalls = append(s.ackCalls, cursor)
+	return nil
+}
+
+type scriptedNostrTransport struct {
+	name    string
+	results map[string]transport.SendResult
+	errors  map[string]error
+
+	mu    sync.Mutex
+	calls []string
+}
+
+func (s *scriptedNostrTransport) Name() string { return s.name }
+func (s *scriptedNostrTransport) Supports(route transport.RouteCandidate) bool {
+	return route.Type == transport.RouteTypeNostr
+}
+func (s *scriptedNostrTransport) Send(_ context.Context, env transport.Envelope, route transport.RouteCandidate) (transport.SendResult, error) {
+	s.mu.Lock()
+	s.calls = append(s.calls, route.Target)
+	s.mu.Unlock()
+	if err, ok := s.errors[route.Target]; ok {
+		return transport.SendResult{}, err
+	}
+	if result, ok := s.results[route.Target]; ok {
+		if result.Route.Type == "" {
+			result.Route = route
+		}
+		if result.RemoteID == "" {
+			result.RemoteID = env.MessageID
+		}
+		return result, nil
+	}
+	return transport.SendResult{Route: route, RemoteID: env.MessageID, Delivered: false, Retryable: true}, nil
+}
+func (s *scriptedNostrTransport) Sync(context.Context, transport.RouteCandidate) (transport.SyncResult, error) {
+	return transport.SyncResult{}, nil
+}
+func (s *scriptedNostrTransport) Ack(context.Context, transport.RouteCandidate, string) error {
 	return nil
 }
 
@@ -283,6 +322,157 @@ func TestServiceSendFallsBackToStoreForwardAndRecordsQueuedOutcome(t *testing.T)
 	}
 	if got, want := planner.outcomes[1].Outcome, routing.RouteOutcomeQueued; got != want {
 		t.Fatalf("planner.outcomes[1].Outcome = %q, want %q", got, want)
+	}
+}
+
+func TestServiceSendDirectFailureTriggersParallelNostrFanout(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeDirect, Label: "peer-direct", Priority: 100, Target: "libp2p://peer"},
+			{Type: transport.RouteTypeNostr, Label: "relay-a", Priority: 30, Target: "wss://relay-a.example"},
+			{Type: transport.RouteTypeNostr, Label: "relay-b", Priority: 30, Target: "wss://relay-b.example"},
+			{Type: transport.RouteTypeNostr, Label: "relay-c", Priority: 30, Target: "wss://relay-c.example"},
+			{Type: transport.RouteTypeStoreForward, Label: "sf-relay", Priority: 1, Target: "https://relay.example"},
+		},
+	}
+	direct := &stubTransport{
+		name:      "libp2p_direct",
+		routeType: transport.RouteTypeDirect,
+		sendErr:   context.DeadlineExceeded,
+	}
+	nostr := &scriptedNostrTransport{
+		name: "nostr",
+		errors: map[string]error{
+			"wss://relay-a.example": context.Canceled,
+		},
+		results: map[string]transport.SendResult{
+			"wss://relay-b.example": {Delivered: true, Retryable: false},
+			"wss://relay-c.example": {Delivered: false, Retryable: true},
+		},
+	}
+	storeForward := &stubTransport{
+		name:      "store_forward",
+		routeType: transport.RouteTypeStoreForward,
+		sendResult: &transport.SendResult{
+			Delivered: false,
+			Retryable: true,
+		},
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		direct,
+		nostr,
+		storeForward,
+	)
+
+	result, err := service.Send(context.Background(), routing.ContactRuntimeView{
+		CanonicalID: "did:key:test",
+	}, SendRequest{
+		SenderID:    "self",
+		RecipientID: "peer",
+		Plaintext:   "hello",
+	})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if got, want := result.Transport, "nostr"; got != want {
+		t.Fatalf("Send() transport = %q, want %q", got, want)
+	}
+	if got, want := result.Status, MessageStatusQueued; got != want {
+		t.Fatalf("Send() status = %q, want %q", got, want)
+	}
+	if got, want := result.SelectedRoute.Target, "wss://relay-b.example"; got != want {
+		t.Fatalf("Send() selected route target = %q, want %q", got, want)
+	}
+	if got, want := len(nostr.calls), 3; got != want {
+		t.Fatalf("nostr fanout calls = %d, want %d", got, want)
+	}
+	if storeForward.sendCalls != 0 {
+		t.Fatalf("store_forward send calls = %d, want 0", storeForward.sendCalls)
+	}
+	if got, want := len(planner.outcomes), 4; got != want {
+		t.Fatalf("planner outcomes len = %d, want %d", got, want)
+	}
+	if got, want := planner.outcomes[0].Outcome, routing.RouteOutcomeFailed; got != want {
+		t.Fatalf("planner.outcomes[0].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[1].Outcome, routing.RouteOutcomeFailed; got != want {
+		t.Fatalf("planner.outcomes[1].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[2].Outcome, routing.RouteOutcomeQueued; got != want {
+		t.Fatalf("planner.outcomes[2].Outcome = %q, want %q", got, want)
+	}
+	if got, want := planner.outcomes[3].Outcome, routing.RouteOutcomeQueued; got != want {
+		t.Fatalf("planner.outcomes[3].Outcome = %q, want %q", got, want)
+	}
+}
+
+func TestServiceSendFallsBackToStoreForwardWhenAllNostrFanoutRoutesFail(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeDirect, Label: "peer-direct", Priority: 100, Target: "libp2p://peer"},
+			{Type: transport.RouteTypeNostr, Label: "relay-a", Priority: 30, Target: "wss://relay-a.example"},
+			{Type: transport.RouteTypeNostr, Label: "relay-b", Priority: 30, Target: "wss://relay-b.example"},
+			{Type: transport.RouteTypeStoreForward, Label: "sf-relay", Priority: 1, Target: "https://relay.example"},
+		},
+	}
+	direct := &stubTransport{
+		name:      "libp2p_direct",
+		routeType: transport.RouteTypeDirect,
+		sendErr:   context.DeadlineExceeded,
+	}
+	nostr := &scriptedNostrTransport{
+		name: "nostr",
+		errors: map[string]error{
+			"wss://relay-a.example": context.DeadlineExceeded,
+			"wss://relay-b.example": context.Canceled,
+		},
+		results: map[string]transport.SendResult{},
+	}
+	storeForward := &stubTransport{
+		name:      "store_forward",
+		routeType: transport.RouteTypeStoreForward,
+		sendResult: &transport.SendResult{
+			Delivered: false,
+			Retryable: true,
+		},
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		direct,
+		nostr,
+		storeForward,
+	)
+
+	result, err := service.Send(context.Background(), routing.ContactRuntimeView{
+		CanonicalID: "did:key:test",
+	}, SendRequest{
+		SenderID:    "self",
+		RecipientID: "peer",
+		Plaintext:   "hello",
+	})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if got, want := result.Transport, "store_forward"; got != want {
+		t.Fatalf("Send() transport = %q, want %q", got, want)
+	}
+	if got, want := result.Status, MessageStatusQueued; got != want {
+		t.Fatalf("Send() status = %q, want %q", got, want)
+	}
+	if storeForward.sendCalls != 1 {
+		t.Fatalf("store_forward send calls = %d, want 1", storeForward.sendCalls)
+	}
+	if got, want := len(nostr.calls), 2; got != want {
+		t.Fatalf("nostr fanout calls = %d, want %d", got, want)
+	}
+	if got, want := len(planner.outcomes), 4; got != want {
+		t.Fatalf("planner outcomes len = %d, want %d", got, want)
+	}
+	if got, want := planner.outcomes[3].Outcome, routing.RouteOutcomeQueued; got != want {
+		t.Fatalf("planner.outcomes[3].Outcome = %q, want %q", got, want)
 	}
 }
 

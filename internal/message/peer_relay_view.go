@@ -305,6 +305,17 @@ func applyRelayViewToContact(contact contactRecord, relayView peerRelayPubKeyVie
 		storeForwardHints = appendIfMissing(storeForwardHints, relayURL)
 	}
 	updated.StoreForwardHints = storeForwardHints
+
+	nostrHints := make([]string, 0, len(relayView.NostrRelayURLs))
+	for _, relay := range relayView.NostrRelayURLs {
+		if relayURLKind(relay) == relayKindNostr {
+			nostrHints = appendIfMissing(nostrHints, relay)
+		}
+	}
+	if relayURLKind(relayURL) == relayKindNostr {
+		nostrHints = appendIfMissing(nostrHints, relayURL)
+	}
+	updated.NostrRelayHints = nostrHints
 	return updated
 }
 
@@ -338,6 +349,19 @@ func storeForwardTargetsFromContact(contact contactRecord) []string {
 		}
 	}
 	if isStoreForwardRelayURL(contact.RelayURL) {
+		targets = appendIfMissing(targets, contact.RelayURL)
+	}
+	return targets
+}
+
+func nostrTargetsFromContact(contact contactRecord) []string {
+	targets := make([]string, 0, len(contact.NostrRelayHints)+1)
+	for _, hint := range contact.NostrRelayHints {
+		if relayURLKind(hint) == relayKindNostr {
+			targets = appendIfMissing(targets, hint)
+		}
+	}
+	if relayURLKind(contact.RelayURL) == relayKindNostr {
 		targets = appendIfMissing(targets, contact.RelayURL)
 	}
 	return targets
