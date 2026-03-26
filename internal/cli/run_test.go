@@ -641,6 +641,90 @@ func TestRunMessageSendAndOutboxJSON(t *testing.T) {
 	}
 }
 
+func TestRunMessageSendHumanOutputUsesProductTerms(t *testing.T) {
+	t.Parallel()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-human-home")
+	aliceInitCode, _, aliceInitErr := runForTest(t, []string{
+		"init",
+		"--home", aliceHome,
+		"--canonical-id", "did:key:z6MkAliceHuman",
+		"--display-name", "Alice Human",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if aliceInitCode != 0 {
+		t.Fatalf("alice init exit code = %d, stderr = %s", aliceInitCode, aliceInitErr)
+	}
+	exportCode, exportOut, exportErr := runForTest(t, []string{"card", "export", "--home", aliceHome, "--json"}, "")
+	if exportCode != 0 {
+		t.Fatalf("card export exit code = %d, stderr = %s", exportCode, exportErr)
+	}
+	var exported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
+		t.Fatalf("unmarshal exported card: %v", err)
+	}
+	cardJSON, err := json.Marshal(exported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal exported card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-human-home")
+	bobInitCode, _, bobInitErr := runForTest(t, []string{
+		"init",
+		"--home", bobHome,
+		"--canonical-id", "did:key:z6MkBobHuman",
+		"--display-name", "Bob Human",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if bobInitCode != 0 {
+		t.Fatalf("bob init exit code = %d, stderr = %s", bobInitCode, bobInitErr)
+	}
+	importCode, importOut, importErr := runForTest(t, []string{"card", "import", "--home", bobHome, "--json", string(cardJSON)}, "")
+	if importCode != 0 {
+		t.Fatalf("card import exit code = %d, stderr = %s", importCode, importErr)
+	}
+	var imported struct {
+		Result struct {
+			ContactID string `json:"contact_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(importOut), &imported); err != nil {
+		t.Fatalf("unmarshal imported contact: %v", err)
+	}
+
+	sendCode, sendOut, sendErr := runForTest(t, []string{
+		"message", "send",
+		"--home", bobHome,
+		"--body", "hello product terms",
+		imported.Result.ContactID,
+	}, "")
+	if sendCode != 0 {
+		t.Fatalf("message send exit code = %d, stderr = %s, stdout = %s", sendCode, sendErr, sendOut)
+	}
+	if !strings.Contains(sendOut, "Message deferred for recovery delivery.") {
+		t.Fatalf("expected deferred delivery headline in send output, got %q", sendOut)
+	}
+	if !strings.Contains(sendOut, "transport status: deferred") {
+		t.Fatalf("expected deferred transport status in send output, got %q", sendOut)
+	}
+	if !strings.Contains(sendOut, "the recipient needs to run `linkclaw message sync` to receive it") {
+		t.Fatalf("expected recovery guidance in send output, got %q", sendOut)
+	}
+	lower := strings.ToLower(sendOut)
+	if strings.Contains(lower, "relay calls") {
+		t.Fatalf("send output should not expose relay call internals: %q", sendOut)
+	}
+	if strings.Contains(lower, "nostr") {
+		t.Fatalf("send output should not expose nostr internals: %q", sendOut)
+	}
+}
+
 func TestRunMessageStatusJSON(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "linkclaw-status-home")
 	initCode, _, initErr := runForTest(t, []string{

@@ -815,6 +815,32 @@ test("runStatusCommand summarizes health and local state after initialization", 
   assert.match(result.message, /runtime mode: host-managed/);
 });
 
+test("runSyncCommand uses recovery wording instead of relay internals", async () => {
+  const home = await mkdtemp(join(tmpdir(), "linkclaw-sync-home-"));
+
+  await runLinkClaw(
+    { binaryPath, home },
+    {
+      command: "init",
+      canonicalId: "did:key:z6MkSyncCopy",
+      displayName: "Sync Copy",
+    },
+    pluginRoot,
+  );
+
+  const result = await runSyncCommand(
+    { binaryPath, home },
+    "",
+    pluginRoot,
+  );
+
+  assert.equal(result.type, "message");
+  assert.match(result.message, /LinkClaw sync completed/);
+  assert.match(result.message, /recovery checks: 0/);
+  assert.doesNotMatch(result.message.toLowerCase(), /relay calls/);
+  assert.doesNotMatch(result.message.toLowerCase(), /nostr/);
+});
+
 test("runStatusCommand reports not initialized state", async () => {
   const home = await mkdtemp(join(tmpdir(), "linkclaw-status-empty-home-"));
 
