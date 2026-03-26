@@ -641,6 +641,139 @@ func TestRunMessageSendAndOutboxJSON(t *testing.T) {
 	}
 }
 
+func TestRunMessageSendJSONReportsFailedWhenAllRuntimeRoutesFail(t *testing.T) {
+	t.Parallel()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-fail-home")
+	aliceInitCode, _, aliceInitErr := runForTest(t, []string{
+		"init",
+		"--home", aliceHome,
+		"--canonical-id", "did:key:z6MkAliceFail",
+		"--display-name", "Alice Fail",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if aliceInitCode != 0 {
+		t.Fatalf("alice init exit code = %d, stderr = %s", aliceInitCode, aliceInitErr)
+	}
+	exportCode, exportOut, exportErr := runForTest(t, []string{"card", "export", "--home", aliceHome, "--json"}, "")
+	if exportCode != 0 {
+		t.Fatalf("card export exit code = %d, stderr = %s", exportCode, exportErr)
+	}
+	var exported struct {
+		Result struct {
+			Card card.Card `json:"card"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(exportOut), &exported); err != nil {
+		t.Fatalf("unmarshal exported card: %v", err)
+	}
+	cardJSON, err := json.Marshal(exported.Result.Card)
+	if err != nil {
+		t.Fatalf("marshal exported card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-fail-home")
+	bobInitCode, _, bobInitErr := runForTest(t, []string{
+		"init",
+		"--home", bobHome,
+		"--canonical-id", "did:key:z6MkBobFail",
+		"--display-name", "Bob Fail",
+		"--non-interactive",
+		"--json",
+	}, "")
+	if bobInitCode != 0 {
+		t.Fatalf("bob init exit code = %d, stderr = %s", bobInitCode, bobInitErr)
+	}
+	importCode, importOut, importErr := runForTest(t, []string{"card", "import", "--home", bobHome, "--json", string(cardJSON)}, "")
+	if importCode != 0 {
+		t.Fatalf("card import exit code = %d, stderr = %s", importCode, importErr)
+	}
+	var imported struct {
+		Result struct {
+			ContactID string `json:"contact_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(importOut), &imported); err != nil {
+		t.Fatalf("unmarshal imported contact: %v", err)
+	}
+	if imported.Result.ContactID == "" {
+		t.Fatal("imported contact id = empty")
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(bobHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`UPDATE contacts SET relay_url = ? WHERE contact_id = ?`, "http://[::1", imported.Result.ContactID); err != nil {
+		t.Fatalf("set contact relay_url: %v", err)
+	}
+	var canonicalID string
+	if err := db.QueryRow(`SELECT canonical_id FROM contacts WHERE contact_id = ?`, imported.Result.ContactID).Scan(&canonicalID); err != nil {
+		t.Fatalf("query contact canonical_id: %v", err)
+	}
+	var selfID string
+	if err := db.QueryRow(`SELECT self_id FROM self_messaging_profiles ORDER BY created_at DESC LIMIT 1`).Scan(&selfID); err != nil {
+		t.Fatalf("query self_id: %v", err)
+	}
+
+	runtimeStore := agentruntime.NewStoreWithDB(db, time.Now().UTC())
+	if err := runtimeStore.UpsertTransportBinding(context.Background(), agentruntime.TransportBindingRecord{
+		BindingID:    "binding_cli_nostr_all_fail",
+		SelfID:       selfID,
+		CanonicalID:  canonicalID,
+		Transport:    string(transport.RouteTypeNostr),
+		RelayURL:     "wss://",
+		RouteLabel:   "wss://",
+		RouteType:    string(transport.RouteTypeNostr),
+		Direction:    "both",
+		Enabled:      true,
+		MetadataJSON: "{}",
+	}); err != nil {
+		t.Fatalf("upsert runtime transport binding: %v", err)
+	}
+
+	sendCode, sendOut, sendErr := runForTest(t, []string{
+		"message", "send",
+		"--home", bobHome,
+		"--body", "hello failed route",
+		"--json",
+		imported.Result.ContactID,
+	}, "")
+	if sendCode != 0 {
+		t.Fatalf("message send exit code = %d, stderr = %s, stdout = %s", sendCode, sendErr, sendOut)
+	}
+	var sent struct {
+		SchemaVersion string   `json:"schema_version"`
+		Command       string   `json:"command"`
+		Subcommand    *string  `json:"subcommand"`
+		Timestamp     string   `json:"timestamp"`
+		Warnings      []string `json:"warnings"`
+		OK            bool     `json:"ok"`
+		Result        struct {
+			Message struct {
+				Status          string `json:"status"`
+				TransportStatus string `json:"transport_status"`
+			} `json:"message"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(sendOut), &sent); err != nil {
+		t.Fatalf("unmarshal send output: %v", err)
+	}
+	assertEnvelopeMetadata(t, sent.SchemaVersion, sent.Command, sent.Subcommand, sent.Timestamp, sent.Warnings, "message", stringPtr("send"))
+	if !sent.OK {
+		t.Fatalf("expected message send ok=true")
+	}
+	if got, want := sent.Result.Message.Status, "failed"; got != want {
+		t.Fatalf("message status = %q, want %q", got, want)
+	}
+	if got, want := sent.Result.Message.TransportStatus, "failed"; got != want {
+		t.Fatalf("message transport status = %q, want %q", got, want)
+	}
+}
+
 func TestRunMessageSendHumanOutputUsesProductTerms(t *testing.T) {
 	t.Parallel()
 

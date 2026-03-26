@@ -476,6 +476,73 @@ func TestServiceSendFallsBackToStoreForwardWhenAllNostrFanoutRoutesFail(t *testi
 	}
 }
 
+func TestServiceSendReturnsErrorWhenDirectNostrAndStoreForwardAllFail(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeDirect, Label: "peer-direct", Priority: 100, Target: "libp2p://peer"},
+			{Type: transport.RouteTypeNostr, Label: "relay-a", Priority: 30, Target: "wss://relay-a.example"},
+			{Type: transport.RouteTypeNostr, Label: "relay-b", Priority: 30, Target: "wss://relay-b.example"},
+			{Type: transport.RouteTypeStoreForward, Label: "sf-relay", Priority: 1, Target: "https://relay.example"},
+		},
+	}
+	direct := &stubTransport{
+		name:      "libp2p_direct",
+		routeType: transport.RouteTypeDirect,
+		sendErr:   context.DeadlineExceeded,
+	}
+	nostr := &scriptedNostrTransport{
+		name: "nostr",
+		errors: map[string]error{
+			"wss://relay-a.example": context.DeadlineExceeded,
+			"wss://relay-b.example": context.Canceled,
+		},
+		results: map[string]transport.SendResult{},
+	}
+	storeForward := &stubTransport{
+		name:      "store_forward",
+		routeType: transport.RouteTypeStoreForward,
+		sendErr:   context.Canceled,
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{CanonicalID: "did:key:test", ResolvedAt: time.Now()}},
+		direct,
+		nostr,
+		storeForward,
+	)
+
+	_, err := service.Send(context.Background(), routing.ContactRuntimeView{
+		CanonicalID: "did:key:test",
+	}, SendRequest{
+		SenderID:    "self",
+		RecipientID: "peer",
+		Plaintext:   "hello",
+	})
+	if err == nil {
+		t.Fatal("Send() error = nil, want no usable transport route")
+	}
+	if got, want := err.Error(), `no usable transport route for contact "did:key:test"`; got != want {
+		t.Fatalf("Send() error = %q, want %q", got, want)
+	}
+	if direct.sendCalls != 1 {
+		t.Fatalf("direct send calls = %d, want 1", direct.sendCalls)
+	}
+	if got, want := len(nostr.calls), 2; got != want {
+		t.Fatalf("nostr fanout calls = %d, want %d", got, want)
+	}
+	if storeForward.sendCalls != 1 {
+		t.Fatalf("store_forward send calls = %d, want 1", storeForward.sendCalls)
+	}
+	if got, want := len(planner.outcomes), 4; got != want {
+		t.Fatalf("planner outcomes len = %d, want %d", got, want)
+	}
+	for idx, outcome := range planner.outcomes {
+		if got, want := outcome.Outcome, routing.RouteOutcomeFailed; got != want {
+			t.Fatalf("planner.outcomes[%d].Outcome = %q, want %q", idx, got, want)
+		}
+	}
+}
+
 func TestServiceSyncAggregatesTransportRecovery(t *testing.T) {
 	planner := &stubPlanner{
 		recoverRoutes: []transport.RouteCandidate{

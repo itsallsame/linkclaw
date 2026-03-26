@@ -13,7 +13,9 @@ import (
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
+	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
+	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 )
 
 func TestSendAndOutbox(t *testing.T) {
@@ -776,6 +778,108 @@ func TestBuildSendRuntimeBoundaryIncludesNostrFallbackRoutes(t *testing.T) {
 	}
 }
 
+func TestSendMarksMessageFailedWhenAllRuntimeRoutesFail(t *testing.T) {
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "0")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAliceAllFail",
+		DisplayName: "Alice All Fail",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	aliceCard, err := cardService.Export(ctx, card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobAllFail",
+		DisplayName: "Bob All Fail",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	imported, err := cardService.Import(ctx, card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice card into bob home: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(bobHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(ctx, `UPDATE contacts SET relay_url = ? WHERE contact_id = ?`, "https://relay.storeforward.invalid", imported.ContactID); err != nil {
+		t.Fatalf("set contact relay_url: %v", err)
+	}
+	var canonicalID string
+	if err := db.QueryRowContext(ctx, `SELECT canonical_id FROM contacts WHERE contact_id = ?`, imported.ContactID).Scan(&canonicalID); err != nil {
+		t.Fatalf("query contact canonical_id: %v", err)
+	}
+	selfProfile, err := loadSelfMessagingProfile(ctx, db, bobHome)
+	if err != nil {
+		t.Fatalf("load self messaging profile: %v", err)
+	}
+
+	runtimeStore := agentruntime.NewStoreWithDB(db, now)
+	if err := runtimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:    "binding_nostr_all_fail",
+		SelfID:       selfProfile.SelfID,
+		CanonicalID:  canonicalID,
+		Transport:    string(transport.RouteTypeNostr),
+		RelayURL:     "wss://",
+		RouteLabel:   "wss://",
+		RouteType:    string(transport.RouteTypeNostr),
+		Direction:    "both",
+		Enabled:      true,
+		MetadataJSON: "{}",
+	}); err != nil {
+		t.Fatalf("upsert runtime transport binding: %v", err)
+	}
+
+	storeForwardBackend := &stubFailingMailboxBackend{sendErr: context.DeadlineExceeded}
+	service := NewService()
+	service.StoreForwardBackend = storeForwardBackend
+
+	sent, err := service.Send(ctx, SendOptions{
+		Home:       bobHome,
+		ContactRef: imported.ContactID,
+		Body:       "hello all failed routes",
+	})
+	if err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+	if got, want := sent.Message.Status, StatusFailed; got != want {
+		t.Fatalf("message status = %q, want %q", got, want)
+	}
+	if got, want := sent.Message.TransportStatus, TransportStatusFailed; got != want {
+		t.Fatalf("transport status = %q, want %q", got, want)
+	}
+	if got, want := storeForwardBackend.sendCalls, 1; got != want {
+		t.Fatalf("store-forward send calls = %d, want %d", got, want)
+	}
+
+	attempts := loadRuntimeRouteAttempts(t, bobHome)
+	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "failed", "")
+	requireRouteAttempt(t, attempts, string(transport.RouteTypeStoreForward), "failed", "")
+}
+
 func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
 	if got, want := deriveTransportStatus(DirectionOutgoing, StatusRecovering, transport.RouteCandidate{}), TransportStatusDeferred; got != want {
 		t.Fatalf("deriveTransportStatus(outgoing,recovering) = %q, want %q", got, want)
@@ -789,6 +893,27 @@ func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
 	if got, want := deriveTransportStatus(DirectionOutgoing, StatusFailed, transport.RouteCandidate{}), TransportStatusFailed; got != want {
 		t.Fatalf("deriveTransportStatus(outgoing,failed) = %q, want %q", got, want)
 	}
+}
+
+type stubFailingMailboxBackend struct {
+	sendErr   error
+	sendCalls int
+}
+
+func (b *stubFailingMailboxBackend) Send(context.Context, string, transportstoreforward.MailboxSendRequest) (transportstoreforward.MailboxSendResponse, error) {
+	b.sendCalls++
+	if b.sendErr != nil {
+		return transportstoreforward.MailboxSendResponse{}, b.sendErr
+	}
+	return transportstoreforward.MailboxSendResponse{RemoteMessageID: "relay_msg"}, nil
+}
+
+func (b *stubFailingMailboxBackend) Pull(context.Context, string, string, string) (transportstoreforward.MailboxPullResponse, error) {
+	return transportstoreforward.MailboxPullResponse{}, nil
+}
+
+func (b *stubFailingMailboxBackend) Ack(context.Context, string, transportstoreforward.MailboxAckRequest) error {
+	return nil
 }
 
 type runtimeRouteAttempt struct {
