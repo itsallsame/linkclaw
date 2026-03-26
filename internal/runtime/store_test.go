@@ -37,6 +37,11 @@ func TestOpenStoreCreatesRuntimeTables(t *testing.T) {
 		"runtime_route_attempts",
 		"runtime_presence_cache",
 		"runtime_store_forward_state",
+		"runtime_transport_bindings",
+		"runtime_transport_relays",
+		"runtime_relay_sync_state",
+		"runtime_relay_delivery_attempts",
+		"runtime_recovered_event_observations",
 	} {
 		var name string
 		err := db.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name)
@@ -249,5 +254,152 @@ func TestStorePersistsRuntimeRecords(t *testing.T) {
 	}
 	if summary.LastAnnounceAt == "" {
 		t.Fatal("summary.LastAnnounceAt = empty, want timestamp")
+	}
+}
+
+func TestStorePersistsNostrRuntimeFoundationRecords(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+
+	store, _, err := OpenStore(ctx, home, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpsertTransportRelay(ctx, TransportRelayRecord{
+		RelayID:      "relay_1",
+		Transport:    "nostr",
+		RelayURL:     "wss://relay.example",
+		ReadEnabled:  true,
+		WriteEnabled: true,
+		Priority:     10,
+		Source:       "config",
+		Status:       "active",
+		MetadataJSON: `{"region":"apac"}`,
+	}); err != nil {
+		t.Fatalf("UpsertTransportRelay() error = %v", err)
+	}
+
+	relays, err := store.ListTransportRelays(ctx, "nostr")
+	if err != nil {
+		t.Fatalf("ListTransportRelays() error = %v", err)
+	}
+	if len(relays) != 1 {
+		t.Fatalf("ListTransportRelays() len = %d, want 1", len(relays))
+	}
+	if !relays[0].ReadEnabled || !relays[0].WriteEnabled || relays[0].RelayURL != "wss://relay.example" {
+		t.Fatalf("relay record = %+v, want enabled relay at wss://relay.example", relays[0])
+	}
+
+	if err := store.UpsertTransportBinding(ctx, TransportBindingRecord{
+		BindingID:    "binding_1",
+		SelfID:       "self_1",
+		CanonicalID:  "did:key:z6MkPeer",
+		Transport:    "nostr",
+		RelayURL:     "wss://relay.example",
+		RouteLabel:   "relay-main",
+		RouteType:    string(transport.RouteTypeNostr),
+		Direction:    "outgoing",
+		Enabled:      true,
+		MetadataJSON: `{"scope":"dm"}`,
+	}); err != nil {
+		t.Fatalf("UpsertTransportBinding() error = %v", err)
+	}
+
+	bindings, err := store.ListTransportBindings(ctx, "self_1")
+	if err != nil {
+		t.Fatalf("ListTransportBindings() error = %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("ListTransportBindings() len = %d, want 1", len(bindings))
+	}
+	if bindings[0].RouteType != string(transport.RouteTypeNostr) || !bindings[0].Enabled {
+		t.Fatalf("binding record = %+v, want enabled nostr route", bindings[0])
+	}
+
+	if err := store.SaveRelaySyncState(ctx, RelaySyncStateRecord{
+		SelfID:              "self_1",
+		RelayURL:            "wss://relay.example",
+		LastCursor:          "cursor-42",
+		LastEventAt:         "2026-03-26T08:00:00Z",
+		LastSyncStartedAt:   "2026-03-26T08:00:01Z",
+		LastSyncCompletedAt: "2026-03-26T08:00:02Z",
+		LastResult:          "success",
+		RecoveredCountTotal: 3,
+	}); err != nil {
+		t.Fatalf("SaveRelaySyncState() error = %v", err)
+	}
+
+	syncState, found, err := store.LoadRelaySyncState(ctx, "self_1", "wss://relay.example")
+	if err != nil {
+		t.Fatalf("LoadRelaySyncState() error = %v", err)
+	}
+	if !found {
+		t.Fatal("LoadRelaySyncState() found = false, want true")
+	}
+	if syncState.LastCursor != "cursor-42" || syncState.RecoveredCountTotal != 3 {
+		t.Fatalf("sync state = %+v, want cursor-42 and recovered total 3", syncState)
+	}
+
+	if err := store.RecordRelayDeliveryAttempt(ctx, RelayDeliveryAttemptRecord{
+		AttemptID:    "attempt_1",
+		MessageID:    "msg_1",
+		EventID:      "evt_1",
+		SelfID:       "self_1",
+		CanonicalID:  "did:key:z6MkPeer",
+		RelayURL:     "wss://relay.example",
+		Operation:    "publish",
+		Outcome:      "delivered",
+		Retryable:    true,
+		Acknowledged: true,
+		MetadataJSON: `{"notice":"ok"}`,
+		AttemptedAt:  "2026-03-26T08:00:03Z",
+	}); err != nil {
+		t.Fatalf("RecordRelayDeliveryAttempt() error = %v", err)
+	}
+
+	deliveryAttempts, err := store.ListRecentRelayDeliveryAttempts(ctx, "wss://relay.example", 5)
+	if err != nil {
+		t.Fatalf("ListRecentRelayDeliveryAttempts() error = %v", err)
+	}
+	if len(deliveryAttempts) != 1 {
+		t.Fatalf("ListRecentRelayDeliveryAttempts() len = %d, want 1", len(deliveryAttempts))
+	}
+	if deliveryAttempts[0].Operation != "publish" || !deliveryAttempts[0].Retryable {
+		t.Fatalf("delivery attempt = %+v, want publish and retryable=true", deliveryAttempts[0])
+	}
+
+	if err := store.UpsertRecoveredEventObservation(ctx, RecoveredEventObservationRecord{
+		SelfID:       "self_1",
+		EventID:      "evt_1",
+		RelayURL:     "wss://relay.example",
+		CanonicalID:  "did:key:z6MkPeer",
+		MessageID:    "msg_1",
+		ObservedAt:   "2026-03-26T08:00:04Z",
+		PayloadHash:  "sha256:abc",
+		PayloadJSON:  `{"kind":4}`,
+		MetadataJSON: `{"source":"sync"}`,
+	}); err != nil {
+		t.Fatalf("UpsertRecoveredEventObservation() error = %v", err)
+	}
+
+	seen, err := store.HasRecoveredEventObservation(ctx, "self_1", "evt_1")
+	if err != nil {
+		t.Fatalf("HasRecoveredEventObservation() error = %v", err)
+	}
+	if !seen {
+		t.Fatal("HasRecoveredEventObservation() = false, want true")
+	}
+
+	observations, err := store.ListRecoveredEventObservations(ctx, "self_1", 5)
+	if err != nil {
+		t.Fatalf("ListRecoveredEventObservations() error = %v", err)
+	}
+	if len(observations) != 1 {
+		t.Fatalf("ListRecoveredEventObservations() len = %d, want 1", len(observations))
+	}
+	if observations[0].EventID != "evt_1" || observations[0].RelayURL != "wss://relay.example" {
+		t.Fatalf("observation record = %+v, want evt_1 on wss://relay.example", observations[0])
 	}
 }

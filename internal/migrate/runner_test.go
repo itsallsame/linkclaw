@@ -33,6 +33,17 @@ func TestApplyCreatesTrustDiscoveryFoundationTablesOnCleanDB(t *testing.T) {
 	if !tableExists(t, db, "trust_events") {
 		t.Fatal("trust_events table missing")
 	}
+	for _, table := range []string{
+		"runtime_transport_bindings",
+		"runtime_transport_relays",
+		"runtime_relay_sync_state",
+		"runtime_relay_delivery_attempts",
+		"runtime_recovered_event_observations",
+	} {
+		if !tableExists(t, db, table) {
+			t.Fatalf("%s table missing", table)
+		}
+	}
 }
 
 func TestApplyMigratesExistingDBToTrustDiscoveryFoundation(t *testing.T) {

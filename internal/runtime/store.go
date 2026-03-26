@@ -118,6 +118,79 @@ type StoreForwardStateRecord struct {
 	UpdatedAt          string
 }
 
+type TransportBindingRecord struct {
+	BindingID    string
+	SelfID       string
+	CanonicalID  string
+	Transport    string
+	RelayURL     string
+	RouteLabel   string
+	RouteType    string
+	Direction    string
+	Enabled      bool
+	MetadataJSON string
+	CreatedAt    string
+	UpdatedAt    string
+}
+
+type TransportRelayRecord struct {
+	RelayID      string
+	Transport    string
+	RelayURL     string
+	ReadEnabled  bool
+	WriteEnabled bool
+	Priority     int
+	Source       string
+	Status       string
+	LastError    string
+	MetadataJSON string
+	CreatedAt    string
+	UpdatedAt    string
+}
+
+type RelaySyncStateRecord struct {
+	SelfID              string
+	RelayURL            string
+	LastCursor          string
+	LastEventAt         string
+	LastSyncStartedAt   string
+	LastSyncCompletedAt string
+	LastResult          string
+	LastError           string
+	RecoveredCountTotal int
+	UpdatedAt           string
+}
+
+type RelayDeliveryAttemptRecord struct {
+	AttemptID    string
+	MessageID    string
+	EventID      string
+	SelfID       string
+	CanonicalID  string
+	RelayURL     string
+	Operation    string
+	Outcome      string
+	Error        string
+	Retryable    bool
+	Acknowledged bool
+	MetadataJSON string
+	AttemptedAt  string
+}
+
+type RecoveredEventObservationRecord struct {
+	SelfID       string
+	EventID      string
+	RelayURL     string
+	CanonicalID  string
+	MessageID    string
+	ObservedAt   string
+	PayloadHash  string
+	PayloadJSON  string
+	MetadataJSON string
+	CreatedAt    string
+	UpdatedAt    string
+}
+
 type PresenceRecord struct {
 	CanonicalID           string
 	PeerID                string
@@ -708,6 +781,422 @@ func (s *Store) SaveStoreForwardState(ctx context.Context, record StoreForwardSt
 		return fmt.Errorf("save runtime store-forward state: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) UpsertTransportBinding(ctx context.Context, record TransportBindingRecord) error {
+	now := coalesceString(record.UpdatedAt, s.now().Format(time.RFC3339Nano))
+	createdAt := coalesceString(record.CreatedAt, now)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO runtime_transport_bindings (
+			binding_id, self_id, canonical_id, transport, relay_url, route_label, route_type,
+			direction, enabled, metadata_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(binding_id) DO UPDATE SET
+			self_id = excluded.self_id,
+			canonical_id = excluded.canonical_id,
+			transport = excluded.transport,
+			relay_url = excluded.relay_url,
+			route_label = excluded.route_label,
+			route_type = excluded.route_type,
+			direction = excluded.direction,
+			enabled = excluded.enabled,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at
+	`,
+		record.BindingID,
+		record.SelfID,
+		record.CanonicalID,
+		record.Transport,
+		record.RelayURL,
+		record.RouteLabel,
+		record.RouteType,
+		record.Direction,
+		boolToInt(record.Enabled),
+		coalesceString(record.MetadataJSON, "{}"),
+		createdAt,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert runtime transport binding: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListTransportBindings(ctx context.Context, selfID string) ([]TransportBindingRecord, error) {
+	query := `
+		SELECT binding_id, self_id, canonical_id, transport, relay_url, route_label, route_type,
+		       direction, enabled, metadata_json, created_at, updated_at
+		FROM runtime_transport_bindings
+	`
+	args := make([]any, 0, 1)
+	if strings.TrimSpace(selfID) != "" {
+		query += " WHERE self_id = ?"
+		args = append(args, selfID)
+	}
+	query += " ORDER BY transport ASC, relay_url ASC, binding_id ASC"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list runtime transport bindings: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]TransportBindingRecord, 0)
+	for rows.Next() {
+		var record TransportBindingRecord
+		var enabled int
+		if err := rows.Scan(
+			&record.BindingID,
+			&record.SelfID,
+			&record.CanonicalID,
+			&record.Transport,
+			&record.RelayURL,
+			&record.RouteLabel,
+			&record.RouteType,
+			&record.Direction,
+			&enabled,
+			&record.MetadataJSON,
+			&record.CreatedAt,
+			&record.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan runtime transport binding: %w", err)
+		}
+		record.Enabled = enabled == 1
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtime transport bindings: %w", err)
+	}
+	return records, nil
+}
+
+func (s *Store) UpsertTransportRelay(ctx context.Context, record TransportRelayRecord) error {
+	now := coalesceString(record.UpdatedAt, s.now().Format(time.RFC3339Nano))
+	createdAt := coalesceString(record.CreatedAt, now)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO runtime_transport_relays (
+			relay_id, transport, relay_url, read_enabled, write_enabled, priority, source, status,
+			last_error, metadata_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(relay_url) DO UPDATE SET
+			relay_id = excluded.relay_id,
+			transport = excluded.transport,
+			read_enabled = excluded.read_enabled,
+			write_enabled = excluded.write_enabled,
+			priority = excluded.priority,
+			source = excluded.source,
+			status = excluded.status,
+			last_error = excluded.last_error,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at
+	`,
+		record.RelayID,
+		record.Transport,
+		record.RelayURL,
+		boolToInt(record.ReadEnabled),
+		boolToInt(record.WriteEnabled),
+		record.Priority,
+		record.Source,
+		record.Status,
+		record.LastError,
+		coalesceString(record.MetadataJSON, "{}"),
+		createdAt,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert runtime transport relay: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListTransportRelays(ctx context.Context, transportName string) ([]TransportRelayRecord, error) {
+	query := `
+		SELECT relay_id, transport, relay_url, read_enabled, write_enabled, priority, source, status,
+		       last_error, metadata_json, created_at, updated_at
+		FROM runtime_transport_relays
+	`
+	args := make([]any, 0, 1)
+	if strings.TrimSpace(transportName) != "" {
+		query += " WHERE transport = ?"
+		args = append(args, transportName)
+	}
+	query += " ORDER BY priority DESC, relay_url ASC"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list runtime transport relays: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]TransportRelayRecord, 0)
+	for rows.Next() {
+		var record TransportRelayRecord
+		var readEnabled, writeEnabled int
+		if err := rows.Scan(
+			&record.RelayID,
+			&record.Transport,
+			&record.RelayURL,
+			&readEnabled,
+			&writeEnabled,
+			&record.Priority,
+			&record.Source,
+			&record.Status,
+			&record.LastError,
+			&record.MetadataJSON,
+			&record.CreatedAt,
+			&record.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan runtime transport relay: %w", err)
+		}
+		record.ReadEnabled = readEnabled == 1
+		record.WriteEnabled = writeEnabled == 1
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtime transport relays: %w", err)
+	}
+	return records, nil
+}
+
+func (s *Store) SaveRelaySyncState(ctx context.Context, record RelaySyncStateRecord) error {
+	now := coalesceString(record.UpdatedAt, s.now().Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO runtime_relay_sync_state (
+			self_id, relay_url, last_cursor, last_event_at, last_sync_started_at, last_sync_completed_at,
+			last_result, last_error, recovered_count_total, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(self_id, relay_url) DO UPDATE SET
+			last_cursor = excluded.last_cursor,
+			last_event_at = excluded.last_event_at,
+			last_sync_started_at = excluded.last_sync_started_at,
+			last_sync_completed_at = excluded.last_sync_completed_at,
+			last_result = excluded.last_result,
+			last_error = excluded.last_error,
+			recovered_count_total = excluded.recovered_count_total,
+			updated_at = excluded.updated_at
+	`,
+		record.SelfID,
+		record.RelayURL,
+		record.LastCursor,
+		record.LastEventAt,
+		record.LastSyncStartedAt,
+		record.LastSyncCompletedAt,
+		record.LastResult,
+		record.LastError,
+		record.RecoveredCountTotal,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("save runtime relay sync state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) LoadRelaySyncState(ctx context.Context, selfID string, relayURL string) (RelaySyncStateRecord, bool, error) {
+	var record RelaySyncStateRecord
+	err := s.db.QueryRowContext(ctx, `
+		SELECT self_id, relay_url, last_cursor, last_event_at, last_sync_started_at, last_sync_completed_at,
+		       last_result, last_error, recovered_count_total, updated_at
+		FROM runtime_relay_sync_state
+		WHERE self_id = ? AND relay_url = ?
+	`, selfID, relayURL).Scan(
+		&record.SelfID,
+		&record.RelayURL,
+		&record.LastCursor,
+		&record.LastEventAt,
+		&record.LastSyncStartedAt,
+		&record.LastSyncCompletedAt,
+		&record.LastResult,
+		&record.LastError,
+		&record.RecoveredCountTotal,
+		&record.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return RelaySyncStateRecord{}, false, nil
+	}
+	if err != nil {
+		return RelaySyncStateRecord{}, false, fmt.Errorf("load runtime relay sync state: %w", err)
+	}
+	return record, true, nil
+}
+
+func (s *Store) RecordRelayDeliveryAttempt(ctx context.Context, record RelayDeliveryAttemptRecord) error {
+	attemptedAt := coalesceString(record.AttemptedAt, s.now().Format(time.RFC3339Nano))
+	attemptID := strings.TrimSpace(record.AttemptID)
+	if attemptID == "" {
+		attemptID = fmt.Sprintf("%s:%s:%d", coalesceString(record.MessageID, record.EventID, "relay"), record.RelayURL, s.now().UnixNano())
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO runtime_relay_delivery_attempts (
+			attempt_id, message_id, event_id, self_id, canonical_id, relay_url, operation, outcome,
+			error, retryable, acknowledged, metadata_json, attempted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		attemptID,
+		record.MessageID,
+		record.EventID,
+		record.SelfID,
+		record.CanonicalID,
+		record.RelayURL,
+		record.Operation,
+		record.Outcome,
+		record.Error,
+		boolToInt(record.Retryable),
+		boolToInt(record.Acknowledged),
+		coalesceString(record.MetadataJSON, "{}"),
+		attemptedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("record runtime relay delivery attempt: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListRecentRelayDeliveryAttempts(ctx context.Context, relayURL string, limit int) ([]RelayDeliveryAttemptRecord, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `
+		SELECT attempt_id, message_id, event_id, self_id, canonical_id, relay_url, operation, outcome,
+		       error, retryable, acknowledged, metadata_json, attempted_at
+		FROM runtime_relay_delivery_attempts
+	`
+	args := make([]any, 0, 2)
+	if strings.TrimSpace(relayURL) != "" {
+		query += " WHERE relay_url = ?"
+		args = append(args, relayURL)
+	}
+	query += " ORDER BY attempted_at DESC, attempt_id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list runtime relay delivery attempts: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]RelayDeliveryAttemptRecord, 0, limit)
+	for rows.Next() {
+		var record RelayDeliveryAttemptRecord
+		var retryable, acknowledged int
+		if err := rows.Scan(
+			&record.AttemptID,
+			&record.MessageID,
+			&record.EventID,
+			&record.SelfID,
+			&record.CanonicalID,
+			&record.RelayURL,
+			&record.Operation,
+			&record.Outcome,
+			&record.Error,
+			&retryable,
+			&acknowledged,
+			&record.MetadataJSON,
+			&record.AttemptedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan runtime relay delivery attempt: %w", err)
+		}
+		record.Retryable = retryable == 1
+		record.Acknowledged = acknowledged == 1
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtime relay delivery attempts: %w", err)
+	}
+	return records, nil
+}
+
+func (s *Store) UpsertRecoveredEventObservation(ctx context.Context, record RecoveredEventObservationRecord) error {
+	now := coalesceString(record.UpdatedAt, s.now().Format(time.RFC3339Nano))
+	createdAt := coalesceString(record.CreatedAt, now)
+	observedAt := coalesceString(record.ObservedAt, now)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO runtime_recovered_event_observations (
+			self_id, event_id, relay_url, canonical_id, message_id, observed_at, payload_hash,
+			payload_json, metadata_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(self_id, event_id, relay_url) DO UPDATE SET
+			canonical_id = excluded.canonical_id,
+			message_id = excluded.message_id,
+			observed_at = excluded.observed_at,
+			payload_hash = excluded.payload_hash,
+			payload_json = excluded.payload_json,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at
+	`,
+		record.SelfID,
+		record.EventID,
+		record.RelayURL,
+		record.CanonicalID,
+		record.MessageID,
+		observedAt,
+		record.PayloadHash,
+		record.PayloadJSON,
+		coalesceString(record.MetadataJSON, "{}"),
+		createdAt,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert runtime recovered event observation: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) HasRecoveredEventObservation(ctx context.Context, selfID string, eventID string) (bool, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM runtime_recovered_event_observations
+		WHERE self_id = ? AND event_id = ?
+	`, selfID, eventID).Scan(&count); err != nil {
+		return false, fmt.Errorf("check runtime recovered event observation: %w", err)
+	}
+	return count > 0, nil
+}
+
+func (s *Store) ListRecoveredEventObservations(ctx context.Context, selfID string, limit int) ([]RecoveredEventObservationRecord, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	query := `
+		SELECT self_id, event_id, relay_url, canonical_id, message_id, observed_at, payload_hash,
+		       payload_json, metadata_json, created_at, updated_at
+		FROM runtime_recovered_event_observations
+	`
+	args := make([]any, 0, 2)
+	if strings.TrimSpace(selfID) != "" {
+		query += " WHERE self_id = ?"
+		args = append(args, selfID)
+	}
+	query += " ORDER BY observed_at DESC, event_id DESC, relay_url ASC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list runtime recovered event observations: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]RecoveredEventObservationRecord, 0, limit)
+	for rows.Next() {
+		var record RecoveredEventObservationRecord
+		if err := rows.Scan(
+			&record.SelfID,
+			&record.EventID,
+			&record.RelayURL,
+			&record.CanonicalID,
+			&record.MessageID,
+			&record.ObservedAt,
+			&record.PayloadHash,
+			&record.PayloadJSON,
+			&record.MetadataJSON,
+			&record.CreatedAt,
+			&record.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan runtime recovered event observation: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtime recovered event observations: %w", err)
+	}
+	return records, nil
 }
 
 func (s *Store) LoadStatusSummary(ctx context.Context) (StatusSummary, error) {
