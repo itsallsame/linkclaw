@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/xiewanpeng/claw-identity/internal/layout"
+	"github.com/xiewanpeng/claw-identity/internal/nostrbindings"
 
 	_ "modernc.org/sqlite"
 )
@@ -188,18 +189,22 @@ type webFingerLink struct {
 }
 
 type agentCardDocument struct {
-	ID                  string   `json:"id"`
-	CanonicalID         string   `json:"canonical_id"`
-	Name                string   `json:"name"`
-	Description         string   `json:"description,omitempty"`
-	Origin              string   `json:"origin"`
-	ServiceEndpoint     string   `json:"service_endpoint"`
-	DIDURL              string   `json:"did_url"`
-	WebFingerURL        string   `json:"webfinger_url"`
-	ProfileURL          string   `json:"profile_url,omitempty"`
-	VerificationMethods []string `json:"verification_methods"`
-	Capabilities        []string `json:"capabilities"`
-	AuthRequirements    []string `json:"auth_requirements"`
+	ID                    string   `json:"id"`
+	CanonicalID           string   `json:"canonical_id"`
+	Name                  string   `json:"name"`
+	Description           string   `json:"description,omitempty"`
+	Origin                string   `json:"origin"`
+	ServiceEndpoint       string   `json:"service_endpoint"`
+	DIDURL                string   `json:"did_url"`
+	WebFingerURL          string   `json:"webfinger_url"`
+	ProfileURL            string   `json:"profile_url,omitempty"`
+	VerificationMethods   []string `json:"verification_methods"`
+	Capabilities          []string `json:"capabilities"`
+	TransportCapabilities []string `json:"transport_capabilities,omitempty"`
+	RelayURLs             []string `json:"relay_urls,omitempty"`
+	NostrPublicKeys       []string `json:"nostr_public_keys,omitempty"`
+	NostrPrimaryPublicKey string   `json:"nostr_primary_public_key,omitempty"`
+	AuthRequirements      []string `json:"auth_requirements"`
 }
 
 var profileTemplate = template.Must(template.New("profile").Parse(`<!DOCTYPE html>
@@ -290,9 +295,13 @@ func (s *Service) Publish(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	nostrSnapshot, err := nostrbindings.LoadSelfSnapshot(ctx, db, identity.SelfID)
+	if err != nil {
+		return Result{}, err
+	}
 
 	selectedKinds := tierArtifacts(tier)
-	bundle, err := compileBundle(identity, keys, urls, selectedKinds)
+	bundle, err := compileBundle(identity, keys, urls, selectedKinds, nostrSnapshot)
 	if err != nil {
 		return Result{}, err
 	}
@@ -560,7 +569,7 @@ func tierArtifacts(tier string) []artifactKind {
 	}
 }
 
-func compileBundle(identity selfIdentity, keys []keyRecord, urls bundleURLs, selected []artifactKind) (compiledBundle, error) {
+func compileBundle(identity selfIdentity, keys []keyRecord, urls bundleURLs, selected []artifactKind, nostrSnapshot nostrbindings.Snapshot) (compiledBundle, error) {
 	selectedSet := make(map[artifactKind]bool, len(selected))
 	for _, kind := range selected {
 		selectedSet[kind] = true
@@ -576,7 +585,7 @@ func compileBundle(identity selfIdentity, keys []keyRecord, urls bundleURLs, sel
 		bundle.WebFinger = buildWebFingerDocument(identity, urls, selectedSet)
 	}
 	if selectedSet[artifactAgentCard] {
-		bundle.AgentCard = buildAgentCardDocument(identity, keys, urls, selectedSet)
+		bundle.AgentCard = buildAgentCardDocument(identity, keys, urls, selectedSet, nostrSnapshot)
 	}
 	if selectedSet[artifactProfile] {
 		profileHTML, err := renderProfile(identity, urls)
@@ -705,7 +714,7 @@ func buildWebFingerDocument(identity selfIdentity, urls bundleURLs, selected map
 	}
 }
 
-func buildAgentCardDocument(identity selfIdentity, keys []keyRecord, urls bundleURLs, selected map[artifactKind]bool) agentCardDocument {
+func buildAgentCardDocument(identity selfIdentity, keys []keyRecord, urls bundleURLs, selected map[artifactKind]bool, nostrSnapshot nostrbindings.Snapshot) agentCardDocument {
 	card := agentCardDocument{
 		ID:                  urls.AgentCard,
 		CanonicalID:         identity.CanonicalID,
@@ -721,6 +730,13 @@ func buildAgentCardDocument(identity selfIdentity, keys []keyRecord, urls bundle
 	}
 	if selected[artifactProfile] {
 		card.ProfileURL = urls.Profile
+	}
+	if nostrSnapshot.HasCapability() {
+		card.Capabilities = append(card.Capabilities, nostrbindings.CapabilityNostr)
+		card.TransportCapabilities = append(card.TransportCapabilities, nostrbindings.CapabilityNostr)
+		card.RelayURLs = append([]string(nil), nostrSnapshot.RelayURLs...)
+		card.NostrPublicKeys = append([]string(nil), nostrSnapshot.PublicKeys...)
+		card.NostrPrimaryPublicKey = strings.TrimSpace(nostrSnapshot.PrimaryPublicKey)
 	}
 	return card
 }

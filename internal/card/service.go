@@ -15,6 +15,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 	"github.com/xiewanpeng/claw-identity/internal/messagingprofile"
 	"github.com/xiewanpeng/claw-identity/internal/migrate"
+	"github.com/xiewanpeng/claw-identity/internal/nostrbindings"
 
 	_ "modernc.org/sqlite"
 )
@@ -37,14 +38,18 @@ type ImportOptions struct {
 type MessagingProfile = messagingprofile.Profile
 
 type Card struct {
-	SchemaVersion string           `json:"schema_version"`
-	ID            string           `json:"id"`
-	DisplayName   string           `json:"display_name"`
-	CreatedAt     string           `json:"created_at"`
-	SigningKey    string           `json:"signing_public_key"`
-	EncryptionKey string           `json:"encryption_public_key"`
-	Messaging     MessagingProfile `json:"messaging"`
-	Signature     string           `json:"signature"`
+	SchemaVersion         string           `json:"schema_version"`
+	ID                    string           `json:"id"`
+	DisplayName           string           `json:"display_name"`
+	CreatedAt             string           `json:"created_at"`
+	SigningKey            string           `json:"signing_public_key"`
+	EncryptionKey         string           `json:"encryption_public_key"`
+	Messaging             MessagingProfile `json:"messaging"`
+	TransportCapabilities []string         `json:"transport_capabilities,omitempty"`
+	RelayURLs             []string         `json:"relay_urls,omitempty"`
+	NostrPublicKeys       []string         `json:"nostr_public_keys,omitempty"`
+	NostrPrimaryPublicKey string           `json:"nostr_primary_public_key,omitempty"`
+	Signature             string           `json:"signature"`
 }
 
 type ExportResult struct {
@@ -93,15 +98,25 @@ func (s *Service) Export(ctx context.Context, opts Options) (ExportResult, error
 	if err != nil {
 		return ExportResult{}, err
 	}
+	nostrSnapshot, err := nostrbindings.LoadSelfSnapshot(ctx, db, selfID)
+	if err != nil {
+		return ExportResult{}, err
+	}
 
 	card := Card{
-		SchemaVersion: SchemaVersion,
-		ID:            canonicalID,
-		DisplayName:   displayName,
-		CreatedAt:     createdAt,
-		SigningKey:    signingPublicKey,
-		EncryptionKey: encryptionPublicKey,
-		Messaging:     profile,
+		SchemaVersion:         SchemaVersion,
+		ID:                    canonicalID,
+		DisplayName:           displayName,
+		CreatedAt:             createdAt,
+		SigningKey:            signingPublicKey,
+		EncryptionKey:         encryptionPublicKey,
+		Messaging:             profile,
+		RelayURLs:             append([]string(nil), nostrSnapshot.RelayURLs...),
+		NostrPublicKeys:       append([]string(nil), nostrSnapshot.PublicKeys...),
+		NostrPrimaryPublicKey: strings.TrimSpace(nostrSnapshot.PrimaryPublicKey),
+	}
+	if nostrSnapshot.HasCapability() {
+		card.TransportCapabilities = []string{nostrbindings.CapabilityNostr}
 	}
 	signature, err := signCard(card, privateKeyPath)
 	if err != nil {
@@ -274,13 +289,17 @@ func verifyCard(card Card) error {
 
 func unsignedPayload(card Card) ([]byte, error) {
 	payload := struct {
-		SchemaVersion string           `json:"schema_version"`
-		ID            string           `json:"id"`
-		DisplayName   string           `json:"display_name"`
-		CreatedAt     string           `json:"created_at"`
-		SigningKey    string           `json:"signing_public_key"`
-		EncryptionKey string           `json:"encryption_public_key"`
-		Messaging     MessagingProfile `json:"messaging"`
+		SchemaVersion         string           `json:"schema_version"`
+		ID                    string           `json:"id"`
+		DisplayName           string           `json:"display_name"`
+		CreatedAt             string           `json:"created_at"`
+		SigningKey            string           `json:"signing_public_key"`
+		EncryptionKey         string           `json:"encryption_public_key"`
+		Messaging             MessagingProfile `json:"messaging"`
+		TransportCapabilities []string         `json:"transport_capabilities,omitempty"`
+		RelayURLs             []string         `json:"relay_urls,omitempty"`
+		NostrPublicKeys       []string         `json:"nostr_public_keys,omitempty"`
+		NostrPrimaryPublicKey string           `json:"nostr_primary_public_key,omitempty"`
 	}{
 		SchemaVersion: strings.TrimSpace(card.SchemaVersion),
 		ID:            strings.TrimSpace(card.ID),
@@ -294,6 +313,10 @@ func unsignedPayload(card Card) ([]byte, error) {
 			DirectToken: strings.TrimSpace(card.Messaging.DirectToken),
 			RecipientID: strings.TrimSpace(card.Messaging.RecipientID),
 		},
+		TransportCapabilities: normalizeStringList(card.TransportCapabilities),
+		RelayURLs:             normalizeStringList(card.RelayURLs),
+		NostrPublicKeys:       normalizeStringList(card.NostrPublicKeys),
+		NostrPrimaryPublicKey: strings.TrimSpace(card.NostrPrimaryPublicKey),
 	}
 	if payload.ID == "" {
 		return nil, fmt.Errorf("identity card id is required")
@@ -321,6 +344,24 @@ func unsignedPayload(card Card) ([]byte, error) {
 		return nil, fmt.Errorf("marshal identity card payload: %w", err)
 	}
 	return encoded, nil
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		normalized = append(normalized, trimmed)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func parseCardInput(input string) (Card, string, error) {

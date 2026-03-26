@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,88 @@ func TestServicePublishTierBundles(t *testing.T) {
 				t.Fatalf("persisted default_profile_url = %q", profileURL)
 			}
 		})
+	}
+}
+
+func TestServicePublishAgentCardIncludesNostrBindings(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	home := seedPublishHome(t, ctx)
+	outputDir := filepath.Join(t.TempDir(), "publish")
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	var selfID string
+	if err := db.QueryRow(`SELECT self_id FROM self_identities LIMIT 1`).Scan(&selfID); err != nil {
+		t.Fatalf("query self id: %v", err)
+	}
+
+	stamp := "2026-03-26T09:30:00Z"
+	if _, err := db.Exec(
+		`INSERT INTO runtime_transport_bindings (
+			binding_id, self_id, canonical_id, transport, relay_url, route_label, route_type,
+			direction, enabled, metadata_json, created_at, updated_at
+		) VALUES (?, ?, ?, 'nostr', ?, 'relay-main', 'nostr', 'both', 1, ?, ?, ?)`,
+		"binding_1",
+		selfID,
+		"did:web:agent.example",
+		"wss://relay.binding.example",
+		`{"nostr_public_keys":["npub-pub-1","npub-pub-2"],"nostr_primary_public_key":"npub-pub-2"}`,
+		stamp,
+		stamp,
+	); err != nil {
+		t.Fatalf("insert runtime_transport_bindings: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO runtime_transport_relays (
+			relay_id, transport, relay_url, read_enabled, write_enabled, priority, source, status,
+			last_error, metadata_json, created_at, updated_at
+		) VALUES (?, 'nostr', ?, 1, 1, 7, 'config', 'active', '', '{}', ?, ?)`,
+		"relay_1",
+		"wss://relay.table.example",
+		stamp,
+		stamp,
+	); err != nil {
+		t.Fatalf("insert runtime_transport_relays: %v", err)
+	}
+
+	service := NewService()
+	if _, err := service.Publish(ctx, Options{
+		Home:   home,
+		Origin: "https://agent.example",
+		Output: outputDir,
+		Tier:   TierRecommended,
+	}); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+
+	agentCardContent, err := os.ReadFile(filepath.Join(outputDir, ".well-known", "agent-card.json"))
+	if err != nil {
+		t.Fatalf("read agent-card.json: %v", err)
+	}
+	var card agentCardDocument
+	if err := json.Unmarshal(agentCardContent, &card); err != nil {
+		t.Fatalf("unmarshal agent-card.json: %v", err)
+	}
+	if !slices.Contains(card.Capabilities, "nostr") {
+		t.Fatalf("capabilities = %v, want nostr", card.Capabilities)
+	}
+	if !slices.Contains(card.TransportCapabilities, "nostr") {
+		t.Fatalf("transport_capabilities = %v, want nostr", card.TransportCapabilities)
+	}
+	if !slices.Contains(card.RelayURLs, "wss://relay.binding.example") || !slices.Contains(card.RelayURLs, "wss://relay.table.example") {
+		t.Fatalf("relay_urls = %v, want both relays", card.RelayURLs)
+	}
+	if !slices.Contains(card.NostrPublicKeys, "npub-pub-1") || !slices.Contains(card.NostrPublicKeys, "npub-pub-2") {
+		t.Fatalf("nostr_public_keys = %v, want npub-pub-1 and npub-pub-2", card.NostrPublicKeys)
+	}
+	if card.NostrPrimaryPublicKey != "npub-pub-2" {
+		t.Fatalf("nostr_primary_public_key = %q, want npub-pub-2", card.NostrPrimaryPublicKey)
 	}
 }
 
