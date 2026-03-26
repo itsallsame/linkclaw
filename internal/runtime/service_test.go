@@ -448,7 +448,7 @@ func TestServiceStatusReportsRuntimeMode(t *testing.T) {
 	}
 }
 
-func TestServiceSendIgnoresNonP0Routes(t *testing.T) {
+func TestServiceSendUsesNostrRouteWhenTransportAvailable(t *testing.T) {
 	planner := &stubPlanner{
 		sendRoutes: []transport.RouteCandidate{
 			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 10, Target: "wss://relay.example"},
@@ -461,22 +461,25 @@ func TestServiceSendIgnoresNonP0Routes(t *testing.T) {
 		nostr,
 	)
 
-	_, err := service.Send(context.Background(), routing.ContactRuntimeView{
+	result, err := service.Send(context.Background(), routing.ContactRuntimeView{
 		CanonicalID: "did:key:test",
 	}, SendRequest{
 		SenderID:    "self",
 		RecipientID: "peer",
 		Plaintext:   "hello",
 	})
-	if err == nil {
-		t.Fatal("Send() error = nil, want no usable transport route error")
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
 	}
-	if nostr.sendCalls != 0 {
-		t.Fatalf("nostr send calls = %d, want 0 (non-P0 routes should be ignored)", nostr.sendCalls)
+	if nostr.sendCalls != 1 {
+		t.Fatalf("nostr send calls = %d, want 1", nostr.sendCalls)
+	}
+	if got, want := result.Transport, "nostr"; got != want {
+		t.Fatalf("Send() transport = %q, want %q", got, want)
 	}
 }
 
-func TestServiceSyncIgnoresNonP0Routes(t *testing.T) {
+func TestServiceSyncUsesNostrRouteWhenTransportAvailable(t *testing.T) {
 	planner := &stubPlanner{
 		recoverRoutes: []transport.RouteCandidate{
 			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 5, Target: "wss://relay.example"},
@@ -495,11 +498,17 @@ func TestServiceSyncIgnoresNonP0Routes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if result.Synced != 0 {
-		t.Fatalf("Sync() recovered = %d, want 0", result.Synced)
+	if result.Synced != 3 {
+		t.Fatalf("Sync() recovered = %d, want 3", result.Synced)
 	}
-	if nostr.syncCalls != 0 {
-		t.Fatalf("nostr sync calls = %d, want 0 (non-P0 routes should be ignored)", nostr.syncCalls)
+	if nostr.syncCalls != 1 {
+		t.Fatalf("nostr sync calls = %d, want 1", nostr.syncCalls)
+	}
+	if got, want := len(result.RoutesUsed), 1; got != want {
+		t.Fatalf("Sync() routes used len = %d, want %d", got, want)
+	}
+	if got, want := result.RoutesUsed[0], "nostr"; got != want {
+		t.Fatalf("Sync() route used = %q, want %q", got, want)
 	}
 }
 
@@ -698,7 +707,7 @@ func TestServiceConnectPeerUsesTrustAndDiscovery(t *testing.T) {
 	}
 }
 
-func TestServiceConnectPeerReturnsUnconnectedWhenNoUsableRoute(t *testing.T) {
+func TestServiceConnectPeerUsesNostrRouteWhenTransportAvailable(t *testing.T) {
 	planner := &stubPlanner{
 		sendRoutes: []transport.RouteCandidate{
 			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 10, Target: "wss://relay.example"},
@@ -711,6 +720,47 @@ func TestServiceConnectPeerReturnsUnconnectedWhenNoUsableRoute(t *testing.T) {
 			ResolvedAt:  time.Now(),
 		}},
 		&stubTransport{name: "nostr", routeType: transport.RouteTypeNostr},
+	)
+	service.Trust = stubTrustInspector{
+		found: true,
+		profile: trust.TrustProfile{
+			CanonicalID: "did:key:test",
+			TrustLevel:  "unknown",
+			Summary: trust.TrustSummary{
+				CanonicalID: "did:key:test",
+				TrustLevel:  "unknown",
+			},
+		},
+	}
+
+	result, err := service.ConnectPeer(context.Background(), ConnectPeerRequest{
+		Peer: routing.ContactRuntimeView{
+			CanonicalID: "did:key:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ConnectPeer() error = %v", err)
+	}
+	if !result.Connected {
+		t.Fatalf("ConnectPeer() Connected = false, want true")
+	}
+	if got, want := result.Transport, "nostr"; got != want {
+		t.Fatalf("ConnectPeer() transport = %q, want %q", got, want)
+	}
+}
+
+func TestServiceConnectPeerReturnsUnconnectedWhenNoUsableRoute(t *testing.T) {
+	planner := &stubPlanner{
+		sendRoutes: []transport.RouteCandidate{
+			{Type: transport.RouteTypeNostr, Label: "nostr-relay", Priority: 10, Target: "wss://relay.example"},
+		},
+	}
+	service := NewService(
+		planner,
+		stubDiscovery{view: discovery.PeerPresenceView{
+			CanonicalID: "did:key:test",
+			ResolvedAt:  time.Now(),
+		}},
 	)
 	service.Trust = stubTrustInspector{
 		found: true,
