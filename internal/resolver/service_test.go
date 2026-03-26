@@ -148,6 +148,52 @@ func TestServiceInspectExtractsCapabilityHintsFromAgentCard(t *testing.T) {
 	}
 }
 
+func TestServiceInspectExtractsNostrBindingsFromAgentCard(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, "with-nostr")
+	defer server.Close()
+
+	service := NewService()
+	service.Client = server.Client()
+	service.Now = func() time.Time { return time.Date(2026, time.March, 13, 13, 0, 0, 0, time.UTC) }
+
+	result, err := service.Inspect(context.Background(), server.URL+"/profile/")
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+	if result.PeerID != "lcpeer:fixture-nostr" {
+		t.Fatalf("peer_id = %q, want lcpeer:fixture-nostr", result.PeerID)
+	}
+	if !strings.Contains(result.SignedPeerRecord, "fixture-nostr") {
+		t.Fatalf("signed_peer_record = %q, want fixture-nostr marker", result.SignedPeerRecord)
+	}
+
+	caps := append([]string(nil), result.TransportCapabilities...)
+	slices.Sort(caps)
+	if got, want := strings.Join(caps, ","), "nostr"; got != want {
+		t.Fatalf("transport_capabilities = %q, want %q", got, want)
+	}
+	if len(result.StoreForwardHints) != 0 {
+		t.Fatalf("store_forward_hints = %v, want empty for nostr relay mappings", result.StoreForwardHints)
+	}
+
+	relayURLs := append([]string(nil), result.RelayURLs...)
+	slices.Sort(relayURLs)
+	if got, want := strings.Join(relayURLs, ","), "wss://relay.backup.example,wss://relay.nostr.example"; got != want {
+		t.Fatalf("relay_urls = %q, want %q", got, want)
+	}
+
+	publicKeys := append([]string(nil), result.NostrPublicKeys...)
+	slices.Sort(publicKeys)
+	if got, want := strings.Join(publicKeys, ","), "npub_fixture_1,npub_fixture_2"; got != want {
+		t.Fatalf("nostr_public_keys = %q, want %q", got, want)
+	}
+	if result.NostrPrimaryPublicKey != "npub_fixture_2" {
+		t.Fatalf("nostr_primary_public_key = %q, want npub_fixture_2", result.NostrPrimaryPublicKey)
+	}
+}
+
 func newFixtureServer(t *testing.T, fixture string) *httptest.Server {
 	t.Helper()
 

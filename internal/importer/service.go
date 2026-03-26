@@ -2,10 +2,13 @@ package importer
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -19,6 +22,8 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+const importerNostrBindingManagedBy = "importer_nostr_ingest_v1"
 
 type Options struct {
 	Home                string
@@ -118,6 +123,10 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("begin import transaction: %w", err)
 	}
 	defer tx.Rollback()
+	selfID, err := loadPrimarySelfID(ctx, tx)
+	if err != nil {
+		return Result{}, err
+	}
 
 	contactID, created, err := upsertContact(ctx, tx, inspection, now, opts)
 	if err != nil {
@@ -135,6 +144,9 @@ func (s *Service) Import(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	if err := upsertRuntimeDiscoveryRecord(ctx, tx, canonicalID, inspection, now, action); err != nil {
+		return Result{}, err
+	}
+	if err := upsertRuntimeNostrBindings(ctx, tx, selfID, canonicalID, inspection, now, action); err != nil {
 		return Result{}, err
 	}
 	handleCount, err := upsertHandles(ctx, tx, contactID, inspection, now)
@@ -191,6 +203,28 @@ func ensureImportable(status string, opts Options) error {
 	default:
 		return fmt.Errorf("unsupported inspection status %q", status)
 	}
+}
+
+func loadPrimarySelfID(ctx context.Context, tx *sql.Tx) (string, error) {
+	var selfID string
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT self_id
+		 FROM self_identities
+		 ORDER BY created_at ASC
+		 LIMIT 1`,
+	).Scan(&selfID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("self identity not found; run linkclaw init first")
+		}
+		return "", fmt.Errorf("query self identity: %w", err)
+	}
+	selfID = strings.TrimSpace(selfID)
+	if selfID == "" {
+		return "", errors.New("self identity is missing self_id")
+	}
+	return selfID, nil
 }
 
 func upsertContact(ctx context.Context, tx *sql.Tx, inspection resolver.Result, now time.Time, opts Options) (string, bool, error) {
@@ -461,6 +495,230 @@ func upsertRuntimeDiscoveryRecord(ctx context.Context, tx *sql.Tx, canonicalID s
 		return fmt.Errorf("upsert runtime discovery record: %w", err)
 	}
 	return nil
+}
+
+type nostrBindingFact struct {
+	RelayURLs        []string
+	PublicKeys       []string
+	PrimaryPublicKey string
+	HasSignal        bool
+}
+
+func upsertRuntimeNostrBindings(ctx context.Context, tx *sql.Tx, selfID, canonicalID string, inspection resolver.Result, now time.Time, action string) error {
+	selfID = strings.TrimSpace(selfID)
+	canonicalID = strings.TrimSpace(canonicalID)
+	if selfID == "" || canonicalID == "" {
+		return nil
+	}
+
+	fact, err := deriveNostrBindingFact(inspection)
+	if err != nil {
+		return err
+	}
+	if !fact.HasSignal {
+		return nil
+	}
+
+	stamp := now.Format(time.RFC3339Nano)
+	activeBindingIDs := make(map[string]struct{}, len(fact.RelayURLs))
+	for _, relayURL := range fact.RelayURLs {
+		bindingID := stableRuntimeID("binding", strings.Join([]string{selfID, canonicalID, string(transport.RouteTypeNostr), relayURL}, "|"))
+		activeBindingIDs[bindingID] = struct{}{}
+
+		metadataJSON, err := marshalNostrBindingMetadata(canonicalID, relayURL, fact)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO runtime_transport_bindings (
+				binding_id, self_id, canonical_id, transport, relay_url, route_label, route_type,
+				direction, enabled, metadata_json, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(binding_id) DO UPDATE SET
+				self_id = excluded.self_id,
+				canonical_id = excluded.canonical_id,
+				transport = excluded.transport,
+				relay_url = excluded.relay_url,
+				route_label = excluded.route_label,
+				route_type = excluded.route_type,
+				direction = excluded.direction,
+				enabled = excluded.enabled,
+				metadata_json = excluded.metadata_json,
+				updated_at = excluded.updated_at`,
+			bindingID,
+			selfID,
+			canonicalID,
+			string(transport.RouteTypeNostr),
+			relayURL,
+			deriveNostrRouteLabel(relayURL),
+			string(transport.RouteTypeNostr),
+			"both",
+			boolToInt(true),
+			metadataJSON,
+			stamp,
+			stamp,
+		); err != nil {
+			return fmt.Errorf("upsert runtime transport binding: %w", err)
+		}
+
+		relayMetadataJSON, err := json.Marshal(map[string]any{
+			"managed_by": importerNostrBindingManagedBy,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal runtime transport relay metadata: %w", err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO runtime_transport_relays (
+				relay_id, transport, relay_url, read_enabled, write_enabled, priority, source, status,
+				last_error, metadata_json, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(relay_url) DO NOTHING`,
+			stableRuntimeID("relay", strings.Join([]string{string(transport.RouteTypeNostr), relayURL}, "|")),
+			string(transport.RouteTypeNostr),
+			relayURL,
+			boolToInt(true),
+			boolToInt(true),
+			0,
+			action,
+			"active",
+			"",
+			string(relayMetadataJSON),
+			stamp,
+			stamp,
+		); err != nil {
+			return fmt.Errorf("insert runtime transport relay hint: %w", err)
+		}
+	}
+
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT binding_id
+		 FROM runtime_transport_bindings
+		 WHERE self_id = ? AND canonical_id = ? AND transport = ? AND metadata_json LIKE ?`,
+		selfID,
+		canonicalID,
+		string(transport.RouteTypeNostr),
+		`%"managed_by":"`+importerNostrBindingManagedBy+`"%`,
+	)
+	if err != nil {
+		return fmt.Errorf("query managed runtime transport bindings: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var bindingID string
+		if err := rows.Scan(&bindingID); err != nil {
+			return fmt.Errorf("scan managed runtime transport binding: %w", err)
+		}
+		if _, active := activeBindingIDs[bindingID]; active {
+			continue
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE runtime_transport_bindings
+			 SET enabled = 0, updated_at = ?
+			 WHERE binding_id = ?`,
+			stamp,
+			bindingID,
+		); err != nil {
+			return fmt.Errorf("disable stale runtime transport binding: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate managed runtime transport bindings: %w", err)
+	}
+
+	return nil
+}
+
+func deriveNostrBindingFact(inspection resolver.Result) (nostrBindingFact, error) {
+	relayURLs, err := normalizeNostrRelayURLs(inspection.RelayURLs)
+	if err != nil {
+		return nostrBindingFact{}, err
+	}
+	publicKeys := normalizeStringList(inspection.NostrPublicKeys)
+	primaryPubKey := strings.TrimSpace(inspection.NostrPrimaryPublicKey)
+	if primaryPubKey != "" {
+		publicKeys = appendUniqueValue(publicKeys, primaryPubKey)
+		sort.Strings(publicKeys)
+	} else if len(publicKeys) > 0 {
+		primaryPubKey = publicKeys[0]
+	}
+
+	capabilities := normalizeCapabilityList(inspection.TransportCapabilities)
+	hasNostrCapability := containsValue(capabilities, string(transport.RouteTypeNostr))
+
+	return nostrBindingFact{
+		RelayURLs:        relayURLs,
+		PublicKeys:       publicKeys,
+		PrimaryPublicKey: primaryPubKey,
+		HasSignal:        hasNostrCapability || len(relayURLs) > 0 || len(publicKeys) > 0 || primaryPubKey != "",
+	}, nil
+}
+
+func normalizeNostrRelayURLs(values []string) ([]string, error) {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		relayURL := strings.TrimSpace(value)
+		if relayURL == "" {
+			continue
+		}
+		parsed, err := url.Parse(relayURL)
+		if err != nil || strings.TrimSpace(parsed.Host) == "" {
+			return nil, fmt.Errorf("invalid nostr relay url %q", relayURL)
+		}
+		switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+		case "ws", "wss":
+		default:
+			return nil, fmt.Errorf("nostr relay url %q must use ws or wss", relayURL)
+		}
+		normalized = appendUniqueValue(normalized, relayURL)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func marshalNostrBindingMetadata(canonicalID, relayURL string, fact nostrBindingFact) (string, error) {
+	payload := map[string]any{
+		"managed_by":   importerNostrBindingManagedBy,
+		"canonical_id": strings.TrimSpace(canonicalID),
+		"relay_url":    relayURL,
+		"relay_urls":   append([]string(nil), fact.RelayURLs...),
+	}
+	if len(fact.PublicKeys) > 0 {
+		payload["nostr_public_keys"] = append([]string(nil), fact.PublicKeys...)
+	}
+	if strings.TrimSpace(fact.PrimaryPublicKey) != "" {
+		payload["nostr_primary_public_key"] = strings.TrimSpace(fact.PrimaryPublicKey)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal runtime transport binding metadata: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func deriveNostrRouteLabel(relayURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(relayURL))
+	if err != nil {
+		return "nostr-relay"
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Host))
+	if host == "" {
+		return "nostr-relay"
+	}
+	escapedPath := strings.TrimSpace(parsed.EscapedPath())
+	if escapedPath == "" || escapedPath == "/" {
+		return "nostr:" + host
+	}
+	return "nostr:" + host + escapedPath
+}
+
+func stableRuntimeID(prefix, key string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(digest[:8]))
 }
 
 type runtimeDiscoveryFact struct {

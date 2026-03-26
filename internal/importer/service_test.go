@@ -239,6 +239,158 @@ func TestServiceImportPersistsCapabilityDiscoveryFacts(t *testing.T) {
 	}
 }
 
+func TestServiceImportPersistsNostrTransportBindings(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "with-nostr"))
+	defer server.Close()
+
+	home := seedHome(t)
+	service := NewService()
+	service.Now = func() time.Time { return time.Date(2026, time.March, 13, 11, 30, 0, 0, time.UTC) }
+	service.Resolver = resolver.NewService()
+	service.Resolver.Client = server.Client()
+	service.Resolver.Now = service.Now
+
+	result, err := service.Import(context.Background(), Options{
+		Home:  home,
+		Input: server.URL + "/profile/",
+	})
+	if err != nil {
+		t.Fatalf("Import returned error: %v", err)
+	}
+	if result.Inspection.CanonicalID == "" {
+		t.Fatal("inspection canonical_id = empty")
+	}
+	if _, err := service.Import(context.Background(), Options{
+		Home:  home,
+		Input: server.URL + "/profile/",
+	}); err != nil {
+		t.Fatalf("second Import returned error: %v", err)
+	}
+
+	db := openDB(t, home)
+	defer db.Close()
+
+	rows, err := db.Query(
+		`SELECT self_id, relay_url, route_type, direction, enabled, metadata_json
+		   FROM runtime_transport_bindings
+		  WHERE canonical_id = ? AND transport = 'nostr'
+		  ORDER BY relay_url ASC`,
+		result.Inspection.CanonicalID,
+	)
+	if err != nil {
+		t.Fatalf("query runtime_transport_bindings: %v", err)
+	}
+	defer rows.Close()
+
+	type bindingRow struct {
+		SelfID       string
+		RelayURL     string
+		RouteType    string
+		Direction    string
+		Enabled      int
+		MetadataJSON string
+	}
+	bindings := make([]bindingRow, 0)
+	for rows.Next() {
+		var row bindingRow
+		if err := rows.Scan(&row.SelfID, &row.RelayURL, &row.RouteType, &row.Direction, &row.Enabled, &row.MetadataJSON); err != nil {
+			t.Fatalf("scan runtime_transport_bindings: %v", err)
+		}
+		bindings = append(bindings, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate runtime_transport_bindings: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("runtime_transport_bindings len = %d, want 2", len(bindings))
+	}
+
+	for _, row := range bindings {
+		if row.SelfID == "" {
+			t.Fatal("runtime transport binding self_id = empty")
+		}
+		if row.RouteType != string(transport.RouteTypeNostr) {
+			t.Fatalf("route_type = %q, want nostr", row.RouteType)
+		}
+		if row.Direction != "both" {
+			t.Fatalf("direction = %q, want both", row.Direction)
+		}
+		if row.Enabled != 1 {
+			t.Fatalf("enabled = %d, want 1", row.Enabled)
+		}
+
+		var metadata struct {
+			ManagedBy             string   `json:"managed_by"`
+			NostrPublicKeys       []string `json:"nostr_public_keys"`
+			NostrPrimaryPublicKey string   `json:"nostr_primary_public_key"`
+		}
+		if err := json.Unmarshal([]byte(row.MetadataJSON), &metadata); err != nil {
+			t.Fatalf("decode binding metadata_json: %v", err)
+		}
+		if metadata.ManagedBy != importerNostrBindingManagedBy {
+			t.Fatalf("metadata managed_by = %q, want %q", metadata.ManagedBy, importerNostrBindingManagedBy)
+		}
+		slices.Sort(metadata.NostrPublicKeys)
+		if got, want := strings.Join(metadata.NostrPublicKeys, ","), "npub_fixture_1,npub_fixture_2"; got != want {
+			t.Fatalf("metadata nostr_public_keys = %q, want %q", got, want)
+		}
+		if metadata.NostrPrimaryPublicKey != "npub_fixture_2" {
+			t.Fatalf("metadata nostr_primary_public_key = %q, want npub_fixture_2", metadata.NostrPrimaryPublicKey)
+		}
+	}
+
+	assertCount(
+		t,
+		db,
+		`SELECT COUNT(*) FROM runtime_transport_bindings
+		  WHERE canonical_id = ? AND transport = 'nostr' AND enabled = 1`,
+		result.Inspection.CanonicalID,
+		2,
+	)
+	assertCount(
+		t,
+		db,
+		`SELECT COUNT(*) FROM runtime_transport_relays WHERE transport = ? AND status = 'active'`,
+		string(transport.RouteTypeNostr),
+		2,
+	)
+}
+
+func TestServiceImportRejectsInvalidNostrRelayHints(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "with-nostr-invalid-relay"))
+	defer server.Close()
+
+	home := seedHome(t)
+	service := NewService()
+	service.Now = func() time.Time { return time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC) }
+	service.Resolver = resolver.NewService()
+	service.Resolver.Client = server.Client()
+	service.Resolver.Now = service.Now
+
+	_, err := service.Import(context.Background(), Options{
+		Home:  home,
+		Input: server.URL + "/profile/",
+	})
+	if err == nil {
+		t.Fatal("expected Import to fail for invalid nostr relay hints")
+	}
+	if !strings.Contains(err.Error(), "must use ws or wss") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	db := openDB(t, home)
+	defer db.Close()
+
+	assertCount(t, db, `SELECT COUNT(*) FROM contacts WHERE canonical_id = ?`, "did:web:fixture.example", 0)
+	assertCount(t, db, `SELECT COUNT(*) FROM runtime_discovery_records WHERE canonical_id = ?`, "did:web:fixture.example", 0)
+	assertCount(t, db, `SELECT COUNT(*) FROM runtime_transport_bindings WHERE canonical_id = ? AND transport = 'nostr'`, "did:web:fixture.example", 0)
+	assertCount(t, db, `SELECT COUNT(*) FROM runtime_transport_relays WHERE transport = ?`, string(transport.RouteTypeNostr), 0)
+}
+
 func seedHome(t *testing.T) string {
 	t.Helper()
 

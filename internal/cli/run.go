@@ -55,6 +55,9 @@ type inspectJSONResult struct {
 	CanonicalID       string              `json:"canonical_id,omitempty"`
 	DisplayName       string              `json:"display_name,omitempty"`
 	ProfileURL        string              `json:"profile_url,omitempty"`
+	RelayURLs         []string            `json:"relay_urls,omitempty"`
+	NostrPublicKeys   []string            `json:"nostr_public_keys,omitempty"`
+	NostrPrimaryKey   string              `json:"nostr_primary_public_key,omitempty"`
 	Artifacts         []resolver.Artifact `json:"artifacts"`
 	Proofs            []resolver.Proof    `json:"proofs,omitempty"`
 	Mismatches        []string            `json:"mismatches,omitempty"`
@@ -1684,6 +1687,9 @@ func makeInspectJSONResult(result resolver.Result) inspectJSONResult {
 		CanonicalID:       result.CanonicalID,
 		DisplayName:       result.DisplayName,
 		ProfileURL:        result.ProfileURL,
+		RelayURLs:         result.RelayURLs,
+		NostrPublicKeys:   result.NostrPublicKeys,
+		NostrPrimaryKey:   result.NostrPrimaryPublicKey,
 		Artifacts:         result.Artifacts,
 		Proofs:            result.Proofs,
 		Mismatches:        result.Mismatches,

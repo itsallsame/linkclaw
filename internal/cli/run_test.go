@@ -1064,6 +1064,36 @@ func TestRunInspectJSON(t *testing.T) {
 	}
 }
 
+func TestRunInspectJSONIncludesNostrFields(t *testing.T) {
+	t.Parallel()
+
+	server := newFixtureServer(t, filepath.Join("..", "resolver", "testdata", "with-nostr"))
+	defer server.Close()
+
+	code, stdout, stderr := runForTest(t, []string{"inspect", "--json", server.URL + "/profile/"}, "")
+	if code != 0 {
+		t.Fatalf("inspect exit code = %d, stderr = %s", code, stderr)
+	}
+
+	var out inspectOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v, stdout=%s", err, stdout)
+	}
+	assertEnvelopeMetadata(t, out.SchemaVersion, out.Command, out.Subcommand, out.Timestamp, out.Warnings, "inspect", nil)
+	if !out.OK {
+		t.Fatalf("expected ok=true output: %+v", out)
+	}
+	if got, want := strings.Join(out.Result.RelayURLs, ","), "wss://relay.backup.example,wss://relay.nostr.example"; got != want {
+		t.Fatalf("relay_urls = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(out.Result.NostrPublicKeys, ","), "npub_fixture_1,npub_fixture_2"; got != want {
+		t.Fatalf("nostr_public_keys = %q, want %q", got, want)
+	}
+	if out.Result.NostrPrimaryKey != "npub_fixture_2" {
+		t.Fatalf("nostr_primary_public_key = %q, want npub_fixture_2", out.Result.NostrPrimaryKey)
+	}
+}
+
 func TestRunInspectJSONRequiresInput(t *testing.T) {
 	t.Parallel()
 

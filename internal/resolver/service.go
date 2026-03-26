@@ -55,6 +55,9 @@ type Result struct {
 	TransportCapabilities []string   `json:"transport_capabilities,omitempty"`
 	DirectHints           []string   `json:"direct_hints,omitempty"`
 	StoreForwardHints     []string   `json:"store_forward_hints,omitempty"`
+	RelayURLs             []string   `json:"relay_urls,omitempty"`
+	NostrPublicKeys       []string   `json:"nostr_public_keys,omitempty"`
+	NostrPrimaryPublicKey string     `json:"nostr_primary_public_key,omitempty"`
 	SignedPeerRecord      string     `json:"signed_peer_record,omitempty"`
 	Artifacts             []Artifact `json:"artifacts"`
 	Proofs                []Proof    `json:"proofs,omitempty"`
@@ -120,6 +123,9 @@ type agentCardDocument struct {
 	TransportCaps       []string `json:"transport_capabilities"`
 	DirectHints         []string `json:"direct_hints"`
 	StoreForwardHints   []string `json:"store_forward_hints"`
+	RelayURLs           []string `json:"relay_urls"`
+	NostrPublicKeys     []string `json:"nostr_public_keys"`
+	NostrPrimaryPubKey  string   `json:"nostr_primary_public_key"`
 	SignedPeerRecord    string   `json:"signed_peer_record"`
 	Messaging           struct {
 		Transport   string `json:"transport"`
@@ -768,13 +774,25 @@ func applyAgentCardHints(result *Result, card *agentCardDocument) {
 	transportCaps := normalizeTransportCapabilities(card.TransportCaps)
 	directHints := dedupeStrings(card.DirectHints)
 	storeForwardHints := dedupeStrings(card.StoreForwardHints)
+	relayURLs := dedupeStrings(card.RelayURLs)
+	nostrPublicKeys := dedupeStrings(card.NostrPublicKeys)
+	nostrPrimaryPublicKey := strings.TrimSpace(card.NostrPrimaryPubKey)
+	if nostrPrimaryPublicKey != "" {
+		nostrPublicKeys = appendUnique(nostrPublicKeys, nostrPrimaryPublicKey)
+	} else if len(nostrPublicKeys) > 0 {
+		nostrPrimaryPublicKey = nostrPublicKeys[0]
+	}
 
 	messagingTransport := normalizeTransportCapability(card.Messaging.Transport)
 	if messagingTransport != "" {
 		transportCaps = appendUnique(transportCaps, messagingTransport)
 	}
 	if relayURL := strings.TrimSpace(card.Messaging.RelayURL); relayURL != "" {
-		storeForwardHints = appendUnique(storeForwardHints, relayURL)
+		if messagingTransport == "nostr" {
+			relayURLs = appendUnique(relayURLs, relayURL)
+		} else {
+			storeForwardHints = appendUnique(storeForwardHints, relayURL)
+		}
 	}
 	if directURL := withTransportToken(card.Messaging.DirectURL, card.Messaging.DirectToken); directURL != "" {
 		directHints = appendUnique(directHints, directURL)
@@ -788,12 +806,18 @@ func applyAgentCardHints(result *Result, card *agentCardDocument) {
 	if len(storeForwardHints) > 0 {
 		transportCaps = appendUnique(transportCaps, string("store_forward"))
 	}
+	if len(relayURLs) > 0 || len(nostrPublicKeys) > 0 || nostrPrimaryPublicKey != "" {
+		transportCaps = appendUnique(transportCaps, string("nostr"))
+	}
 
 	result.PeerID = peerID
 	result.SignedPeerRecord = signedPeerRecord
 	result.TransportCapabilities = transportCaps
 	result.DirectHints = directHints
 	result.StoreForwardHints = storeForwardHints
+	result.RelayURLs = relayURLs
+	result.NostrPublicKeys = nostrPublicKeys
+	result.NostrPrimaryPublicKey = nostrPrimaryPublicKey
 }
 
 func normalizeTransportCapabilities(values []string) []string {
