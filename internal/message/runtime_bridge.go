@@ -251,6 +251,7 @@ func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 	caps := []string{}
 	directHints := []string{}
 	storeForwardHints := []string{}
+	relayURL := strings.TrimSpace(contact.RelayURL)
 	peerID := strings.TrimSpace(contact.RecipientID)
 	if directTarget := buildDirectRouteTarget(contact.DirectURL, contact.DirectToken); directTarget != "" {
 		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
@@ -261,9 +262,13 @@ func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
 		directHints = appendIfMissing(directHints, "libp2p://"+peerIdentity.PeerID)
 	}
-	if contact.RelayURL != "" {
+	storeForwardTargets := storeForwardTargetsFromContact(contact)
+	if len(storeForwardTargets) > 0 {
+		relayURL = storeForwardTargets[0]
 		caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
-		storeForwardHints = appendIfMissing(storeForwardHints, contact.RelayURL)
+		for _, target := range storeForwardTargets {
+			storeForwardHints = appendIfMissing(storeForwardHints, target)
+		}
 	}
 	return routing.ContactRuntimeView{
 		ContactID:             contact.ContactID,
@@ -273,7 +278,7 @@ func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 		RecipientID:           contact.RecipientID,
 		DirectURL:             strings.TrimSpace(contact.DirectURL),
 		DirectToken:           strings.TrimSpace(contact.DirectToken),
-		RelayURL:              strings.TrimSpace(contact.RelayURL),
+		RelayURL:              relayURL,
 		DirectHints:           directHints,
 		StoreForwardHints:     storeForwardHints,
 		TransportCapabilities: caps,
@@ -293,7 +298,8 @@ func directTransportEnabled() bool {
 }
 
 func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactRecord, now time.Time) (agentdiscovery.PeerPresenceView, []transport.Transport, []transport.RouteCandidate) {
-	routes := make([]transport.RouteCandidate, 0, 2)
+	storeForwardTargets := storeForwardTargetsFromContact(contact)
+	routes := make([]transport.RouteCandidate, 0, len(storeForwardTargets)+2)
 	transports := make([]transport.Transport, 0, 2)
 	view := agentdiscovery.PeerPresenceView{
 		CanonicalID: contact.CanonicalID,
@@ -354,17 +360,21 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 		}
 	}
 
-	if contact.RelayURL != "" {
+	if len(storeForwardTargets) > 0 {
 		route := transport.RouteCandidate{
 			Type:     transport.RouteTypeStoreForward,
-			Label:    contact.RelayURL,
+			Label:    storeForwardTargets[0],
 			Priority: 1,
-			Target:   contact.RelayURL,
+			Target:   storeForwardTargets[0],
 		}
-		routes = append(routes, route)
-		view.RouteCandidates = append(view.RouteCandidates, route)
+		for _, target := range storeForwardTargets {
+			route.Label = target
+			route.Target = target
+			routes = append(routes, route)
+			view.RouteCandidates = append(view.RouteCandidates, route)
+			view.StoreForwardHints = appendIfMissing(view.StoreForwardHints, target)
+		}
 		view.TransportCapabilities = appendIfMissing(view.TransportCapabilities, string(transport.RouteTypeStoreForward))
-		view.StoreForwardHints = appendIfMissing(view.StoreForwardHints, contact.RelayURL)
 		if view.PeerID == "" {
 			view.PeerID = contact.RecipientID
 		}
@@ -668,9 +678,9 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 		caps = appendIfMissing(caps, string(transport.RouteTypeDirect))
 		directHints = appendIfMissing(directHints, "libp2p://"+peerIdentity.PeerID)
 	}
-	if contact.RelayURL != "" {
+	for _, target := range storeForwardTargetsFromContact(contact) {
 		caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
-		storeForwardHints = appendIfMissing(storeForwardHints, contact.RelayURL)
+		storeForwardHints = appendIfMissing(storeForwardHints, target)
 	}
 	if err := store.UpsertContact(ctx, agentruntime.ContactRecord{
 		ContactID:             contact.ContactID,
@@ -1036,9 +1046,9 @@ func syncRuntimeRecoveredState(
 		if contact.RecipientID != "" {
 			directHints = append(directHints, contact.RecipientID)
 		}
-		if contact.RelayURL != "" {
-			caps = append(caps, string(transport.RouteTypeStoreForward))
-			storeForwardHints = append(storeForwardHints, contact.RelayURL)
+		for _, target := range storeForwardTargetsFromContact(contact) {
+			caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
+			storeForwardHints = appendIfMissing(storeForwardHints, target)
 		}
 		if err := store.UpsertContact(ctx, agentruntime.ContactRecord{
 			ContactID:             contact.ContactID,

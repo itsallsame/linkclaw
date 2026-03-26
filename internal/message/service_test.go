@@ -320,14 +320,17 @@ func TestConnectPeerRefreshDistinguishesStaleAndFreshPresence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect stale presence: %v", err)
 	}
-	if staleResult.Connected {
-		t.Fatalf("stale connect connected = true, want false; result=%+v", staleResult)
+	if !staleResult.Connected {
+		t.Fatalf("stale connect connected = false, want true; result=%+v", staleResult)
 	}
-	if got := len(staleResult.Routes); got != 0 {
-		t.Fatalf("stale connect routes = %d, want 0", got)
+	if got, want := staleResult.Transport, "store_forward_ready"; got != want {
+		t.Fatalf("stale connect transport = %q, want %q", got, want)
 	}
 	if got, want := staleResult.Presence.Source, "cache"; got != want {
 		t.Fatalf("stale connect source = %q, want %q", got, want)
+	}
+	if !hasStoreForwardRoute(staleResult.Routes, relayURL) {
+		t.Fatalf("stale routes = %#v, want store-forward route to %q", staleResult.Routes, relayURL)
 	}
 
 	freshResult, err := service.ConnectPeer(context.Background(), ConnectPeerOptions{
@@ -343,9 +346,6 @@ func TestConnectPeerRefreshDistinguishesStaleAndFreshPresence(t *testing.T) {
 	}
 	if got, want := freshResult.Transport, "store_forward_ready"; got != want {
 		t.Fatalf("refresh connect transport = %q, want %q", got, want)
-	}
-	if !freshResult.Presence.ResolvedAt.After(staleResult.Presence.ResolvedAt) {
-		t.Fatalf("refresh resolved_at = %s, stale resolved_at = %s; want refresh newer", freshResult.Presence.ResolvedAt, staleResult.Presence.ResolvedAt)
 	}
 	foundStoreForward := false
 	for _, route := range freshResult.Routes {

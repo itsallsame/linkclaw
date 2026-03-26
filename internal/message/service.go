@@ -216,6 +216,7 @@ type contactRecord struct {
 	SigningPublicKey    string
 	EncryptionPublicKey string
 	RelayURL            string
+	StoreForwardHints   []string
 	DirectURL           string
 	DirectToken         string
 	Status              string
@@ -281,15 +282,19 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 	if err := tx.Commit(); err != nil {
 		return SendResult{}, fmt.Errorf("commit message send transaction: %w", err)
 	}
-	if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
+	runtimeContact, err := resolveRuntimeContactWithRelayView(ctx, db, selfProfile, contact, now)
+	if err != nil {
 		return SendResult{}, err
 	}
-	if contact.RelayURL != "" || strings.TrimSpace(contact.DirectURL) != "" || directTransportEnabled() {
-		runtimeResult, err := s.sendThroughRuntime(ctx, home, selfProfile, contact, record, now)
+	if err := syncRuntimeSendState(ctx, home, runtimeContact, conversation, record, now); err != nil {
+		return SendResult{}, err
+	}
+	if hasRuntimeStoreForwardTarget(runtimeContact) || strings.TrimSpace(runtimeContact.DirectURL) != "" || directTransportEnabled() {
+		runtimeResult, err := s.sendThroughRuntime(ctx, home, selfProfile, runtimeContact, record, now)
 		if err != nil {
 			record.Status = StatusFailed
 			record.TransportStatus = deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute)
-			if syncErr := syncRuntimeSendState(ctx, home, contact, conversation, record, now); syncErr != nil {
+			if syncErr := syncRuntimeSendState(ctx, home, runtimeContact, conversation, record, now); syncErr != nil {
 				return SendResult{}, syncErr
 			}
 		} else {
@@ -299,7 +304,7 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 				record.DeliveredAt = now.Format(time.RFC3339Nano)
 			}
 			record.TransportStatus = deriveTransportStatus(record.Direction, record.Status, record.SelectedRoute)
-			if err := syncRuntimeSendState(ctx, home, contact, conversation, record, now); err != nil {
+			if err := syncRuntimeSendState(ctx, home, runtimeContact, conversation, record, now); err != nil {
 				return SendResult{}, err
 			}
 		}
@@ -507,7 +512,11 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 	)
 	switch {
 	case target.contact != nil:
-		contact := *target.contact
+		contact, err := resolveRuntimeContactWithRelayView(ctx, db, selfProfile, *target.contact, now)
+		if err != nil {
+			return agentruntime.ConnectPeerResult{}, err
+		}
+		target.contact = &contact
 		_, extraTransports, _ = buildSendRuntimeBoundary(selfProfile, contact, now)
 		peer = runtimeContactView(contact)
 		presenceSvc = connectPresenceProvider{
@@ -521,7 +530,11 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 			},
 		}
 	case target.discovery != nil:
-		record := *target.discovery
+		record, err := resolveRuntimeDiscoveryWithRelayView(ctx, db, selfProfile, *target.discovery, now)
+		if err != nil {
+			return agentruntime.ConnectPeerResult{}, err
+		}
+		target.discovery = &record
 		_, extraTransports, _ = buildDiscoveryConnectRuntimeBoundary(selfProfile, record, now)
 		peer = runtimePeerViewFromDiscovery(record)
 		presenceSvc = connectPresenceProvider{
@@ -533,6 +546,10 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 				if !ok {
 					return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
 				}
+				lookup, err = resolveRuntimeDiscoveryWithRelayView(ctx, db, selfProfile, lookup, now)
+				if err != nil {
+					return agentdiscovery.PeerPresenceView{}, err
+				}
 				view, _, _ := buildDiscoveryConnectRuntimeBoundary(selfProfile, lookup, now)
 				return view, nil
 			},
@@ -543,6 +560,10 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 				}
 				if !ok {
 					return agentdiscovery.PeerPresenceView{}, fmt.Errorf("discovery record %q not found", strings.TrimSpace(canonicalID))
+				}
+				lookup, err = resolveRuntimeDiscoveryWithRelayView(ctx, db, selfProfile, lookup, now)
+				if err != nil {
+					return agentdiscovery.PeerPresenceView{}, err
 				}
 				view, _, _ := buildDiscoveryConnectRuntimeBoundary(selfProfile, lookup, now)
 				refreshedAt := now.UTC()
@@ -559,10 +580,13 @@ func (s *Service) ConnectPeer(ctx context.Context, opts ConnectPeerOptions) (age
 	}
 
 	querySvc := agentdiscovery.NewQueryServiceWithClock(db, presenceSvc, func() time.Time { return now })
-	discoverySvc := queryBackedDiscoveryService{
-		query:    querySvc,
-		fallback: presenceSvc,
-		now:      func() time.Time { return now },
+	var discoverySvc agentdiscovery.Service = presenceSvc
+	if target.discovery != nil {
+		discoverySvc = queryBackedDiscoveryService{
+			query:    querySvc,
+			fallback: presenceSvc,
+			now:      func() time.Time { return now },
+		}
 	}
 	runtimeSvc := agentruntime.NewService(
 		presenceRoutesPlanner{},
@@ -796,6 +820,59 @@ func (t connectReadinessTransport) Sync(context.Context, transport.RouteCandidat
 
 func (t connectReadinessTransport) Ack(context.Context, transport.RouteCandidate, string) error {
 	return nil
+}
+
+func hasRuntimeStoreForwardTarget(contact contactRecord) bool {
+	return len(storeForwardTargetsFromContact(contact)) > 0
+}
+
+func resolveRuntimeContactWithRelayView(
+	ctx context.Context,
+	db *sql.DB,
+	selfProfile selfMessagingProfile,
+	contact contactRecord,
+	now time.Time,
+) (contactRecord, error) {
+	if strings.TrimSpace(contact.CanonicalID) == "" {
+		return contact, nil
+	}
+	relayView, err := resolvePeerRelayPubKeyView(
+		ctx,
+		db,
+		selfProfile.SelfID,
+		contact.CanonicalID,
+		contact.RelayURL,
+		now,
+	)
+	if err != nil {
+		return contactRecord{}, err
+	}
+	return applyRelayViewToContact(contact, relayView), nil
+}
+
+func resolveRuntimeDiscoveryWithRelayView(
+	ctx context.Context,
+	db *sql.DB,
+	selfProfile selfMessagingProfile,
+	record agentdiscovery.Record,
+	now time.Time,
+) (agentdiscovery.Record, error) {
+	canonicalID := strings.TrimSpace(record.CanonicalID)
+	if canonicalID == "" {
+		return record, nil
+	}
+	relayView, err := resolvePeerRelayPubKeyView(
+		ctx,
+		db,
+		selfProfile.SelfID,
+		canonicalID,
+		"",
+		now,
+	)
+	if err != nil {
+		return agentdiscovery.Record{}, err
+	}
+	return applyRelayViewToDiscoveryRecord(record, relayView), nil
 }
 
 func resolveConnectPeerTarget(ctx context.Context, db *sql.DB, ref string, now time.Time) (connectPeerTarget, error) {
@@ -1809,6 +1886,10 @@ func (s *Service) deliverOutgoing(ctx context.Context, home string, record Messa
 	if err != nil {
 		return record, err
 	}
+	relayURL := firstNonEmptyString(storeForwardTargetsFromContact(contact)...)
+	if relayURL == "" {
+		return record, fmt.Errorf("store-forward relay route is not available for contact %q", strings.TrimSpace(contact.CanonicalID))
+	}
 	encrypted, err := messagecrypto.EncryptForRecipient(contact.EncryptionPublicKey, []byte(record.Body))
 	if err != nil {
 		return record, err
@@ -1831,7 +1912,7 @@ func (s *Service) deliverOutgoing(ctx context.Context, home string, record Messa
 	if err != nil {
 		return record, err
 	}
-	response, err := s.storeForwardBackend().Send(ctx, contact.RelayURL, transportstoreforward.MailboxSendRequest{
+	response, err := s.storeForwardBackend().Send(ctx, relayURL, transportstoreforward.MailboxSendRequest{
 		MessageID:          record.MessageID,
 		SenderID:           selfProfile.CanonicalID,
 		SenderSigningKey:   selfProfile.SigningPublicKey,
@@ -1843,10 +1924,10 @@ func (s *Service) deliverOutgoing(ctx context.Context, home string, record Messa
 		SentAt:             record.CreatedAt,
 	})
 	if err != nil {
-		_ = updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusFailed, "", contact.RelayURL, "failed", err.Error(), encrypted.Ciphertext, signature)
+		_ = updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusFailed, "", relayURL, "failed", err.Error(), encrypted.Ciphertext, signature)
 		return record, err
 	}
-	if err := updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusQueued, response.RemoteMessageID, contact.RelayURL, "queued", "", encrypted.Ciphertext, signature); err != nil {
+	if err := updateMessageDeliveryState(ctx, home, now, record.MessageID, StatusQueued, response.RemoteMessageID, relayURL, "queued", "", encrypted.Ciphertext, signature); err != nil {
 		return record, err
 	}
 	record.Status = StatusQueued

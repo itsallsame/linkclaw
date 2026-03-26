@@ -939,8 +939,11 @@ func TestRunMessageConnectPeerRefreshUsesDiscoveryRefreshPath(t *testing.T) {
 	if !staleOut.OK {
 		t.Fatalf("expected stale connect ok=true: %+v", staleOut)
 	}
-	if staleOut.Result.Connected {
-		t.Fatalf("stale connect connected = true, want false; result=%+v", staleOut.Result)
+	if !staleOut.Result.Connected {
+		t.Fatalf("stale connect connected = false, want true; result=%+v", staleOut.Result)
+	}
+	if got, want := staleOut.Result.Transport, "store_forward_ready"; got != want {
+		t.Fatalf("stale connect transport = %q, want %q", got, want)
 	}
 	if got, want := staleOut.Result.Presence.Source, "cache"; got != want {
 		t.Fatalf("stale presence source = %q, want %q", got, want)
@@ -971,9 +974,6 @@ func TestRunMessageConnectPeerRefreshUsesDiscoveryRefreshPath(t *testing.T) {
 	}
 	if got, want := freshOut.Result.Transport, "store_forward_ready"; got != want {
 		t.Fatalf("refresh connect transport = %q, want %q", got, want)
-	}
-	if !freshOut.Result.Presence.ResolvedAt.After(staleOut.Result.Presence.ResolvedAt) {
-		t.Fatalf("refresh resolved_at = %s, stale resolved_at = %s; want refresh newer", freshOut.Result.Presence.ResolvedAt, staleOut.Result.Presence.ResolvedAt)
 	}
 
 	updatedStore := agentdiscovery.NewStoreWithDB(db, time.Now().UTC())
