@@ -773,6 +773,9 @@ func applyAgentCardHints(result *Result, card *agentCardDocument) {
 	if messagingTransport != "" {
 		transportCaps = appendUnique(transportCaps, messagingTransport)
 	}
+	if relayURL := strings.TrimSpace(card.Messaging.RelayURL); relayURL != "" {
+		storeForwardHints = appendUnique(storeForwardHints, relayURL)
+	}
 	if directURL := withTransportToken(card.Messaging.DirectURL, card.Messaging.DirectToken); directURL != "" {
 		directHints = appendUnique(directHints, directURL)
 	}
