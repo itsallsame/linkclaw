@@ -97,7 +97,6 @@ func TestSendAndOutbox(t *testing.T) {
 	}
 }
 
-
 func TestConnectPeerSupportsDiscoveryRecordWithoutContact(t *testing.T) {
 	initService := initflow.NewService()
 
@@ -739,6 +738,21 @@ func TestBuildSendRuntimeBoundaryUsesHTTPDirectWithoutExperimentalDirect(t *test
 	}
 	if !view.Reachable {
 		t.Fatal("view.Reachable = false, want true")
+	}
+}
+
+func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
+	if got, want := deriveTransportStatus(DirectionOutgoing, StatusRecovering, transport.RouteCandidate{}), TransportStatusDeferred; got != want {
+		t.Fatalf("deriveTransportStatus(outgoing,recovering) = %q, want %q", got, want)
+	}
+	if got, want := deriveTransportStatus(DirectionIncoming, StatusRecovered, transport.RouteCandidate{}), TransportStatusRecovered; got != want {
+		t.Fatalf("deriveTransportStatus(incoming,recovered) = %q, want %q", got, want)
+	}
+	if got, want := deriveTransportStatus(DirectionIncoming, StatusQueued, transport.RouteCandidate{}), TransportStatusRecovered; got != want {
+		t.Fatalf("deriveTransportStatus(incoming,queued) = %q, want %q", got, want)
+	}
+	if got, want := deriveTransportStatus(DirectionOutgoing, StatusFailed, transport.RouteCandidate{}), TransportStatusFailed; got != want {
+		t.Fatalf("deriveTransportStatus(outgoing,failed) = %q, want %q", got, want)
 	}
 }
 

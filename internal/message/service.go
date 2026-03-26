@@ -30,10 +30,12 @@ const (
 	DirectionIncoming = "incoming"
 	DirectionOutgoing = "outgoing"
 
-	StatusPending   = "pending"
-	StatusQueued    = "queued"
-	StatusDelivered = "delivered"
-	StatusFailed    = "failed"
+	StatusPending    = agentruntime.MessageStatusPending
+	StatusQueued     = agentruntime.MessageStatusQueued
+	StatusRecovering = agentruntime.MessageStatusRecovering
+	StatusRecovered  = agentruntime.MessageStatusRecovered
+	StatusDelivered  = agentruntime.MessageStatusDelivered
+	StatusFailed     = agentruntime.MessageStatusFailed
 
 	TransportStatusDirect    = "direct"
 	TransportStatusDeferred  = "deferred"
@@ -688,7 +690,8 @@ func summarizeTransportStatuses(records []agentruntime.MessageRecord) (direct in
 }
 
 func deriveTransportStatus(direction string, status string, selected transport.RouteCandidate) string {
-	if status == StatusFailed {
+	normalizedStatus := agentruntime.NormalizeMessageStatus(status)
+	if normalizedStatus == StatusFailed {
 		return TransportStatusFailed
 	}
 	switch selected.Type {
@@ -699,8 +702,10 @@ func deriveTransportStatus(direction string, status string, selected transport.R
 	case transport.RouteTypeRecovery:
 		return TransportStatusRecovered
 	}
-	switch status {
-	case StatusPending, StatusQueued:
+	switch normalizedStatus {
+	case StatusRecovered:
+		return TransportStatusRecovered
+	case StatusPending, StatusQueued, StatusRecovering:
 		if direction == DirectionIncoming {
 			return TransportStatusRecovered
 		}
@@ -2095,12 +2100,12 @@ func decryptIncomingMessage(selfProfile selfMessagingProfile, msg transportstore
 	return body, makePreview(body), nil
 }
 
-func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, msg transportstoreforward.MailboxPullMessage, body, preview string, now time.Time) error {
+func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, msg transportstoreforward.MailboxPullMessage, body, preview string, now time.Time) (bool, error) {
 	createdAt := strings.TrimSpace(msg.SentAt)
 	if createdAt == "" {
 		createdAt = now.Format(time.RFC3339Nano)
 	}
-	if _, err := tx.ExecContext(
+	insertResult, err := tx.ExecContext(
 		ctx,
 		`INSERT OR IGNORE INTO messages (
 			message_id, conversation_id, direction, sender_contact_id,
@@ -2117,12 +2122,17 @@ func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Convers
 		preview,
 		msg.Ciphertext,
 		msg.Signature,
-		StatusQueued,
+		StatusRecovered,
 		msg.RelayMessageID,
 		createdAt,
 		now.Format(time.RFC3339Nano),
-	); err != nil {
-		return fmt.Errorf("insert incoming message: %w", err)
+	)
+	if err != nil {
+		return false, fmt.Errorf("insert incoming message: %w", err)
+	}
+	rowsAffected, err := insertResult.RowsAffected()
+	if err == nil && rowsAffected == 0 {
+		return false, nil
 	}
 	if _, err := tx.ExecContext(
 		ctx,
@@ -2134,15 +2144,15 @@ func insertIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Convers
 		now.Format(time.RFC3339Nano),
 		conversation.ConversationID,
 	); err != nil {
-		return fmt.Errorf("update conversation for incoming message: %w", err)
+		return false, fmt.Errorf("update conversation for incoming message: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
-func insertDirectIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, selfProfile selfMessagingProfile, env transport.Envelope, now time.Time) error {
+func insertDirectIncomingMessage(ctx context.Context, tx *sql.Tx, conversation Conversation, contact contactRecord, selfProfile selfMessagingProfile, env transport.Envelope, now time.Time) (bool, error) {
 	createdAt := now.Format(time.RFC3339Nano)
 	preview := makePreview(env.Plaintext)
-	if _, err := tx.ExecContext(
+	insertResult, err := tx.ExecContext(
 		ctx,
 		`INSERT OR IGNORE INTO messages (
 			message_id, conversation_id, direction, sender_contact_id,
@@ -2160,8 +2170,13 @@ func insertDirectIncomingMessage(ctx context.Context, tx *sql.Tx, conversation C
 		StatusDelivered,
 		createdAt,
 		createdAt,
-	); err != nil {
-		return fmt.Errorf("insert direct incoming message: %w", err)
+	)
+	if err != nil {
+		return false, fmt.Errorf("insert direct incoming message: %w", err)
+	}
+	rowsAffected, err := insertResult.RowsAffected()
+	if err == nil && rowsAffected == 0 {
+		return false, nil
 	}
 	if _, err := tx.ExecContext(
 		ctx,
@@ -2173,9 +2188,9 @@ func insertDirectIncomingMessage(ctx context.Context, tx *sql.Tx, conversation C
 		createdAt,
 		conversation.ConversationID,
 	); err != nil {
-		return fmt.Errorf("update conversation for direct incoming message: %w", err)
+		return false, fmt.Errorf("update conversation for direct incoming message: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func markConversationRead(ctx context.Context, tx *sql.Tx, conversationID string, now time.Time) error {

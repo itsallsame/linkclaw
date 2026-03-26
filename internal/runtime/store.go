@@ -368,6 +368,21 @@ func (s *Store) UpsertMessage(ctx context.Context, record MessageRecord) error {
 }
 
 func (s *Store) upsertMessage(ctx context.Context, record MessageRecord, update bool) error {
+	if normalized := NormalizeMessageStatus(record.Status); normalized != "" {
+		record.Status = normalized
+	}
+	if update {
+		existingStatus, found, err := s.loadMessageStatus(ctx, record.MessageID)
+		if err != nil {
+			return err
+		}
+		if found {
+			record.Status = MergeMessageStatus(existingStatus, record.Status)
+		}
+	}
+	if NormalizeMessageStatus(record.Status) == MessageStatusDelivered && strings.TrimSpace(record.DeliveredAt) == "" {
+		record.DeliveredAt = s.now().Format(time.RFC3339Nano)
+	}
 	routeJSON, err := json.Marshal(record.SelectedRoute)
 	if err != nil {
 		return fmt.Errorf("marshal selected route: %w", err)
@@ -404,6 +419,23 @@ func (s *Store) upsertMessage(ctx context.Context, record MessageRecord, update 
 		return fmt.Errorf("insert runtime message: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) loadMessageStatus(ctx context.Context, messageID string) (string, bool, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT status
+		FROM runtime_messages
+		WHERE message_id = ?
+		LIMIT 1
+	`, messageID).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("load runtime message status: %w", err)
+	}
+	return status, true, nil
 }
 
 func (s *Store) ListConversations(ctx context.Context) ([]ConversationReadModel, error) {
@@ -1230,7 +1262,7 @@ func (s *Store) LoadStatusSummary(ctx context.Context) (StatusSummary, error) {
 	}
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM runtime_messages
-		WHERE direction = 'outgoing' AND status IN ('pending', 'queued')
+		WHERE direction = 'outgoing' AND status IN ('pending', 'queued', 'recovering')
 	`).Scan(&summary.PendingOutbox); err != nil {
 		return StatusSummary{}, fmt.Errorf("count runtime pending outbox: %w", err)
 	}

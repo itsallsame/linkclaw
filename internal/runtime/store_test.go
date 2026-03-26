@@ -403,3 +403,79 @@ func TestStorePersistsNostrRuntimeFoundationRecords(t *testing.T) {
 		t.Fatalf("observation record = %+v, want evt_1 on wss://relay.example", observations[0])
 	}
 }
+
+func TestStoreUpsertMessageRespectsRecoverableTransitions(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	now := time.Now().UTC()
+
+	store, _, err := OpenStore(ctx, home, now)
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertMessage(ctx, MessageRecord{
+		MessageID:      "msg_transition_delivered",
+		ConversationID: "conv_transition",
+		Direction:      "outgoing",
+		Status:         MessageStatusDelivered,
+		CreatedAt:      now.Format(time.RFC3339Nano),
+		DeliveredAt:    now.Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("InsertMessage(delivered) error = %v", err)
+	}
+
+	if err := store.UpsertMessage(ctx, MessageRecord{
+		MessageID:      "msg_transition_delivered",
+		ConversationID: "conv_transition",
+		Direction:      "outgoing",
+		Status:         MessageStatusQueued,
+		CreatedAt:      now.Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("UpsertMessage(queued rollback) error = %v", err)
+	}
+
+	if err := store.InsertMessage(ctx, MessageRecord{
+		MessageID:      "msg_transition_retry",
+		ConversationID: "conv_transition",
+		Direction:      "outgoing",
+		Status:         MessageStatusFailed,
+		CreatedAt:      now.Add(1 * time.Second).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("InsertMessage(failed) error = %v", err)
+	}
+
+	if err := store.UpsertMessage(ctx, MessageRecord{
+		MessageID:      "msg_transition_retry",
+		ConversationID: "conv_transition",
+		Direction:      "outgoing",
+		Status:         MessageStatusQueued,
+		CreatedAt:      now.Add(1 * time.Second).Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatalf("UpsertMessage(failed->queued) error = %v", err)
+	}
+
+	messages, err := store.ListMessages(ctx)
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+
+	statusByID := make(map[string]MessageRecord, len(messages))
+	for _, message := range messages {
+		statusByID[message.MessageID] = message
+	}
+
+	delivered := statusByID["msg_transition_delivered"]
+	if delivered.Status != MessageStatusDelivered {
+		t.Fatalf("delivered status = %q, want %q", delivered.Status, MessageStatusDelivered)
+	}
+	if delivered.DeliveredAt == "" {
+		t.Fatalf("delivered delivered_at = empty, want timestamp")
+	}
+
+	retried := statusByID["msg_transition_retry"]
+	if retried.Status != MessageStatusQueued {
+		t.Fatalf("retried status = %q, want %q", retried.Status, MessageStatusQueued)
+	}
+}

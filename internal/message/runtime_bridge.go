@@ -2,7 +2,10 @@ package message
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -775,11 +778,15 @@ func (s *Service) receiveDirectEnvelope(ctx context.Context, home string, selfPr
 	if err != nil {
 		return err
 	}
-	if err := insertDirectIncomingMessage(ctx, tx, conversation, contact, selfProfile, env, now); err != nil {
+	inserted, err := insertDirectIncomingMessage(ctx, tx, conversation, contact, selfProfile, env, now)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit direct message receive transaction: %w", err)
+	}
+	if !inserted {
+		return nil
 	}
 	return syncRuntimeRecoveredState(ctx, db, []contactRecord{contact}, []Conversation{{
 		ConversationID:     conversation.ConversationID,
@@ -852,6 +859,8 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	contacts := make([]contactRecord, 0, len(pulled.Messages))
 	conversations := make([]Conversation, 0, len(pulled.Messages))
 	messages := make([]MessageRecord, 0, len(pulled.Messages))
+	observations := make([]agentruntime.RecoveredEventObservationRecord, 0, len(pulled.Messages))
+	seenObservationKeys := make(map[string]struct{}, len(pulled.Messages))
 	recoveryRoute := transport.RouteCandidate{
 		Type:     transport.RouteTypeRecovery,
 		Label:    relayURL,
@@ -859,6 +868,24 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 		Target:   relayURL,
 	}
 	for _, pulledMessage := range pulled.Messages {
+		observation, hasObservation, err := buildRecoveredObservationRecord(selfProfile.SelfID, relayURL, pulledMessage, now)
+		if err != nil {
+			return 0, "", err
+		}
+		if hasObservation {
+			observationKey := observation.EventID + "|" + observation.RelayURL
+			if _, seenInBatch := seenObservationKeys[observationKey]; seenInBatch {
+				continue
+			}
+			seenInStore, err := store.HasRecoveredEventObservation(ctx, selfProfile.SelfID, observation.EventID)
+			if err != nil {
+				return 0, "", err
+			}
+			if seenInStore {
+				seenObservationKeys[observationKey] = struct{}{}
+				continue
+			}
+		}
 		plaintext, preview, err := decryptIncomingMessage(selfProfile, pulledMessage)
 		if err != nil {
 			return 0, "", err
@@ -871,8 +898,18 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 		if err != nil {
 			return 0, "", err
 		}
-		if err := insertIncomingMessage(ctx, tx, conversation, contact, pulledMessage, plaintext, preview, now); err != nil {
+		inserted, err := insertIncomingMessage(ctx, tx, conversation, contact, pulledMessage, plaintext, preview, now)
+		if err != nil {
 			return 0, "", err
+		}
+		if hasObservation {
+			observation.CanonicalID = firstNonEmptyString(strings.TrimSpace(observation.CanonicalID), contact.CanonicalID, pulledMessage.SenderID)
+			observation.MessageID = firstNonEmptyString(strings.TrimSpace(observation.MessageID), pulledMessage.MessageID)
+			observations = append(observations, observation)
+			seenObservationKeys[observation.EventID+"|"+observation.RelayURL] = struct{}{}
+		}
+		if !inserted {
+			continue
 		}
 		contacts = append(contacts, contact)
 		conversation.LastMessageAt = strings.TrimSpace(pulledMessage.SentAt)
@@ -891,7 +928,7 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 			RecipientRouteID:  pulledMessage.RecipientID,
 			Body:              plaintext,
 			Preview:           preview,
-			Status:            StatusQueued,
+			Status:            StatusRecovered,
 			TransportStatus:   TransportStatusRecovered,
 			SelectedRoute:     recoveryRoute,
 			CreatedAt:         conversation.LastMessageAt,
@@ -914,10 +951,70 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	}); err != nil {
 		return 0, "", err
 	}
+	if err := persistRecoveredObservations(ctx, store, observations); err != nil {
+		return 0, "", err
+	}
+	if synced == 0 {
+		return 0, pulled.NextCursor, nil
+	}
 	if err := syncRuntimeRecoveredState(ctx, db, contacts, conversations, messages, now); err != nil {
 		return 0, "", err
 	}
 	return synced, pulled.NextCursor, nil
+}
+
+func buildRecoveredObservationRecord(
+	selfID string,
+	relayURL string,
+	message transportstoreforward.MailboxPullMessage,
+	now time.Time,
+) (agentruntime.RecoveredEventObservationRecord, bool, error) {
+	selfID = strings.TrimSpace(selfID)
+	eventID := firstNonEmptyString(strings.TrimSpace(message.RelayMessageID), strings.TrimSpace(message.MessageID))
+	if selfID == "" || eventID == "" {
+		return agentruntime.RecoveredEventObservationRecord{}, false, nil
+	}
+	payloadJSON, err := json.Marshal(message)
+	if err != nil {
+		return agentruntime.RecoveredEventObservationRecord{}, false, fmt.Errorf("marshal recovered message observation payload: %w", err)
+	}
+	digest := sha256.Sum256(payloadJSON)
+	return agentruntime.RecoveredEventObservationRecord{
+		SelfID:       selfID,
+		EventID:      eventID,
+		RelayURL:     strings.TrimSpace(relayURL),
+		CanonicalID:  strings.TrimSpace(message.SenderID),
+		MessageID:    strings.TrimSpace(message.MessageID),
+		ObservedAt:   firstNonEmptyString(strings.TrimSpace(message.SentAt), now.Format(time.RFC3339Nano)),
+		PayloadHash:  "sha256:" + hex.EncodeToString(digest[:]),
+		PayloadJSON:  string(payloadJSON),
+		MetadataJSON: `{"source":"store_forward_sync"}`,
+	}, true, nil
+}
+
+func persistRecoveredObservations(
+	ctx context.Context,
+	store *agentruntime.Store,
+	observations []agentruntime.RecoveredEventObservationRecord,
+) error {
+	if len(observations) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(observations))
+	for _, observation := range observations {
+		if strings.TrimSpace(observation.SelfID) == "" || strings.TrimSpace(observation.EventID) == "" {
+			continue
+		}
+		key := observation.SelfID + "|" + observation.EventID + "|" + observation.RelayURL
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if err := store.UpsertRecoveredEventObservation(ctx, observation); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func syncRuntimeRecoveredState(

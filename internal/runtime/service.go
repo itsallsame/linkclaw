@@ -100,9 +100,9 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 			Delivered: sendResult.Delivered,
 			Retryable: sendResult.Retryable,
 		})
-		status := "queued"
+		status := MessageStatusQueued
 		if sendResult.Delivered {
-			status = "delivered"
+			status = MessageStatusDelivered
 		}
 		return SendResult{
 			MessageID:     envelope.MessageID,
