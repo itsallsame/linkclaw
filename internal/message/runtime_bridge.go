@@ -865,6 +865,15 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	}
 	defer db.Close()
 	store := agentruntime.NewStoreWithDB(db, now)
+	startedAt := now.UTC().Format(time.RFC3339Nano)
+
+	relaySyncState, relaySyncStateFound, err := store.LoadRelaySyncState(ctx, selfProfile.SelfID, relayURL)
+	if err != nil {
+		return 0, "", err
+	}
+	lastCheckpoint, hasLastCheckpoint := parseRecoveredSyncCheckpointCursor(relaySyncState.LastCursor)
+	latestCheckpoint := lastCheckpoint
+	hasLatestCheckpoint := hasLastCheckpoint
 
 	cursor, err := store.LoadStoreForwardCursor(ctx, selfProfile.SelfID, relayURL)
 	if err != nil {
@@ -882,6 +891,24 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 			LastResult:         "success",
 			LastRecoveredCount: 0,
 			UpdatedAt:          now.Format(time.RFC3339Nano),
+		}); err != nil {
+			return 0, "", err
+		}
+		recoveredCountTotal := 0
+		if relaySyncStateFound {
+			recoveredCountTotal = relaySyncState.RecoveredCountTotal
+		}
+		if err := store.SaveRelaySyncState(ctx, agentruntime.RelaySyncStateRecord{
+			SelfID:              selfProfile.SelfID,
+			RelayURL:            relayURL,
+			LastCursor:          formatRecoveredSyncCheckpointCursor(latestCheckpoint, hasLatestCheckpoint),
+			LastEventAt:         formatRecoveredSyncCheckpointEventAt(latestCheckpoint, hasLatestCheckpoint),
+			LastSyncStartedAt:   startedAt,
+			LastSyncCompletedAt: now.UTC().Format(time.RFC3339Nano),
+			LastResult:          "success",
+			LastError:           "",
+			RecoveredCountTotal: recoveredCountTotal,
+			UpdatedAt:           now.UTC().Format(time.RFC3339Nano),
 		}); err != nil {
 			return 0, "", err
 		}
@@ -924,6 +951,17 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 				seenObservationKeys[observationKey] = struct{}{}
 				continue
 			}
+		}
+		if err := validateRecoveredMessageBinding(selfProfile, pulledMessage); err != nil {
+			continue
+		}
+		checkpoint, hasCheckpoint := buildRecoveredSyncCheckpoint(pulledMessage, now)
+		if hasCheckpoint && hasLastCheckpoint && compareRecoveredSyncCheckpoint(checkpoint, lastCheckpoint) <= 0 {
+			continue
+		}
+		if hasCheckpoint && (!hasLatestCheckpoint || compareRecoveredSyncCheckpoint(checkpoint, latestCheckpoint) > 0) {
+			latestCheckpoint = checkpoint
+			hasLatestCheckpoint = true
 		}
 		plaintext, preview, err := decryptIncomingMessage(selfProfile, pulledMessage)
 		if err != nil {
@@ -990,6 +1028,24 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	}); err != nil {
 		return 0, "", err
 	}
+	recoveredCountTotal := synced
+	if relaySyncStateFound {
+		recoveredCountTotal += relaySyncState.RecoveredCountTotal
+	}
+	if err := store.SaveRelaySyncState(ctx, agentruntime.RelaySyncStateRecord{
+		SelfID:              selfProfile.SelfID,
+		RelayURL:            relayURL,
+		LastCursor:          formatRecoveredSyncCheckpointCursor(latestCheckpoint, hasLatestCheckpoint),
+		LastEventAt:         formatRecoveredSyncCheckpointEventAt(latestCheckpoint, hasLatestCheckpoint),
+		LastSyncStartedAt:   startedAt,
+		LastSyncCompletedAt: now.UTC().Format(time.RFC3339Nano),
+		LastResult:          "success",
+		LastError:           "",
+		RecoveredCountTotal: recoveredCountTotal,
+		UpdatedAt:           now.UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		return 0, "", err
+	}
 	if err := persistRecoveredObservations(ctx, store, observations); err != nil {
 		return 0, "", err
 	}
@@ -1052,6 +1108,91 @@ func persistRecoveredObservations(
 		if err := store.UpsertRecoveredEventObservation(ctx, observation); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+type recoveredSyncCheckpoint struct {
+	CreatedAt time.Time
+	EventID   string
+}
+
+func buildRecoveredSyncCheckpoint(message transportstoreforward.MailboxPullMessage, now time.Time) (recoveredSyncCheckpoint, bool) {
+	eventID := firstNonEmptyString(strings.TrimSpace(message.RelayMessageID), strings.TrimSpace(message.MessageID))
+	if eventID == "" {
+		return recoveredSyncCheckpoint{}, false
+	}
+	createdAt := parseTimestamp(firstNonEmptyString(strings.TrimSpace(message.SentAt), now.UTC().Format(time.RFC3339Nano)))
+	if createdAt.IsZero() {
+		createdAt = now.UTC()
+	}
+	return recoveredSyncCheckpoint{
+		CreatedAt: createdAt.UTC(),
+		EventID:   eventID,
+	}, true
+}
+
+func parseRecoveredSyncCheckpointCursor(raw string) (recoveredSyncCheckpoint, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return recoveredSyncCheckpoint{}, false
+	}
+	parts := strings.SplitN(raw, "|", 2)
+	if len(parts) != 2 {
+		return recoveredSyncCheckpoint{}, false
+	}
+	createdAt := parseTimestamp(parts[0])
+	eventID := strings.TrimSpace(parts[1])
+	if createdAt.IsZero() || eventID == "" {
+		return recoveredSyncCheckpoint{}, false
+	}
+	return recoveredSyncCheckpoint{
+		CreatedAt: createdAt.UTC(),
+		EventID:   eventID,
+	}, true
+}
+
+func formatRecoveredSyncCheckpointCursor(checkpoint recoveredSyncCheckpoint, ok bool) string {
+	if !ok || checkpoint.CreatedAt.IsZero() || strings.TrimSpace(checkpoint.EventID) == "" {
+		return ""
+	}
+	return checkpoint.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + strings.TrimSpace(checkpoint.EventID)
+}
+
+func formatRecoveredSyncCheckpointEventAt(checkpoint recoveredSyncCheckpoint, ok bool) string {
+	if !ok || checkpoint.CreatedAt.IsZero() {
+		return ""
+	}
+	return checkpoint.CreatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+func compareRecoveredSyncCheckpoint(left, right recoveredSyncCheckpoint) int {
+	switch {
+	case left.CreatedAt.Before(right.CreatedAt):
+		return -1
+	case left.CreatedAt.After(right.CreatedAt):
+		return 1
+	}
+	return strings.Compare(strings.TrimSpace(left.EventID), strings.TrimSpace(right.EventID))
+}
+
+func validateRecoveredMessageBinding(selfProfile selfMessagingProfile, message transportstoreforward.MailboxPullMessage) error {
+	expectedRecipientID := strings.TrimSpace(selfProfile.RecipientID)
+	if expectedRecipientID == "" {
+		return fmt.Errorf("self recipient binding is empty")
+	}
+	recipientID := strings.TrimSpace(message.RecipientID)
+	if recipientID == "" {
+		return fmt.Errorf("recovered message recipient_id is empty")
+	}
+	if recipientID != expectedRecipientID {
+		return fmt.Errorf("recovered message recipient_id mismatch")
+	}
+	if strings.TrimSpace(message.SenderID) == "" {
+		return fmt.Errorf("recovered message sender_id is empty")
+	}
+	if strings.TrimSpace(message.SenderSigningKey) == "" {
+		return fmt.Errorf("recovered message sender_signing_key is empty")
 	}
 	return nil
 }
