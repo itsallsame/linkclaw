@@ -257,6 +257,75 @@ func TestStorePersistsRuntimeRecords(t *testing.T) {
 	}
 }
 
+func TestStoreUpsertContactPreservesLastSuccessfulRouteWhenUpdateIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+
+	store, _, err := OpenStore(ctx, home, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	canonicalID := "did:key:z6MkRouteState"
+	initialRoute := "wss://relay.initial.nostr.example?recipient=npub_initial"
+	if err := store.UpsertContact(ctx, ContactRecord{
+		ContactID:           "contact_route_state",
+		CanonicalID:         canonicalID,
+		DisplayName:         "Route State",
+		LastSuccessfulRoute: initialRoute,
+	}); err != nil {
+		t.Fatalf("initial UpsertContact() error = %v", err)
+	}
+
+	if err := store.UpsertContact(ctx, ContactRecord{
+		ContactID:           "contact_route_state",
+		CanonicalID:         canonicalID,
+		DisplayName:         "Route State Updated",
+		LastSuccessfulRoute: "",
+	}); err != nil {
+		t.Fatalf("empty-route UpsertContact() error = %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+
+	var preserved string
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT last_successful_route FROM runtime_contacts WHERE canonical_id = ?`,
+		canonicalID,
+	).Scan(&preserved); err != nil {
+		t.Fatalf("query preserved last_successful_route: %v", err)
+	}
+	if preserved != initialRoute {
+		t.Fatalf("last_successful_route after empty update = %q, want %q", preserved, initialRoute)
+	}
+
+	nextRoute := "wss://relay.next.nostr.example?recipient=npub_next"
+	if err := store.UpsertContact(ctx, ContactRecord{
+		ContactID:           "contact_route_state",
+		CanonicalID:         canonicalID,
+		DisplayName:         "Route State Updated Again",
+		LastSuccessfulRoute: nextRoute,
+	}); err != nil {
+		t.Fatalf("next-route UpsertContact() error = %v", err)
+	}
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT last_successful_route FROM runtime_contacts WHERE canonical_id = ?`,
+		canonicalID,
+	).Scan(&preserved); err != nil {
+		t.Fatalf("query updated last_successful_route: %v", err)
+	}
+	if preserved != nextRoute {
+		t.Fatalf("last_successful_route after non-empty update = %q, want %q", preserved, nextRoute)
+	}
+}
+
 func TestStorePersistsNostrRuntimeFoundationRecords(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

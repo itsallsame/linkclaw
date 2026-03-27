@@ -321,7 +321,10 @@ func (s *Store) UpsertContact(ctx context.Context, record ContactRecord) error {
 			store_forward_hints_json = excluded.store_forward_hints_json,
 			signed_peer_record = excluded.signed_peer_record,
 			last_seen_at = excluded.last_seen_at,
-			last_successful_route = excluded.last_successful_route,
+			last_successful_route = CASE
+				WHEN TRIM(excluded.last_successful_route) <> '' THEN excluded.last_successful_route
+				ELSE runtime_contacts.last_successful_route
+			END,
 			raw_identity_card_json = excluded.raw_identity_card_json,
 			updated_at = excluded.updated_at
 	`,

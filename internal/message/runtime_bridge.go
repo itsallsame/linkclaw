@@ -317,6 +317,7 @@ func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 		DirectHints:           directHints,
 		StoreForwardHints:     storeForwardHints,
 		TransportCapabilities: caps,
+		LastSuccessfulRoute:   strings.TrimSpace(contact.LastSuccessfulRoute),
 	}
 }
 
@@ -566,22 +567,49 @@ func parseTimestampOrFallback(raw string, fallback time.Time) time.Time {
 
 func buildNostrRouteTargets(contact contactRecord) []string {
 	relays := nostrTargetsFromContact(contact)
-	recipients := nostrRecipientPublicKeysFromContact(contact)
-	targets := make([]string, 0, len(relays))
+	recipients := orderedNostrRouteRecipients(
+		nostrRouteRecipient(contact.LastSuccessfulRoute),
+		contact.NostrPrimaryPublicKey,
+		contact.NostrPublicKeys,
+	)
+	return buildNostrRelayRecipientTargets(relays, recipients)
+}
+
+func orderedNostrRouteRecipients(recentRecipient string, primaryRecipient string, remaining []string) []string {
+	recipients := make([]string, 0, len(remaining)+2)
+	if recent := strings.TrimSpace(recentRecipient); recent != "" {
+		recipients = appendIfMissing(recipients, recent)
+	}
+	if primary := strings.TrimSpace(primaryRecipient); primary != "" {
+		recipients = appendIfMissing(recipients, primary)
+	}
+	for _, key := range remaining {
+		recipients = appendIfMissing(recipients, key)
+	}
+	return recipients
+}
+
+func buildNostrRelayRecipientTargets(relays []string, recipients []string) []string {
+	targets := make([]string, 0, len(relays)*max(1, len(recipients)))
 	for _, relay := range relays {
 		relay = strings.TrimSpace(relay)
 		if relay == "" {
 			continue
 		}
-		if recipient := nostrRouteRecipient(relay); recipient != "" {
-			targets = appendIfMissing(targets, relay)
+		manualRecipient := nostrRouteRecipient(relay)
+		baseRelay := withoutNostrRouteRecipient(relay)
+		if baseRelay == "" || relayURLKind(baseRelay) != relayKindNostr {
 			continue
 		}
-		if len(recipients) == 0 {
-			continue
+		orderedRecipients := make([]string, 0, len(recipients)+1)
+		if manualRecipient != "" {
+			orderedRecipients = appendIfMissing(orderedRecipients, manualRecipient)
 		}
 		for _, recipient := range recipients {
-			target := withNostrRouteRecipient(relay, recipient)
+			orderedRecipients = appendIfMissing(orderedRecipients, recipient)
+		}
+		for _, recipient := range orderedRecipients {
+			target := withNostrRouteRecipient(baseRelay, recipient)
 			if target == "" {
 				continue
 			}
@@ -589,6 +617,23 @@ func buildNostrRouteTargets(contact contactRecord) []string {
 		}
 	}
 	return targets
+}
+
+func withoutNostrRouteRecipient(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	query := parsed.Query()
+	query.Del("recipient")
+	query.Del("p")
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func nostrRouteRecipient(raw string) string {
@@ -642,6 +687,7 @@ func resolveSelfSyncRoutes(
 	selfCanonicalID := strings.TrimSpace(selfProfile.CanonicalID)
 	nostrRelays := []string{}
 	nostrRecipients := []string{}
+	nostrPrimaryRecipient := ""
 
 	for _, binding := range bindings {
 		if !binding.Enabled {
@@ -663,6 +709,9 @@ func resolveSelfSyncRoutes(
 		}
 		if recipient := nostrRouteRecipient(binding.RelayURL); recipient != "" {
 			nostrRecipients = appendIfMissing(nostrRecipients, recipient)
+		}
+		if nostrPrimaryRecipient == "" {
+			nostrPrimaryRecipient = parseNostrPrimaryRecipientFromMetadata(binding.MetadataJSON)
 		}
 		nostrRelays = appendNostrRelaysFromMetadata(nostrRelays, binding.MetadataJSON)
 		nostrRecipients = appendNostrRecipientsFromMetadata(nostrRecipients, binding.MetadataJSON)
@@ -686,6 +735,9 @@ func resolveSelfSyncRoutes(
 		if recipient := nostrRouteRecipient(relay.RelayURL); recipient != "" {
 			nostrRecipients = appendIfMissing(nostrRecipients, recipient)
 		}
+		if nostrPrimaryRecipient == "" {
+			nostrPrimaryRecipient = parseNostrPrimaryRecipientFromMetadata(relay.MetadataJSON)
+		}
 		nostrRelays = appendNostrRelaysFromMetadata(nostrRelays, relay.MetadataJSON)
 		nostrRecipients = appendNostrRecipientsFromMetadata(nostrRecipients, relay.MetadataJSON)
 	}
@@ -698,39 +750,19 @@ func resolveSelfSyncRoutes(
 		}
 	}
 
-	sort.Strings(nostrRelays)
-	sort.Strings(nostrRecipients)
+	prioritizedRecipients := orderedNostrRouteRecipients("", nostrPrimaryRecipient, nostrRecipients)
+	nostrTargets := buildNostrRelayRecipientTargets(nostrRelays, prioritizedRecipients)
 
-	routes := make([]transport.RouteCandidate, 0, len(nostrRelays)+1)
+	routes := make([]transport.RouteCandidate, 0, len(nostrTargets)+1)
 	caps := []string{}
-	for _, relayURL := range nostrRelays {
-		relayURL = strings.TrimSpace(relayURL)
-		if relayURL == "" || relayURLKind(relayURL) != relayKindNostr {
-			continue
-		}
-		if recipient := nostrRouteRecipient(relayURL); recipient != "" {
-			routes = append(routes, transport.RouteCandidate{
-				Type:     transport.RouteTypeNostr,
-				Label:    relayURL,
-				Priority: 30,
-				Target:   relayURL,
-			})
-			caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
-			continue
-		}
-		for _, recipient := range nostrRecipients {
-			target := withNostrRouteRecipient(relayURL, recipient)
-			if target == "" {
-				continue
-			}
-			routes = append(routes, transport.RouteCandidate{
-				Type:     transport.RouteTypeNostr,
-				Label:    target,
-				Priority: 30,
-				Target:   target,
-			})
-			caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
-		}
+	for _, target := range nostrTargets {
+		routes = append(routes, transport.RouteCandidate{
+			Type:     transport.RouteTypeNostr,
+			Label:    target,
+			Priority: 30,
+			Target:   target,
+		})
+		caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
 	}
 
 	if legacyRelay != "" && isStoreForwardRelayURL(legacyRelay) {
@@ -802,6 +834,26 @@ func appendNostrRecipientsFromMetadata(values []string, raw string) []string {
 		values = appendNostrRecipientsFromMetadataMap(values, nested)
 	}
 	return values
+}
+
+func parseNostrPrimaryRecipientFromMetadata(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	if primary := firstMetadataString(payload["nostr_primary_public_key"]); primary != "" {
+		return primary
+	}
+	if nested, ok := payload["nostr"].(map[string]any); ok {
+		if primary := firstMetadataString(nested["nostr_primary_public_key"]); primary != "" {
+			return primary
+		}
+	}
+	return ""
 }
 
 func appendNostrRecipientsFromMetadataMap(values []string, payload map[string]any) []string {
@@ -1013,6 +1065,13 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 	if len(buildNostrRouteTargets(contact)) > 0 {
 		caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
 	}
+	lastSuccessfulRoute := strings.TrimSpace(contact.LastSuccessfulRoute)
+	if record.SelectedRoute.Type == transport.RouteTypeNostr {
+		switch agentruntime.NormalizeMessageStatus(record.Status) {
+		case agentruntime.MessageStatusQueued, agentruntime.MessageStatusDelivered, agentruntime.MessageStatusRecovered:
+			lastSuccessfulRoute = strings.TrimSpace(firstNonEmptyString(record.SelectedRoute.Target, record.SelectedRoute.Label))
+		}
+	}
 	if err := store.UpsertContact(ctx, agentruntime.ContactRecord{
 		ContactID:             contact.ContactID,
 		CanonicalID:           contact.CanonicalID,
@@ -1025,6 +1084,7 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 		DirectHints:           directHints,
 		StoreForwardHints:     storeForwardHints,
 		SignedPeerRecord:      signedPeerRecord,
+		LastSuccessfulRoute:   lastSuccessfulRoute,
 	}); err != nil {
 		return err
 	}

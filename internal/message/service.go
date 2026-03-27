@@ -222,6 +222,7 @@ type contactRecord struct {
 	NostrRelayHints       []string
 	NostrPublicKeys       []string
 	NostrPrimaryPublicKey string
+	LastSuccessfulRoute   string
 	DirectURL             string
 	DirectToken           string
 	Status                string
@@ -856,7 +857,36 @@ func resolveRuntimeContactWithRelayView(
 	if err != nil {
 		return contactRecord{}, err
 	}
-	return applyRelayViewToContact(contact, relayView), nil
+	updated := applyRelayViewToContact(contact, relayView)
+	lastSuccessfulRoute, err := loadRuntimeLastSuccessfulRoute(ctx, db, updated.CanonicalID)
+	if err != nil {
+		return contactRecord{}, err
+	}
+	updated.LastSuccessfulRoute = lastSuccessfulRoute
+	return updated, nil
+}
+
+func loadRuntimeLastSuccessfulRoute(ctx context.Context, db *sql.DB, canonicalID string) (string, error) {
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return "", nil
+	}
+	var route string
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT last_successful_route
+		 FROM runtime_contacts
+		 WHERE canonical_id = ?
+		 LIMIT 1`,
+		canonicalID,
+	).Scan(&route)
+	if err != nil {
+		if err == sql.ErrNoRows || isMissingTableError(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("query runtime last_successful_route: %w", err)
+	}
+	return strings.TrimSpace(route), nil
 }
 
 func resolveRuntimeDiscoveryWithRelayView(

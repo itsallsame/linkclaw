@@ -378,6 +378,88 @@ func TestResolveSelfSyncRoutesBuildsNostrTargetsForSelfBindings(t *testing.T) {
 	}
 }
 
+func TestBuildNostrRouteTargetsPrioritizesManualRecentPrimaryAndRemaining(t *testing.T) {
+	contact := contactRecord{
+		NostrRelayHints: []string{
+			"wss://relay.manual.nostr.example?recipient=npub_manual",
+			"wss://relay.fallback.nostr.example",
+		},
+		NostrPublicKeys: []string{
+			"npub_secondary",
+			"npub_primary",
+			"npub_tertiary",
+		},
+		NostrPrimaryPublicKey: "npub_primary",
+		LastSuccessfulRoute:   "wss://relay.previous.nostr.example?recipient=npub_recent",
+	}
+
+	got := buildNostrRouteTargets(contact)
+	want := []string{
+		"wss://relay.manual.nostr.example?recipient=npub_manual",
+		"wss://relay.manual.nostr.example?recipient=npub_recent",
+		"wss://relay.manual.nostr.example?recipient=npub_primary",
+		"wss://relay.manual.nostr.example?recipient=npub_secondary",
+		"wss://relay.manual.nostr.example?recipient=npub_tertiary",
+		"wss://relay.fallback.nostr.example?recipient=npub_recent",
+		"wss://relay.fallback.nostr.example?recipient=npub_primary",
+		"wss://relay.fallback.nostr.example?recipient=npub_secondary",
+		"wss://relay.fallback.nostr.example?recipient=npub_tertiary",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("buildNostrRouteTargets() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveSelfSyncRoutesPrioritizesPrimaryRecipientBeforeRemaining(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 3, 27, 3, 0, 0, 0, time.UTC)
+	home, profile, _ := setupRuntimeBridgeSyncHome(t, now)
+	profile.RelayURL = ""
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	store := agentruntime.NewStoreWithDB(db, now)
+	if err := store.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_self_priority",
+		SelfID:      profile.SelfID,
+		CanonicalID: profile.CanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    "wss://relay.priority.nostr.example",
+		RouteLabel:  "self-priority",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["npub_second","npub_third"],` +
+			`"nostr_primary_public_key":"npub_primary"}`,
+	}); err != nil {
+		t.Fatalf("upsert self transport binding: %v", err)
+	}
+
+	routes, _, err := resolveSelfSyncRoutes(ctx, db, profile, now)
+	if err != nil {
+		t.Fatalf("resolveSelfSyncRoutes() error = %v", err)
+	}
+
+	recipients := make([]string, 0, 3)
+	for _, route := range routes {
+		if route.Type != transport.RouteTypeNostr {
+			continue
+		}
+		if withoutNostrRouteRecipient(route.Target) != "wss://relay.priority.nostr.example" {
+			continue
+		}
+		recipients = append(recipients, nostrRouteRecipient(route.Target))
+	}
+	wantRecipients := []string{"npub_primary", "npub_second", "npub_third"}
+	if !slices.Equal(recipients, wantRecipients) {
+		t.Fatalf("recipients = %#v, want %#v", recipients, wantRecipients)
+	}
+}
+
 type stubMailboxBackend struct {
 	pullResponse transportstoreforward.MailboxPullResponse
 	pullErr      error
