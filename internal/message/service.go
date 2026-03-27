@@ -300,7 +300,7 @@ func (s *Service) Send(ctx context.Context, opts SendOptions) (SendResult, error
 	if err := syncRuntimeSendState(ctx, home, runtimeContact, conversation, record, now); err != nil {
 		return SendResult{}, err
 	}
-	if hasRuntimeStoreForwardTarget(runtimeContact) || strings.TrimSpace(runtimeContact.DirectURL) != "" || directTransportEnabled() {
+	if hasRuntimeStoreForwardTarget(runtimeContact) || hasRuntimeNostrTarget(runtimeContact) || strings.TrimSpace(runtimeContact.DirectURL) != "" || directTransportEnabled() {
 		runtimeResult, err := s.sendThroughRuntime(ctx, home, selfProfile, runtimeContact, record, now)
 		if err != nil {
 			record.Status = StatusFailed
@@ -838,6 +838,10 @@ func (t connectReadinessTransport) Ack(context.Context, transport.RouteCandidate
 
 func hasRuntimeStoreForwardTarget(contact contactRecord) bool {
 	return len(storeForwardTargetsFromContact(contact)) > 0
+}
+
+func hasRuntimeNostrTarget(contact contactRecord) bool {
+	return len(buildNostrRouteTargets(contact)) > 0
 }
 
 func resolveRuntimeContactWithRelayView(

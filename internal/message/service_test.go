@@ -1033,6 +1033,151 @@ func TestSendPublishesNostrEventWithRealSignature(t *testing.T) {
 	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "queued", "")
 }
 
+func TestSendTriggersRuntimeForPureNostrCardContact(t *testing.T) {
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "0")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAlicePureNostrCard",
+		DisplayName: "Alice Pure Nostr Card",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+
+	aliceDB, err := sql.Open("sqlite", filepath.Join(aliceHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open alice sqlite db: %v", err)
+	}
+	aliceProfile, err := loadSelfMessagingProfile(ctx, aliceDB, aliceHome)
+	if err != nil {
+		aliceDB.Close()
+		t.Fatalf("load alice self profile: %v", err)
+	}
+	const relayURL = "wss://relay.pure-card.nostr.example"
+	const recipientPubKey = "npub_pure_card_1"
+	aliceRuntimeStore := agentruntime.NewStoreWithDB(aliceDB, now)
+	if err := aliceRuntimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_alice_pure_nostr_card",
+		SelfID:      aliceProfile.SelfID,
+		CanonicalID: aliceProfile.CanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    relayURL,
+		RouteLabel:  "pure-nostr-card",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "both",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["` + recipientPubKey + `"],` +
+			`"nostr_primary_public_key":"` + recipientPubKey + `"}`,
+	}); err != nil {
+		aliceDB.Close()
+		t.Fatalf("upsert alice runtime transport binding: %v", err)
+	}
+	if err := aliceDB.Close(); err != nil {
+		t.Fatalf("close alice sqlite db: %v", err)
+	}
+
+	aliceCard, err := cardService.Export(ctx, card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobPureNostrCard",
+		DisplayName: "Bob Pure Nostr Card",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	imported, err := cardService.Import(ctx, card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice card into bob home: %v", err)
+	}
+
+	bobDB, err := sql.Open("sqlite", filepath.Join(bobHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open bob sqlite db: %v", err)
+	}
+	var contactRelayURL, contactDirectURL, contactDirectToken string
+	if err := bobDB.QueryRowContext(
+		ctx,
+		`SELECT relay_url, direct_url, direct_token FROM contacts WHERE contact_id = ?`,
+		imported.ContactID,
+	).Scan(&contactRelayURL, &contactDirectURL, &contactDirectToken); err != nil {
+		bobDB.Close()
+		t.Fatalf("query imported contact routing fields: %v", err)
+	}
+	if strings.TrimSpace(contactRelayURL) != "" {
+		bobDB.Close()
+		t.Fatalf("contact relay_url = %q, want empty for pure nostr card contact", contactRelayURL)
+	}
+	if strings.TrimSpace(contactDirectURL) != "" || strings.TrimSpace(contactDirectToken) != "" {
+		bobDB.Close()
+		t.Fatalf("contact direct fields = (%q,%q), want empty", contactDirectURL, contactDirectToken)
+	}
+	if err := bobDB.Close(); err != nil {
+		t.Fatalf("close bob sqlite db: %v", err)
+	}
+
+	storeForwardBackend := &stubFailingMailboxBackend{sendErr: context.DeadlineExceeded}
+	nostrClient := &stubNostrRecoveryClient{
+		publishReceipt: transportnostr.PublishReceipt{
+			EventID:  "evt_pure_nostr_card",
+			Accepted: true,
+			Message:  "ok",
+		},
+	}
+	service := NewService()
+	service.StoreForwardBackend = storeForwardBackend
+	service.NostrRelayClient = nostrClient
+
+	sent, err := service.Send(ctx, SendOptions{
+		Home:       bobHome,
+		ContactRef: imported.ContactID,
+		Body:       "hello pure nostr card",
+	})
+	if err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+	if got, want := sent.Message.Status, StatusQueued; got != want {
+		t.Fatalf("message status = %q, want %q", got, want)
+	}
+	if got, want := sent.Message.TransportStatus, TransportStatusDeferred; got != want {
+		t.Fatalf("transport status = %q, want %q", got, want)
+	}
+	if got, want := sent.Message.SelectedRoute.Type, transport.RouteTypeNostr; got != want {
+		t.Fatalf("selected route type = %q, want %q", got, want)
+	}
+	if strings.TrimSpace(sent.Message.SelectedRoute.Target) == "" {
+		t.Fatal("selected route target is empty, want nostr relay recipient target")
+	}
+	if !hasNostrRouteRecipient([]transport.RouteCandidate{sent.Message.SelectedRoute}, relayURL, recipientPubKey) {
+		t.Fatalf("selected route = %#v, want relay %q with recipient %q", sent.Message.SelectedRoute, relayURL, recipientPubKey)
+	}
+	if got, want := len(nostrClient.publishCalls), 1; got != want {
+		t.Fatalf("nostr publish calls = %d, want %d", got, want)
+	}
+	if got, want := storeForwardBackend.sendCalls, 0; got != want {
+		t.Fatalf("store-forward send calls = %d, want %d", got, want)
+	}
+
+	attempts := loadRuntimeRouteAttempts(t, bobHome)
+	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "queued", "")
+}
+
 func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
 	if got, want := deriveTransportStatus(DirectionOutgoing, StatusRecovering, transport.RouteCandidate{}), TransportStatusDeferred; got != want {
 		t.Fatalf("deriveTransportStatus(outgoing,recovering) = %q, want %q", got, want)
