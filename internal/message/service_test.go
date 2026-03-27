@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1055,6 +1056,7 @@ func TestSyncUsesRuntimeNostrRoutesWhenLegacyRelayURLEmpty(t *testing.T) {
 
 	const relayURL = "wss://relay.sync.nostr.example"
 	const recipientPubKey = "npub_self_sync_route_1"
+	const senderPubKey = "npub_sender_sync_route_1"
 	const sentAt = "2026-03-27T00:30:00Z"
 
 	pulledMessage := buildSignedMailboxPullMessage(
@@ -1071,9 +1073,9 @@ func TestSyncUsesRuntimeNostrRoutesWhenLegacyRelayURLEmpty(t *testing.T) {
 	)
 	eventPayload, err := json.Marshal(map[string]string{
 		"message_id":           pulledMessage.MessageID,
-		"sender_id":            pulledMessage.SenderID,
+		"sender_pubkey":        senderPubKey,
 		"sender_signing_key":   pulledMessage.SenderSigningKey,
-		"recipient_id":         pulledMessage.RecipientID,
+		"recipient_pubkey":     recipientPubKey,
 		"ephemeral_public_key": pulledMessage.EphemeralPublicKey,
 		"nonce":                pulledMessage.Nonce,
 		"ciphertext":           pulledMessage.Ciphertext,
@@ -1086,6 +1088,7 @@ func TestSyncUsesRuntimeNostrRoutesWhenLegacyRelayURLEmpty(t *testing.T) {
 	eventCreatedAt := parseTimestamp(sentAt).Unix()
 	nostrEvent := transportnostr.Event{
 		ID:        pulledMessage.RelayMessageID,
+		PubKey:    senderPubKey,
 		CreatedAt: eventCreatedAt,
 		Kind:      4,
 		Tags: [][]string{
@@ -1100,6 +1103,22 @@ func TestSyncUsesRuntimeNostrRoutesWhenLegacyRelayURLEmpty(t *testing.T) {
 		t.Fatalf("open sqlite db: %v", err)
 	}
 	runtimeStore := agentruntime.NewStoreWithDB(db, now)
+	if err := runtimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_peer_sync_nostr",
+		SelfID:      profile.SelfID,
+		CanonicalID: pulledMessage.SenderID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    relayURL,
+		RouteLabel:  "peer-sync",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["` + senderPubKey + `"],` +
+			`"nostr_primary_public_key":"` + senderPubKey + `"}`,
+	}); err != nil {
+		db.Close()
+		t.Fatalf("upsert peer runtime transport binding: %v", err)
+	}
 	if err := runtimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
 		BindingID:   "binding_self_sync_nostr",
 		SelfID:      profile.SelfID,
@@ -1188,6 +1207,281 @@ func TestSyncUsesRuntimeNostrRoutesWhenLegacyRelayURLEmpty(t *testing.T) {
 	}
 
 	attempts := loadRuntimeRouteAttempts(t, home)
+	recoveredCursor := requireRouteAttemptWithNonEmptyCursor(t, attempts, string(transport.RouteTypeNostr), "recovered")
+	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "acked", recoveredCursor)
+}
+
+func TestNostrSendSyncRecoverUsesPubkeySchema(t *testing.T) {
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "0")
+
+	ctx := context.Background()
+	now := time.Date(2026, 3, 27, 2, 45, 0, 0, time.UTC)
+	const relayURL = "wss://relay.e2e.nostr.example"
+	const recipientPubKey = "npub_recipient_e2e_1"
+	const body = "hello from nostr e2e"
+
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAliceNostrE2E",
+		DisplayName: "Alice Nostr E2E",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	aliceCard, err := cardService.Export(ctx, card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobNostrE2E",
+		DisplayName: "Bob Nostr E2E",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	bobCard, err := cardService.Export(ctx, card.Options{Home: bobHome})
+	if err != nil {
+		t.Fatalf("export bob card: %v", err)
+	}
+	bobCardJSON, err := json.Marshal(bobCard.Card)
+	if err != nil {
+		t.Fatalf("marshal bob card: %v", err)
+	}
+
+	importedAliceInBob, err := cardService.Import(ctx, card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice card into bob home: %v", err)
+	}
+	importedBobInAlice, err := cardService.Import(ctx, card.ImportOptions{
+		Home:  aliceHome,
+		Input: string(bobCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import bob card into alice home: %v", err)
+	}
+
+	bobDB, err := sql.Open("sqlite", filepath.Join(bobHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open bob sqlite db: %v", err)
+	}
+	var aliceCanonicalID string
+	if err := bobDB.QueryRowContext(ctx, `SELECT canonical_id FROM contacts WHERE contact_id = ?`, importedAliceInBob.ContactID).Scan(&aliceCanonicalID); err != nil {
+		bobDB.Close()
+		t.Fatalf("query alice canonical_id in bob db: %v", err)
+	}
+	bobProfile, err := loadSelfMessagingProfile(ctx, bobDB, bobHome)
+	if err != nil {
+		bobDB.Close()
+		t.Fatalf("load bob self messaging profile: %v", err)
+	}
+	if _, err := bobDB.ExecContext(ctx, `UPDATE contacts SET relay_url = ? WHERE contact_id = ?`, "https://relay.storeforward.invalid", importedAliceInBob.ContactID); err != nil {
+		bobDB.Close()
+		t.Fatalf("set bob contact relay_url fallback: %v", err)
+	}
+	bobRuntimeStore := agentruntime.NewStoreWithDB(bobDB, now)
+	if err := bobRuntimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_bob_to_alice_nostr_e2e",
+		SelfID:      bobProfile.SelfID,
+		CanonicalID: aliceCanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    relayURL,
+		RouteLabel:  "e2e-bob-send",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "both",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["` + recipientPubKey + `"],` +
+			`"nostr_primary_public_key":"` + recipientPubKey + `"}`,
+	}); err != nil {
+		bobDB.Close()
+		t.Fatalf("upsert bob runtime transport binding: %v", err)
+	}
+	if err := bobDB.Close(); err != nil {
+		t.Fatalf("close bob sqlite db: %v", err)
+	}
+
+	publishClient := &stubNostrRecoveryClient{
+		publishReceipt: transportnostr.PublishReceipt{
+			EventID:  "evt_nostr_e2e",
+			Accepted: true,
+			Message:  "ok",
+		},
+	}
+	sendService := NewService()
+	sendService.Now = func() time.Time { return now }
+	sendService.StoreForwardBackend = &stubFailingMailboxBackend{sendErr: context.DeadlineExceeded}
+	sendService.NostrRelayClient = publishClient
+
+	sent, err := sendService.Send(ctx, SendOptions{
+		Home:       bobHome,
+		ContactRef: importedAliceInBob.ContactID,
+		Body:       body,
+	})
+	if err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+	if got, want := sent.Message.Status, StatusQueued; got != want {
+		t.Fatalf("send status = %q, want %q", got, want)
+	}
+	if got, want := sent.Message.SelectedRoute.Type, transport.RouteTypeNostr; got != want {
+		t.Fatalf("send selected route type = %q, want %q", got, want)
+	}
+	if got, want := len(publishClient.publishCalls), 1; got != want {
+		t.Fatalf("nostr publish calls = %d, want %d", got, want)
+	}
+	publishedEvent := publishClient.publishCalls[0].Event
+	var publishedPayload map[string]string
+	if err := json.Unmarshal([]byte(publishedEvent.Content), &publishedPayload); err != nil {
+		t.Fatalf("decode published nostr payload: %v", err)
+	}
+	senderPubKey := publishedPayload["sender_pubkey"]
+	if senderPubKey == "" {
+		t.Fatalf("published payload sender_pubkey = %q, want non-empty", senderPubKey)
+	}
+	if got, want := publishedPayload["recipient_pubkey"], recipientPubKey; got != want {
+		t.Fatalf("published payload recipient_pubkey = %q, want %q", got, want)
+	}
+	if strings.TrimSpace(publishedPayload["signature"]) == "" {
+		t.Fatalf("published payload signature = %q, want non-empty", publishedPayload["signature"])
+	}
+	if _, ok := publishedPayload["sender_id"]; ok {
+		t.Fatalf("published payload sender_id should not be present: %#v", publishedPayload)
+	}
+	if _, ok := publishedPayload["recipient_id"]; ok {
+		t.Fatalf("published payload recipient_id should not be present: %#v", publishedPayload)
+	}
+
+	aliceDB, err := sql.Open("sqlite", filepath.Join(aliceHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open alice sqlite db: %v", err)
+	}
+	aliceProfile, err := loadSelfMessagingProfile(ctx, aliceDB, aliceHome)
+	if err != nil {
+		aliceDB.Close()
+		t.Fatalf("load alice self messaging profile: %v", err)
+	}
+	var bobCanonicalID string
+	if err := aliceDB.QueryRowContext(ctx, `SELECT canonical_id FROM contacts WHERE contact_id = ?`, importedBobInAlice.ContactID).Scan(&bobCanonicalID); err != nil {
+		aliceDB.Close()
+		t.Fatalf("query bob canonical_id in alice db: %v", err)
+	}
+	aliceRuntimeStore := agentruntime.NewStoreWithDB(aliceDB, now)
+	if err := aliceRuntimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_alice_self_nostr_e2e",
+		SelfID:      aliceProfile.SelfID,
+		CanonicalID: aliceProfile.CanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    relayURL,
+		RouteLabel:  "e2e-alice-self",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["` + recipientPubKey + `"],` +
+			`"nostr_primary_public_key":"` + recipientPubKey + `"}`,
+	}); err != nil {
+		aliceDB.Close()
+		t.Fatalf("upsert alice self runtime transport binding: %v", err)
+	}
+	if err := aliceRuntimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_alice_peer_nostr_e2e",
+		SelfID:      aliceProfile.SelfID,
+		CanonicalID: bobCanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    relayURL,
+		RouteLabel:  "e2e-alice-peer",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["` + senderPubKey + `"],` +
+			`"nostr_primary_public_key":"` + senderPubKey + `"}`,
+	}); err != nil {
+		aliceDB.Close()
+		t.Fatalf("upsert alice peer runtime transport binding: %v", err)
+	}
+	if err := aliceRuntimeStore.UpsertTransportRelay(ctx, agentruntime.TransportRelayRecord{
+		RelayID:      "relay_nostr_e2e",
+		Transport:    string(transport.RouteTypeNostr),
+		RelayURL:     relayURL,
+		ReadEnabled:  true,
+		WriteEnabled: true,
+		Priority:     100,
+		Source:       "test",
+		Status:       "active",
+		MetadataJSON: "{}",
+	}); err != nil {
+		aliceDB.Close()
+		t.Fatalf("upsert alice runtime transport relay: %v", err)
+	}
+	if err := aliceDB.Close(); err != nil {
+		t.Fatalf("close alice sqlite db: %v", err)
+	}
+
+	syncClient := &stubNostrRecoveryClient{
+		queryEvents: []transportnostr.Event{publishedEvent},
+	}
+	syncService := NewService()
+	syncService.Now = func() time.Time { return now.Add(90 * time.Second) }
+	syncService.NostrRelayClient = syncClient
+
+	syncResult, err := syncService.Sync(ctx, SyncOptions{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("sync message: %v", err)
+	}
+	if got, want := syncResult.Synced, 1; got != want {
+		t.Fatalf("sync recovered count = %d, want %d", got, want)
+	}
+	if got, want := syncResult.RelayCalls, 1; got != want {
+		t.Fatalf("sync relay calls = %d, want %d", got, want)
+	}
+	if got, want := len(syncClient.queryCalls), 1; got != want {
+		t.Fatalf("sync query calls = %d, want %d", got, want)
+	}
+	if len(syncClient.queryCalls[0].Filter.Recipient) != 1 || syncClient.queryCalls[0].Filter.Recipient[0] != recipientPubKey {
+		t.Fatalf("sync query recipient filter = %#v, want [%s]", syncClient.queryCalls[0].Filter.Recipient, recipientPubKey)
+	}
+
+	verifyDB, err := sql.Open("sqlite", filepath.Join(aliceHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open verify sqlite db: %v", err)
+	}
+	defer verifyDB.Close()
+
+	var recoveredSenderID, recoveredRecipientID, recoveredStatus, recoveredBody string
+	if err := verifyDB.QueryRowContext(
+		ctx,
+		`SELECT sender_canonical_id, recipient_route_id, status, plaintext_body
+		   FROM messages
+		  WHERE message_id = ?
+		  LIMIT 1`,
+		sent.Message.MessageID,
+	).Scan(&recoveredSenderID, &recoveredRecipientID, &recoveredStatus, &recoveredBody); err != nil {
+		t.Fatalf("query recovered message row: %v", err)
+	}
+	if got, want := recoveredSenderID, bobCanonicalID; got != want {
+		t.Fatalf("recovered sender_canonical_id = %q, want %q", got, want)
+	}
+	if got, want := recoveredRecipientID, aliceProfile.RecipientID; got != want {
+		t.Fatalf("recovered recipient_route_id = %q, want %q", got, want)
+	}
+	if got, want := recoveredStatus, StatusRecovered; got != want {
+		t.Fatalf("recovered message status = %q, want %q", got, want)
+	}
+	if got, want := recoveredBody, body; got != want {
+		t.Fatalf("recovered plaintext_body = %q, want %q", got, want)
+	}
+
+	attempts := loadRuntimeRouteAttempts(t, aliceHome)
 	recoveredCursor := requireRouteAttemptWithNonEmptyCursor(t, attempts, string(transport.RouteTypeNostr), "recovered")
 	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "acked", recoveredCursor)
 }

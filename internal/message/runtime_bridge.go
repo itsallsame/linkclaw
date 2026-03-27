@@ -993,6 +993,24 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 	if err != nil {
 		return agentruntime.SendResult{}, err
 	}
+	payload := signedMessagePayload{
+		MessageID:          record.MessageID,
+		SenderID:           selfProfile.CanonicalID,
+		SenderSigningKey:   selfProfile.SigningPublicKey,
+		RecipientID:        contact.RecipientID,
+		EphemeralPublicKey: encrypted.EphemeralPublicKey,
+		Nonce:              encrypted.Nonce,
+		Ciphertext:         encrypted.Ciphertext,
+		SentAt:             record.CreatedAt,
+	}
+	payloadBytes, err := marshalSignedPayload(payload)
+	if err != nil {
+		return agentruntime.SendResult{}, err
+	}
+	signature, err := messagecrypto.SignPayload(selfProfile.SigningPrivateKeyPath, payloadBytes)
+	if err != nil {
+		return agentruntime.SendResult{}, err
+	}
 	return runtimeSvc.Send(ctx, runtimeContactView(contact), agentruntime.SendRequest{
 		MessageID:          record.MessageID,
 		ContactRef:         contact.ContactID,
@@ -1004,6 +1022,7 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 		EphemeralPublicKey: encrypted.EphemeralPublicKey,
 		Nonce:              encrypted.Nonce,
 		Ciphertext:         encrypted.Ciphertext,
+		Signature:          signature,
 		SentAt:             record.CreatedAt,
 	})
 }
@@ -1277,6 +1296,80 @@ type nostrRecoverRouteConfig struct {
 	Limit     int
 }
 
+type nostrRecoveredBindingContext struct {
+	selfRecipientPubKeys     map[string]struct{}
+	peerCanonicalBySenderKey map[string]string
+}
+
+func newNostrRecoveredBindingContext() nostrRecoveredBindingContext {
+	return nostrRecoveredBindingContext{
+		selfRecipientPubKeys:     make(map[string]struct{}),
+		peerCanonicalBySenderKey: make(map[string]string),
+	}
+}
+
+func (c *nostrRecoveredBindingContext) addSelfRecipientPubKeys(values ...string) {
+	if c == nil {
+		return
+	}
+	if c.selfRecipientPubKeys == nil {
+		c.selfRecipientPubKeys = make(map[string]struct{})
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		c.selfRecipientPubKeys[value] = struct{}{}
+	}
+}
+
+func (c *nostrRecoveredBindingContext) addPeerSenderPubKeys(canonicalID string, values ...string) {
+	if c == nil {
+		return
+	}
+	canonicalID = strings.TrimSpace(canonicalID)
+	if canonicalID == "" {
+		return
+	}
+	if c.peerCanonicalBySenderKey == nil {
+		c.peerCanonicalBySenderKey = make(map[string]string)
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if existingCanonicalID, exists := c.peerCanonicalBySenderKey[value]; exists && existingCanonicalID != canonicalID {
+			// Ambiguous sender key mapping: treat as invalid for recovery validation.
+			c.peerCanonicalBySenderKey[value] = ""
+			continue
+		}
+		c.peerCanonicalBySenderKey[value] = canonicalID
+	}
+}
+
+func (c nostrRecoveredBindingContext) hasSelfRecipientPubKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	_, ok := c.selfRecipientPubKeys[value]
+	return ok
+}
+
+func (c nostrRecoveredBindingContext) resolvePeerCanonicalID(senderPubKey string) (string, bool) {
+	senderPubKey = strings.TrimSpace(senderPubKey)
+	if senderPubKey == "" {
+		return "", false
+	}
+	canonicalID, ok := c.peerCanonicalBySenderKey[senderPubKey]
+	if !ok || strings.TrimSpace(canonicalID) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(canonicalID), true
+}
+
 func (s *Service) pullNostrRecoveredMessages(
 	ctx context.Context,
 	routeTarget string,
@@ -1436,13 +1529,26 @@ func decodeNostrRecoveredMailboxMessage(event transportnostr.Event) (transportst
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
 		return transportstoreforward.MailboxPullMessage{}, false
 	}
+	senderPubKey := firstNonEmptyString(
+		nostrPayloadString(payload, "sender_pubkey"),
+		nostrPayloadString(payload, "pubkey"),
+		strings.TrimSpace(event.PubKey),
+	)
+	recipientPubKey := firstNonEmptyString(
+		nostrPayloadString(payload, "recipient_pubkey"),
+		nostrTagValue(event.Tags, "p"),
+		nostrPayloadString(payload, "recipient"),
+		nostrPayloadString(payload, "p"),
+	)
 
 	message := transportstoreforward.MailboxPullMessage{
 		MessageID:          firstNonEmptyString(nostrPayloadString(payload, "message_id"), nostrTagValue(event.Tags, "linkclaw_message_id"), strings.TrimSpace(event.ID)),
 		RelayMessageID:     firstNonEmptyString(strings.TrimSpace(event.ID), nostrPayloadString(payload, "relay_message_id")),
-		SenderID:           nostrPayloadString(payload, "sender_id"),
+		SenderID:           firstNonEmptyString(nostrPayloadString(payload, "sender_id"), senderPubKey),
+		SenderPubKey:       senderPubKey,
 		SenderSigningKey:   nostrPayloadString(payload, "sender_signing_key"),
-		RecipientID:        nostrPayloadString(payload, "recipient_id"),
+		RecipientID:        firstNonEmptyString(nostrPayloadString(payload, "recipient_id"), recipientPubKey),
+		RecipientPubKey:    recipientPubKey,
 		EphemeralPublicKey: nostrPayloadString(payload, "ephemeral_public_key"),
 		Nonce:              nostrPayloadString(payload, "nonce"),
 		Ciphertext:         nostrPayloadString(payload, "ciphertext"),
@@ -1504,9 +1610,9 @@ func nostrTagValue(tags [][]string, name string) string {
 func isNostrMailboxMessageComplete(message transportstoreforward.MailboxPullMessage) bool {
 	return strings.TrimSpace(message.MessageID) != "" &&
 		strings.TrimSpace(message.RelayMessageID) != "" &&
-		strings.TrimSpace(message.SenderID) != "" &&
+		strings.TrimSpace(message.SenderPubKey) != "" &&
 		strings.TrimSpace(message.SenderSigningKey) != "" &&
-		strings.TrimSpace(message.RecipientID) != "" &&
+		strings.TrimSpace(message.RecipientPubKey) != "" &&
 		strings.TrimSpace(message.EphemeralPublicKey) != "" &&
 		strings.TrimSpace(message.Nonce) != "" &&
 		strings.TrimSpace(message.Ciphertext) != "" &&
@@ -1529,6 +1635,13 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	lastCheckpoint, hasLastCheckpoint := parseRecoveredSyncCheckpointCursor(relaySyncState.LastCursor)
 	latestCheckpoint := lastCheckpoint
 	hasLatestCheckpoint := hasLastCheckpoint
+	bindingContext := newNostrRecoveredBindingContext()
+	if relayURLKind(relayURL) == relayKindNostr {
+		bindingContext, err = loadNostrRecoveredBindingContext(ctx, db, selfProfile, now)
+		if err != nil {
+			return 0, "", err
+		}
+	}
 
 	cursor, err := store.LoadStoreForwardCursor(ctx, selfProfile.SelfID, relayURL)
 	if err != nil {
@@ -1617,7 +1730,7 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 				continue
 			}
 		}
-		if err := validateRecoveredMessageBinding(selfProfile, pulledMessage); err != nil {
+		if err := validateRecoveredMessageBinding(selfProfile, bindingContext, &pulledMessage); err != nil {
 			continue
 		}
 		checkpoint, hasCheckpoint := buildRecoveredSyncCheckpoint(pulledMessage, now)
@@ -1842,10 +1955,125 @@ func compareRecoveredSyncCheckpoint(left, right recoveredSyncCheckpoint) int {
 	return strings.Compare(strings.TrimSpace(left.EventID), strings.TrimSpace(right.EventID))
 }
 
-func validateRecoveredMessageBinding(selfProfile selfMessagingProfile, message transportstoreforward.MailboxPullMessage) error {
+func loadNostrRecoveredBindingContext(
+	ctx context.Context,
+	db *sql.DB,
+	selfProfile selfMessagingProfile,
+	now time.Time,
+) (nostrRecoveredBindingContext, error) {
+	context := newNostrRecoveredBindingContext()
+	selfCanonicalID := strings.TrimSpace(selfProfile.CanonicalID)
+	context.addSelfRecipientPubKeys(selfProfile.NostrSigningPublicKey)
+
+	store := agentruntime.NewStoreWithDB(db, now)
+	bindings, err := store.ListTransportBindings(ctx, selfProfile.SelfID)
+	if err != nil && !isMissingTableError(err) {
+		return nostrRecoveredBindingContext{}, err
+	}
+	for _, binding := range bindings {
+		if !binding.Enabled {
+			continue
+		}
+		if strings.TrimSpace(binding.Transport) != string(transport.RouteTypeNostr) {
+			continue
+		}
+		recipients := []string{}
+		if recipient := nostrRouteRecipient(binding.RelayURL); recipient != "" {
+			recipients = appendIfMissing(recipients, recipient)
+		}
+		recipients = appendNostrRecipientsFromMetadata(recipients, binding.MetadataJSON)
+		canonicalID := strings.TrimSpace(binding.CanonicalID)
+		switch {
+		case canonicalID == "":
+			continue
+		case selfCanonicalID != "" && canonicalID == selfCanonicalID:
+			context.addSelfRecipientPubKeys(recipients...)
+		case directionAllowsRead(binding.Direction):
+			context.addPeerSenderPubKeys(canonicalID, recipients...)
+		}
+	}
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT canonical_id, relay_url, raw_identity_card_json
+		   FROM contacts
+		  ORDER BY canonical_id ASC`,
+	)
+	if err != nil && !isMissingTableError(err) {
+		return nostrRecoveredBindingContext{}, fmt.Errorf("query contacts for nostr sender binding context: %w", err)
+	}
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var canonicalID, relayURL, rawIdentityCardJSON string
+			if scanErr := rows.Scan(&canonicalID, &relayURL, &rawIdentityCardJSON); scanErr != nil {
+				return nostrRecoveredBindingContext{}, fmt.Errorf("scan contact for nostr sender binding context: %w", scanErr)
+			}
+			canonicalID = strings.TrimSpace(canonicalID)
+			if canonicalID == "" {
+				continue
+			}
+			recipients := []string{}
+			if relayURLKind(relayURL) == relayKindNostr {
+				if recipient := nostrRouteRecipient(relayURL); recipient != "" {
+					recipients = appendIfMissing(recipients, recipient)
+				}
+			}
+			recipients = appendNostrRecipientsFromIdentityCard(recipients, rawIdentityCardJSON)
+			if selfCanonicalID != "" && canonicalID == selfCanonicalID {
+				context.addSelfRecipientPubKeys(recipients...)
+				continue
+			}
+			context.addPeerSenderPubKeys(canonicalID, recipients...)
+		}
+		if err := rows.Err(); err != nil {
+			return nostrRecoveredBindingContext{}, fmt.Errorf("iterate contacts for nostr sender binding context: %w", err)
+		}
+	}
+
+	return context, nil
+}
+
+func appendNostrRecipientsFromIdentityCard(values []string, rawIdentityCardJSON string) []string {
+	fact := parseIdentityCardRelayFact(rawIdentityCardJSON)
+	for _, key := range fact.PublicKeys {
+		values = appendIfMissing(values, key)
+	}
+	if primary := strings.TrimSpace(fact.PrimaryPublicKey); primary != "" {
+		values = appendIfMissing(values, primary)
+	}
+	for _, relayURL := range fact.RelayURLs {
+		if relayURLKind(relayURL) != relayKindNostr {
+			continue
+		}
+		if recipient := nostrRouteRecipient(relayURL); recipient != "" {
+			values = appendIfMissing(values, recipient)
+		}
+	}
+	return values
+}
+
+func validateRecoveredMessageBinding(
+	selfProfile selfMessagingProfile,
+	bindingContext nostrRecoveredBindingContext,
+	message *transportstoreforward.MailboxPullMessage,
+) error {
+	if message == nil {
+		return fmt.Errorf("recovered message is nil")
+	}
 	expectedRecipientID := strings.TrimSpace(selfProfile.RecipientID)
 	if expectedRecipientID == "" {
 		return fmt.Errorf("self recipient binding is empty")
+	}
+	recipientPubKey := strings.TrimSpace(message.RecipientPubKey)
+	if recipientPubKey != "" {
+		if !bindingContext.hasSelfRecipientPubKey(recipientPubKey) {
+			return fmt.Errorf("recovered message recipient_pubkey is not bound to self")
+		}
+		recipientID := strings.TrimSpace(message.RecipientID)
+		if recipientID == "" || recipientID == recipientPubKey {
+			message.RecipientID = expectedRecipientID
+		}
 	}
 	recipientID := strings.TrimSpace(message.RecipientID)
 	if recipientID == "" {
@@ -1853,6 +2081,20 @@ func validateRecoveredMessageBinding(selfProfile selfMessagingProfile, message t
 	}
 	if recipientID != expectedRecipientID {
 		return fmt.Errorf("recovered message recipient_id mismatch")
+	}
+
+	senderPubKey := strings.TrimSpace(message.SenderPubKey)
+	if senderPubKey != "" {
+		canonicalID, ok := bindingContext.resolvePeerCanonicalID(senderPubKey)
+		if !ok {
+			return fmt.Errorf("recovered message sender_pubkey is not bound to known peer")
+		}
+		switch senderID := strings.TrimSpace(message.SenderID); {
+		case senderID == "", senderID == senderPubKey:
+			message.SenderID = canonicalID
+		case senderID != canonicalID:
+			return fmt.Errorf("recovered message sender_id mismatches sender_pubkey binding")
+		}
 	}
 	if strings.TrimSpace(message.SenderID) == "" {
 		return fmt.Errorf("recovered message sender_id is empty")

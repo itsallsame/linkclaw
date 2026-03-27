@@ -31,8 +31,10 @@ type MailboxPullMessage struct {
 	MessageID          string `json:"message_id"`
 	RelayMessageID     string `json:"relay_message_id"`
 	SenderID           string `json:"sender_id"`
+	SenderPubKey       string `json:"sender_pubkey,omitempty"`
 	SenderSigningKey   string `json:"sender_signing_key"`
 	RecipientID        string `json:"recipient_id"`
+	RecipientPubKey    string `json:"recipient_pubkey,omitempty"`
 	EphemeralPublicKey string `json:"ephemeral_public_key"`
 	Nonce              string `json:"nonce"`
 	Ciphertext         string `json:"ciphertext"`
