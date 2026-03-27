@@ -20,6 +20,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/routing"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
+	transportnostr "github.com/xiewanpeng/claw-identity/internal/transport/nostr"
 	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 	"github.com/xiewanpeng/claw-identity/internal/trust"
 
@@ -194,6 +195,7 @@ type ThreadResult struct {
 type Service struct {
 	Now                 func() time.Time
 	StoreForwardBackend transportstoreforward.MailboxBackend
+	NostrRelayClient    transportnostr.RelayClient
 }
 
 type selfMessagingProfile struct {
@@ -240,6 +242,7 @@ func NewService() *Service {
 	return &Service{
 		Now:                 time.Now,
 		StoreForwardBackend: transportstoreforward.LegacyHTTPMailboxBackend{},
+		NostrRelayClient:    nil,
 	}
 }
 
@@ -422,11 +425,14 @@ func (s *Service) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error
 	if err != nil {
 		return SyncResult{}, err
 	}
-	relayURL := selfProfile.RelayURL
-	if relayURL == "" {
+	routes, caps, err := resolveSelfSyncRoutes(ctx, db, selfProfile, now)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	if len(routes) == 0 {
 		return SyncResult{Home: home, Synced: 0, RelayCalls: 0, SyncedAt: now.Format(time.RFC3339Nano)}, nil
 	}
-	syncResult, err := s.syncThroughRuntime(ctx, home, selfProfile, relayURL, now)
+	syncResult, err := s.syncThroughRuntime(ctx, home, selfProfile, routes, caps, now)
 	if err != nil {
 		return SyncResult{}, err
 	}

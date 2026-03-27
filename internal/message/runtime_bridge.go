@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -236,6 +238,34 @@ func (b legacyStoreForwardBackend) Acknowledge(ctx context.Context, route transp
 		RecipientID: b.selfProfile.RecipientID,
 		Cursor:      cursor,
 	})
+}
+
+type runtimeNostrRecoveryBackend struct {
+	service     *Service
+	home        string
+	now         time.Time
+	selfProfile selfMessagingProfile
+}
+
+func (b runtimeNostrRecoveryBackend) Publish(context.Context, transport.Envelope, transport.RouteCandidate) (transport.SendResult, error) {
+	return transport.SendResult{}, fmt.Errorf("runtime nostr recovery backend does not support publish")
+}
+
+func (b runtimeNostrRecoveryBackend) Recover(ctx context.Context, route transport.RouteCandidate) (transport.SyncResult, error) {
+	count, nextCursor, err := b.service.syncStoreForward(ctx, b.home, b.selfProfile, route.Target, b.now)
+	if err != nil {
+		return transport.SyncResult{}, err
+	}
+	return transport.SyncResult{
+		Route:          route,
+		Recovered:      count,
+		AdvancedCursor: nextCursor,
+	}, nil
+}
+
+func (b runtimeNostrRecoveryBackend) Acknowledge(context.Context, transport.RouteCandidate, string) error {
+	// Nostr recovery uses read-only relay query in this phase; no explicit ack endpoint.
+	return nil
 }
 
 type directInboxReceiver struct {
@@ -592,6 +622,210 @@ func withNostrRouteRecipient(raw string, recipient string) string {
 	return parsed.String()
 }
 
+func resolveSelfSyncRoutes(
+	ctx context.Context,
+	db *sql.DB,
+	selfProfile selfMessagingProfile,
+	now time.Time,
+) ([]transport.RouteCandidate, []string, error) {
+	store := agentruntime.NewStoreWithDB(db, now)
+
+	bindings, err := store.ListTransportBindings(ctx, selfProfile.SelfID)
+	if err != nil {
+		return nil, nil, err
+	}
+	relayRecords, err := store.ListTransportRelays(ctx, string(transport.RouteTypeNostr))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	selfCanonicalID := strings.TrimSpace(selfProfile.CanonicalID)
+	nostrRelays := []string{}
+	nostrRecipients := []string{}
+
+	for _, binding := range bindings {
+		if !binding.Enabled {
+			continue
+		}
+		if strings.TrimSpace(binding.Transport) != string(transport.RouteTypeNostr) {
+			continue
+		}
+		canonicalID := strings.TrimSpace(binding.CanonicalID)
+		if canonicalID != "" && selfCanonicalID != "" && canonicalID != selfCanonicalID {
+			continue
+		}
+		if !directionAllowsRead(binding.Direction) {
+			continue
+		}
+
+		if relayURLKind(binding.RelayURL) == relayKindNostr {
+			nostrRelays = appendIfMissing(nostrRelays, binding.RelayURL)
+		}
+		if recipient := nostrRouteRecipient(binding.RelayURL); recipient != "" {
+			nostrRecipients = appendIfMissing(nostrRecipients, recipient)
+		}
+		nostrRelays = appendNostrRelaysFromMetadata(nostrRelays, binding.MetadataJSON)
+		nostrRecipients = appendNostrRecipientsFromMetadata(nostrRecipients, binding.MetadataJSON)
+	}
+
+	for _, relay := range relayRecords {
+		if strings.TrimSpace(relay.Transport) != string(transport.RouteTypeNostr) {
+			continue
+		}
+		if !relay.ReadEnabled {
+			continue
+		}
+		if status := strings.TrimSpace(relay.Status); status != "" && strings.ToLower(status) != "active" {
+			continue
+		}
+		if relayURLKind(relay.RelayURL) != relayKindNostr {
+			continue
+		}
+
+		nostrRelays = appendIfMissing(nostrRelays, relay.RelayURL)
+		if recipient := nostrRouteRecipient(relay.RelayURL); recipient != "" {
+			nostrRecipients = appendIfMissing(nostrRecipients, recipient)
+		}
+		nostrRelays = appendNostrRelaysFromMetadata(nostrRelays, relay.MetadataJSON)
+		nostrRecipients = appendNostrRecipientsFromMetadata(nostrRecipients, relay.MetadataJSON)
+	}
+
+	legacyRelay := strings.TrimSpace(selfProfile.RelayURL)
+	if relayURLKind(legacyRelay) == relayKindNostr {
+		nostrRelays = appendIfMissing(nostrRelays, legacyRelay)
+		if recipient := nostrRouteRecipient(legacyRelay); recipient != "" {
+			nostrRecipients = appendIfMissing(nostrRecipients, recipient)
+		}
+	}
+
+	sort.Strings(nostrRelays)
+	sort.Strings(nostrRecipients)
+
+	routes := make([]transport.RouteCandidate, 0, len(nostrRelays)+1)
+	caps := []string{}
+	for _, relayURL := range nostrRelays {
+		relayURL = strings.TrimSpace(relayURL)
+		if relayURL == "" || relayURLKind(relayURL) != relayKindNostr {
+			continue
+		}
+		if recipient := nostrRouteRecipient(relayURL); recipient != "" {
+			routes = append(routes, transport.RouteCandidate{
+				Type:     transport.RouteTypeNostr,
+				Label:    relayURL,
+				Priority: 30,
+				Target:   relayURL,
+			})
+			caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
+			continue
+		}
+		for _, recipient := range nostrRecipients {
+			target := withNostrRouteRecipient(relayURL, recipient)
+			if target == "" {
+				continue
+			}
+			routes = append(routes, transport.RouteCandidate{
+				Type:     transport.RouteTypeNostr,
+				Label:    target,
+				Priority: 30,
+				Target:   target,
+			})
+			caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
+		}
+	}
+
+	if legacyRelay != "" && isStoreForwardRelayURL(legacyRelay) {
+		routes = append(routes, transport.RouteCandidate{
+			Type:     transport.RouteTypeRecovery,
+			Label:    legacyRelay,
+			Priority: 1,
+			Target:   legacyRelay,
+		})
+		caps = appendIfMissing(caps, string(transport.RouteTypeRecovery))
+	}
+
+	return routes, caps, nil
+}
+
+func directionAllowsRead(direction string) bool {
+	switch strings.ToLower(strings.TrimSpace(direction)) {
+	case "", "both", "incoming", "inbound", "read":
+		return true
+	default:
+		return false
+	}
+}
+
+func appendNostrRelaysFromMetadata(values []string, raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return values
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return values
+	}
+	values = appendNostrRelaysFromMetadataMap(values, payload)
+	if nested, ok := payload["nostr"].(map[string]any); ok {
+		values = appendNostrRelaysFromMetadataMap(values, nested)
+	}
+	return values
+}
+
+func appendNostrRelaysFromMetadataMap(values []string, payload map[string]any) []string {
+	if payload == nil {
+		return values
+	}
+	for _, relayURL := range extractMetadataStrings(payload["relay_urls"]) {
+		if relayURLKind(relayURL) == relayKindNostr {
+			values = appendIfMissing(values, relayURL)
+		}
+	}
+	for _, relayURL := range extractMetadataStrings(payload["relay_url"]) {
+		if relayURLKind(relayURL) == relayKindNostr {
+			values = appendIfMissing(values, relayURL)
+		}
+	}
+	return values
+}
+
+func appendNostrRecipientsFromMetadata(values []string, raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return values
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return values
+	}
+	values = appendNostrRecipientsFromMetadataMap(values, payload)
+	if nested, ok := payload["nostr"].(map[string]any); ok {
+		values = appendNostrRecipientsFromMetadataMap(values, nested)
+	}
+	return values
+}
+
+func appendNostrRecipientsFromMetadataMap(values []string, payload map[string]any) []string {
+	if payload == nil {
+		return values
+	}
+	for _, key := range extractMetadataStrings(payload["nostr_public_keys"]) {
+		values = appendIfMissing(values, key)
+	}
+	for _, key := range extractMetadataStrings(payload["nostr_public_key"]) {
+		values = appendIfMissing(values, key)
+	}
+	if primary := firstMetadataString(payload["nostr_primary_public_key"]); primary != "" {
+		values = appendIfMissing(values, primary)
+	}
+	if recipient := firstMetadataString(payload["recipient"]); recipient != "" {
+		values = appendIfMissing(values, recipient)
+	}
+	if recipient := firstMetadataString(payload["p"]); recipient != "" {
+		values = appendIfMissing(values, recipient)
+	}
+	return values
+}
+
 func buildDirectRouteTarget(rawURL string, token string) string {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -820,47 +1054,76 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 	})
 }
 
-func (s *Service) syncThroughRuntime(ctx context.Context, home string, selfProfile selfMessagingProfile, relayURL string, now time.Time) (agentruntime.SyncResult, error) {
+func (s *Service) syncThroughRuntime(
+	ctx context.Context,
+	home string,
+	selfProfile selfMessagingProfile,
+	routes []transport.RouteCandidate,
+	caps []string,
+	now time.Time,
+) (agentruntime.SyncResult, error) {
 	store, _, err := agentruntime.OpenStore(ctx, home, now)
 	if err != nil {
 		return agentruntime.SyncResult{}, err
 	}
 	defer store.Close()
 
-	route := transport.RouteCandidate{
-		Type:     transport.RouteTypeRecovery,
-		Label:    relayURL,
-		Priority: 1,
-		Target:   relayURL,
+	recoverRoutes := append([]transport.RouteCandidate(nil), routes...)
+	transportCaps := append([]string(nil), caps...)
+	if len(transportCaps) == 0 {
+		for _, route := range recoverRoutes {
+			transportCaps = appendIfMissing(transportCaps, string(route.Type))
+		}
 	}
-	runtimeSvc := agentruntime.NewService(
-		staticPlanner{
-			recoverRoutes: []transport.RouteCandidate{route},
-			record: func(ctx context.Context, outcome routing.RouteOutcome) error {
-				return store.RecordRouteAttempt(ctx, outcome, "", "")
-			},
-		},
-		staticDiscoveryService{
-			view: agentdiscovery.PeerPresenceView{
-				CanonicalID:     selfProfile.CanonicalID,
-				PeerID:          selfProfile.RecipientID,
-				Reachable:       selfProfile.RelayURL != "",
-				RouteCandidates: []transport.RouteCandidate{route},
-				ResolvedAt:      now.UTC(),
-				FreshUntil:      now.UTC().Add(5 * time.Minute),
-			},
-		},
+	hasNostrRecovery := false
+	for _, route := range recoverRoutes {
+		if route.Type == transport.RouteTypeNostr {
+			hasNostrRecovery = true
+			break
+		}
+	}
+
+	transports := []transport.Transport{
 		transportstoreforward.New(legacyStoreForwardBackend{
 			service:     s,
 			home:        home,
 			now:         now,
 			selfProfile: selfProfile,
 		}),
+	}
+	if hasNostrRecovery {
+		transports = append(transports, transportnostr.New(runtimeNostrRecoveryBackend{
+			service:     s,
+			home:        home,
+			now:         now,
+			selfProfile: selfProfile,
+		}))
+	}
+
+	runtimeSvc := agentruntime.NewService(
+		staticPlanner{
+			recoverRoutes: recoverRoutes,
+			record: func(ctx context.Context, outcome routing.RouteOutcome) error {
+				return store.RecordRouteAttempt(ctx, outcome, "", "")
+			},
+		},
+		staticDiscoveryService{
+			view: agentdiscovery.PeerPresenceView{
+				CanonicalID:           selfProfile.CanonicalID,
+				PeerID:                selfProfile.RecipientID,
+				Reachable:             len(recoverRoutes) > 0,
+				RouteCandidates:       recoverRoutes,
+				TransportCapabilities: append([]string(nil), transportCaps...),
+				ResolvedAt:            now.UTC(),
+				FreshUntil:            now.UTC().Add(5 * time.Minute),
+			},
+		},
+		transports...,
 	)
 	return runtimeSvc.Sync(ctx, routing.ContactRuntimeView{
 		CanonicalID:           selfProfile.CanonicalID,
 		PeerID:                selfProfile.RecipientID,
-		TransportCapabilities: []string{string(transport.RouteTypeRecovery)},
+		TransportCapabilities: transportCaps,
 	})
 }
 
@@ -926,6 +1189,268 @@ func (s *Service) receiveDirectEnvelope(ctx context.Context, home string, selfPr
 	}}, now)
 }
 
+func (s *Service) nostrRelayClient() transportnostr.RelayClient {
+	if s.NostrRelayClient != nil {
+		return s.NostrRelayClient
+	}
+	return transportnostr.NewWebSocketRelayClient()
+}
+
+func (s *Service) pullRecoverableMessages(
+	ctx context.Context,
+	routeTarget string,
+	selfProfile selfMessagingProfile,
+	cursor string,
+) (transportstoreforward.MailboxPullResponse, error) {
+	if relayURLKind(routeTarget) == relayKindNostr {
+		return s.pullNostrRecoveredMessages(ctx, routeTarget, cursor)
+	}
+	return s.storeForwardBackend().Pull(ctx, routeTarget, selfProfile.RecipientID, cursor)
+}
+
+type nostrRecoverRouteConfig struct {
+	RelayURL  string
+	Recipient string
+	Since     *int64
+	Limit     int
+}
+
+func (s *Service) pullNostrRecoveredMessages(
+	ctx context.Context,
+	routeTarget string,
+	cursor string,
+) (transportstoreforward.MailboxPullResponse, error) {
+	config, err := parseNostrRecoverRouteConfig(routeTarget, cursor)
+	if err != nil {
+		return transportstoreforward.MailboxPullResponse{}, err
+	}
+
+	filter := transportnostr.Filter{
+		Kinds:     []int{4},
+		Recipient: []string{config.Recipient},
+		Limit:     50,
+	}
+	if config.Since != nil {
+		filter.Since = config.Since
+	}
+	if config.Limit > 0 {
+		filter.Limit = config.Limit
+	}
+
+	events, err := s.nostrRelayClient().Query(ctx, config.RelayURL, buildNostrRecoverSubscriptionID(routeTarget, s.now().UTC()), filter)
+	if err != nil {
+		return transportstoreforward.MailboxPullResponse{}, err
+	}
+
+	nowUTC := s.now().UTC()
+	messages := make([]transportstoreforward.MailboxPullMessage, 0, len(events))
+	maxCreatedAt := int64(0)
+	for _, event := range events {
+		if event.CreatedAt > maxCreatedAt {
+			maxCreatedAt = event.CreatedAt
+		}
+		message, ok := decodeNostrRecoveredMailboxMessage(event)
+		if !ok {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	sort.SliceStable(messages, func(i, j int) bool {
+		left, leftOK := buildRecoveredSyncCheckpoint(messages[i], nowUTC)
+		right, rightOK := buildRecoveredSyncCheckpoint(messages[j], nowUTC)
+		switch {
+		case leftOK && rightOK:
+			return compareRecoveredSyncCheckpoint(left, right) < 0
+		case leftOK:
+			return true
+		case rightOK:
+			return false
+		default:
+			return strings.TrimSpace(messages[i].MessageID) < strings.TrimSpace(messages[j].MessageID)
+		}
+	})
+
+	nextCursor := strings.TrimSpace(cursor)
+	if maxCreatedAt > 0 {
+		nextCursor = strconv.FormatInt(maxCreatedAt, 10)
+	}
+	return transportstoreforward.MailboxPullResponse{
+		Messages:   messages,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func parseNostrRecoverRouteConfig(routeTarget string, cursor string) (nostrRecoverRouteConfig, error) {
+	target := strings.TrimSpace(routeTarget)
+	if target == "" {
+		return nostrRecoverRouteConfig{}, fmt.Errorf("nostr recovery route target is required")
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return nostrRecoverRouteConfig{}, fmt.Errorf("parse nostr recovery route target: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+	case "ws", "wss":
+	default:
+		return nostrRecoverRouteConfig{}, fmt.Errorf("nostr recovery route target %q must use ws or wss", target)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return nostrRecoverRouteConfig{}, fmt.Errorf("nostr recovery route target %q is missing host", target)
+	}
+
+	query := parsed.Query()
+	recipient := strings.TrimSpace(query.Get("recipient"))
+	if recipient == "" {
+		recipient = strings.TrimSpace(query.Get("p"))
+	}
+	if recipient == "" {
+		return nostrRecoverRouteConfig{}, fmt.Errorf("nostr recovery route target %q is missing recipient", target)
+	}
+
+	var since *int64
+	for _, key := range []string{"since", "cursor"} {
+		value := strings.TrimSpace(query.Get(key))
+		if value == "" {
+			continue
+		}
+		parsedValue, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return nostrRecoverRouteConfig{}, fmt.Errorf("parse nostr %s value %q: %w", key, value, err)
+		}
+		since = &parsedValue
+		break
+	}
+	if cursorSince := parseNostrRecoverSinceCursor(cursor); cursorSince != nil {
+		if since == nil || *cursorSince > *since {
+			since = cursorSince
+		}
+	}
+
+	limit := 0
+	if limitRaw := strings.TrimSpace(query.Get("limit")); limitRaw != "" {
+		parsedLimit, err := strconv.Atoi(limitRaw)
+		if err != nil || parsedLimit <= 0 {
+			return nostrRecoverRouteConfig{}, fmt.Errorf("parse nostr limit value %q", limitRaw)
+		}
+		limit = parsedLimit
+	}
+
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return nostrRecoverRouteConfig{
+		RelayURL:  parsed.String(),
+		Recipient: recipient,
+		Since:     since,
+		Limit:     limit,
+	}, nil
+}
+
+func parseNostrRecoverSinceCursor(cursor string) *int64 {
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return nil
+	}
+	if parsed, err := strconv.ParseInt(cursor, 10, 64); err == nil {
+		return &parsed
+	}
+	if checkpoint, ok := parseRecoveredSyncCheckpointCursor(cursor); ok {
+		since := checkpoint.CreatedAt.UTC().Unix()
+		return &since
+	}
+	return nil
+}
+
+func buildNostrRecoverSubscriptionID(routeTarget string, now time.Time) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(routeTarget)))
+	return fmt.Sprintf("linkclaw-sync-%x-%d", digest[:4], now.UTC().UnixNano())
+}
+
+func decodeNostrRecoveredMailboxMessage(event transportnostr.Event) (transportstoreforward.MailboxPullMessage, bool) {
+	content := strings.TrimSpace(event.Content)
+	if content == "" {
+		return transportstoreforward.MailboxPullMessage{}, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return transportstoreforward.MailboxPullMessage{}, false
+	}
+
+	message := transportstoreforward.MailboxPullMessage{
+		MessageID:          firstNonEmptyString(nostrPayloadString(payload, "message_id"), nostrTagValue(event.Tags, "linkclaw_message_id"), strings.TrimSpace(event.ID)),
+		RelayMessageID:     firstNonEmptyString(strings.TrimSpace(event.ID), nostrPayloadString(payload, "relay_message_id")),
+		SenderID:           nostrPayloadString(payload, "sender_id"),
+		SenderSigningKey:   nostrPayloadString(payload, "sender_signing_key"),
+		RecipientID:        nostrPayloadString(payload, "recipient_id"),
+		EphemeralPublicKey: nostrPayloadString(payload, "ephemeral_public_key"),
+		Nonce:              nostrPayloadString(payload, "nonce"),
+		Ciphertext:         nostrPayloadString(payload, "ciphertext"),
+		Signature:          nostrPayloadString(payload, "signature"),
+		SentAt:             nostrPayloadString(payload, "sent_at"),
+	}
+	if message.RelayMessageID == "" {
+		message.RelayMessageID = message.MessageID
+	}
+	if message.SentAt == "" && event.CreatedAt > 0 {
+		message.SentAt = time.Unix(event.CreatedAt, 0).UTC().Format(time.RFC3339Nano)
+	}
+	if !isNostrMailboxMessageComplete(message) {
+		return transportstoreforward.MailboxPullMessage{}, false
+	}
+	return message, true
+}
+
+func nostrPayloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	raw, ok := payload[key]
+	if !ok {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case json.Number:
+		return strings.TrimSpace(value.String())
+	case float64:
+		if value == float64(int64(value)) {
+			return strconv.FormatInt(int64(value), 10)
+		}
+		return strings.TrimSpace(strconv.FormatFloat(value, 'f', -1, 64))
+	default:
+		return ""
+	}
+}
+
+func nostrTagValue(tags [][]string, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for _, tag := range tags {
+		if len(tag) < 2 {
+			continue
+		}
+		if strings.TrimSpace(tag[0]) != name {
+			continue
+		}
+		return strings.TrimSpace(tag[1])
+	}
+	return ""
+}
+
+func isNostrMailboxMessageComplete(message transportstoreforward.MailboxPullMessage) bool {
+	return strings.TrimSpace(message.MessageID) != "" &&
+		strings.TrimSpace(message.RelayMessageID) != "" &&
+		strings.TrimSpace(message.SenderID) != "" &&
+		strings.TrimSpace(message.SenderSigningKey) != "" &&
+		strings.TrimSpace(message.RecipientID) != "" &&
+		strings.TrimSpace(message.EphemeralPublicKey) != "" &&
+		strings.TrimSpace(message.Nonce) != "" &&
+		strings.TrimSpace(message.Ciphertext) != "" &&
+		strings.TrimSpace(message.Signature) != ""
+}
+
 func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile selfMessagingProfile, relayURL string, now time.Time) (int, string, error) {
 	db, _, err := openStateDB(ctx, home, now)
 	if err != nil {
@@ -947,7 +1472,7 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	if err != nil {
 		return 0, "", err
 	}
-	pulled, err := s.storeForwardBackend().Pull(ctx, relayURL, selfProfile.RecipientID, cursor)
+	pulled, err := s.pullRecoverableMessages(ctx, relayURL, selfProfile, cursor)
 	if err != nil {
 		return 0, "", err
 	}
@@ -995,14 +1520,24 @@ func (s *Service) syncStoreForward(ctx context.Context, home string, selfProfile
 	messages := make([]MessageRecord, 0, len(pulled.Messages))
 	observations := make([]agentruntime.RecoveredEventObservationRecord, 0, len(pulled.Messages))
 	seenObservationKeys := make(map[string]struct{}, len(pulled.Messages))
+	routeType := transport.RouteTypeRecovery
+	routePriority := 1
+	if relayURLKind(relayURL) == relayKindNostr {
+		routeType = transport.RouteTypeNostr
+		routePriority = 30
+	}
 	recoveryRoute := transport.RouteCandidate{
-		Type:     transport.RouteTypeRecovery,
+		Type:     routeType,
 		Label:    relayURL,
-		Priority: 1,
+		Priority: routePriority,
 		Target:   relayURL,
 	}
+	observationSource := "store_forward_sync"
+	if relayURLKind(relayURL) == relayKindNostr {
+		observationSource = "nostr_sync"
+	}
 	for _, pulledMessage := range pulled.Messages {
-		observation, hasObservation, err := buildRecoveredObservationRecord(selfProfile.SelfID, relayURL, pulledMessage, now)
+		observation, hasObservation, err := buildRecoveredObservationRecord(selfProfile.SelfID, relayURL, pulledMessage, observationSource, now)
 		if err != nil {
 			return 0, "", err
 		}
@@ -1130,6 +1665,7 @@ func buildRecoveredObservationRecord(
 	selfID string,
 	relayURL string,
 	message transportstoreforward.MailboxPullMessage,
+	source string,
 	now time.Time,
 ) (agentruntime.RecoveredEventObservationRecord, bool, error) {
 	selfID = strings.TrimSpace(selfID)
@@ -1151,7 +1687,7 @@ func buildRecoveredObservationRecord(
 		ObservedAt:   firstNonEmptyString(strings.TrimSpace(message.SentAt), now.Format(time.RFC3339Nano)),
 		PayloadHash:  "sha256:" + hex.EncodeToString(digest[:]),
 		PayloadJSON:  string(payloadJSON),
-		MetadataJSON: `{"source":"store_forward_sync"}`,
+		MetadataJSON: fmt.Sprintf(`{"source":%q}`, strings.TrimSpace(firstNonEmptyString(source, "store_forward_sync"))),
 	}, true, nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
+	"github.com/xiewanpeng/claw-identity/internal/transport"
 	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 
 	_ "modernc.org/sqlite"
@@ -32,7 +34,7 @@ func TestBuildRecoveredObservationRecord(t *testing.T) {
 		SentAt:         "2026-03-26T08:00:00Z",
 	}
 
-	record, ok, err := buildRecoveredObservationRecord("self_1", "https://relay.example", message, now)
+	record, ok, err := buildRecoveredObservationRecord("self_1", "https://relay.example", message, "store_forward_sync", now)
 	if err != nil {
 		t.Fatalf("buildRecoveredObservationRecord() error = %v", err)
 	}
@@ -283,6 +285,96 @@ func TestSyncStoreForwardSkipsRecipientBindingMismatch(t *testing.T) {
 	}
 	if incomingCount != 0 {
 		t.Fatalf("incoming messages count = %d, want 0", incomingCount)
+	}
+}
+
+func TestResolveSelfSyncRoutesBuildsNostrTargetsForSelfBindings(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 3, 27, 2, 0, 0, 0, time.UTC)
+	home, profile, _ := setupRuntimeBridgeSyncHome(t, now)
+	profile.RelayURL = "https://relay.legacy.example"
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	store := agentruntime.NewStoreWithDB(db, now)
+	if err := store.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_self_nostr",
+		SelfID:      profile.SelfID,
+		CanonicalID: profile.CanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    "wss://relay.self.nostr.example",
+		RouteLabel:  "self-nostr",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["npub_self_sync_1"],` +
+			`"nostr_primary_public_key":"npub_self_sync_1"}`,
+	}); err != nil {
+		t.Fatalf("upsert self transport binding: %v", err)
+	}
+	if err := store.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_other_nostr",
+		SelfID:      profile.SelfID,
+		CanonicalID: "did:key:z6MkOther",
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    "wss://relay.other.nostr.example",
+		RouteLabel:  "other-nostr",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["npub_other_should_ignore"],` +
+			`"nostr_primary_public_key":"npub_other_should_ignore"}`,
+	}); err != nil {
+		t.Fatalf("upsert other transport binding: %v", err)
+	}
+	if err := store.UpsertTransportRelay(ctx, agentruntime.TransportRelayRecord{
+		RelayID:      "relay_shared_nostr",
+		Transport:    string(transport.RouteTypeNostr),
+		RelayURL:     "wss://relay.shared.nostr.example",
+		ReadEnabled:  true,
+		WriteEnabled: true,
+		Priority:     80,
+		Source:       "test",
+		Status:       "active",
+		MetadataJSON: "{}",
+	}); err != nil {
+		t.Fatalf("upsert shared transport relay: %v", err)
+	}
+
+	routes, caps, err := resolveSelfSyncRoutes(ctx, db, profile, now)
+	if err != nil {
+		t.Fatalf("resolveSelfSyncRoutes() error = %v", err)
+	}
+
+	if !hasNostrRouteRecipient(routes, "wss://relay.self.nostr.example", "npub_self_sync_1") {
+		t.Fatalf("routes = %#v, want self nostr route target", routes)
+	}
+	if !hasNostrRouteRecipient(routes, "wss://relay.shared.nostr.example", "npub_self_sync_1") {
+		t.Fatalf("routes = %#v, want shared relay nostr route target", routes)
+	}
+	if hasNostrRouteRecipient(routes, "wss://relay.other.nostr.example", "npub_other_should_ignore") {
+		t.Fatalf("routes = %#v, should ignore non-self canonical binding", routes)
+	}
+
+	foundLegacy := false
+	for _, route := range routes {
+		if route.Type == transport.RouteTypeRecovery && route.Target == "https://relay.legacy.example" {
+			foundLegacy = true
+			break
+		}
+	}
+	if !foundLegacy {
+		t.Fatalf("routes = %#v, want legacy recovery fallback route", routes)
+	}
+	if !slices.Contains(caps, string(transport.RouteTypeNostr)) {
+		t.Fatalf("caps = %#v, want nostr", caps)
+	}
+	if !slices.Contains(caps, string(transport.RouteTypeRecovery)) {
+		t.Fatalf("caps = %#v, want recovery fallback", caps)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/xiewanpeng/claw-identity/internal/initflow"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
+	transportnostr "github.com/xiewanpeng/claw-identity/internal/transport/nostr"
 	transportstoreforward "github.com/xiewanpeng/claw-identity/internal/transport/storeforward"
 )
 
@@ -928,6 +929,151 @@ func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
 	}
 }
 
+func TestSyncUsesRuntimeNostrRoutesWhenLegacyRelayURLEmpty(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 3, 27, 1, 0, 0, 0, time.UTC)
+	home, profile, recipientEncryptionPublicKey := setupRuntimeBridgeSyncHome(t, now)
+	senderSigningPublicKey, senderSigningPrivateKeyPath := writeEd25519SigningKeyPair(t)
+
+	const relayURL = "wss://relay.sync.nostr.example"
+	const recipientPubKey = "npub_self_sync_route_1"
+	const sentAt = "2026-03-27T00:30:00Z"
+
+	pulledMessage := buildSignedMailboxPullMessage(
+		t,
+		recipientEncryptionPublicKey,
+		senderSigningPrivateKeyPath,
+		senderSigningPublicKey,
+		profile.RecipientID,
+		"did:key:z6MkSyncSender",
+		"msg_sync_nostr_1",
+		"evt_sync_nostr_1",
+		sentAt,
+		"hello from nostr recovery",
+	)
+	eventPayload, err := json.Marshal(map[string]string{
+		"message_id":           pulledMessage.MessageID,
+		"sender_id":            pulledMessage.SenderID,
+		"sender_signing_key":   pulledMessage.SenderSigningKey,
+		"recipient_id":         pulledMessage.RecipientID,
+		"ephemeral_public_key": pulledMessage.EphemeralPublicKey,
+		"nonce":                pulledMessage.Nonce,
+		"ciphertext":           pulledMessage.Ciphertext,
+		"signature":            pulledMessage.Signature,
+		"sent_at":              pulledMessage.SentAt,
+	})
+	if err != nil {
+		t.Fatalf("marshal nostr event payload: %v", err)
+	}
+	eventCreatedAt := parseTimestamp(sentAt).Unix()
+	nostrEvent := transportnostr.Event{
+		ID:        pulledMessage.RelayMessageID,
+		CreatedAt: eventCreatedAt,
+		Kind:      4,
+		Tags: [][]string{
+			{"p", recipientPubKey},
+			{"linkclaw_message_id", pulledMessage.MessageID},
+		},
+		Content: string(eventPayload),
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	runtimeStore := agentruntime.NewStoreWithDB(db, now)
+	if err := runtimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:   "binding_self_sync_nostr",
+		SelfID:      profile.SelfID,
+		CanonicalID: profile.CanonicalID,
+		Transport:   string(transport.RouteTypeNostr),
+		RelayURL:    relayURL,
+		RouteLabel:  "self-sync",
+		RouteType:   string(transport.RouteTypeNostr),
+		Direction:   "incoming",
+		Enabled:     true,
+		MetadataJSON: `{"nostr_public_keys":["` + recipientPubKey + `"],` +
+			`"nostr_primary_public_key":"` + recipientPubKey + `"}`,
+	}); err != nil {
+		db.Close()
+		t.Fatalf("upsert runtime transport binding: %v", err)
+	}
+	if err := runtimeStore.UpsertTransportRelay(ctx, agentruntime.TransportRelayRecord{
+		RelayID:      "relay_self_sync_nostr",
+		Transport:    string(transport.RouteTypeNostr),
+		RelayURL:     relayURL,
+		ReadEnabled:  true,
+		WriteEnabled: true,
+		Priority:     50,
+		Source:       "test",
+		Status:       "active",
+		MetadataJSON: "{}",
+	}); err != nil {
+		db.Close()
+		t.Fatalf("upsert runtime transport relay: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite db: %v", err)
+	}
+
+	client := &stubNostrRecoveryClient{
+		queryEvents: []transportnostr.Event{nostrEvent},
+	}
+	service := NewService()
+	service.Now = func() time.Time { return now }
+	service.NostrRelayClient = client
+
+	firstSync, err := service.Sync(ctx, SyncOptions{Home: home})
+	if err != nil {
+		t.Fatalf("first Sync() error = %v", err)
+	}
+	if got, want := firstSync.Synced, 1; got != want {
+		t.Fatalf("first sync synced = %d, want %d", got, want)
+	}
+	if got, want := firstSync.RelayCalls, 1; got != want {
+		t.Fatalf("first sync relay calls = %d, want %d", got, want)
+	}
+	if got := len(client.queryCalls); got != 1 {
+		t.Fatalf("first sync query calls = %d, want 1", got)
+	}
+	firstQuery := client.queryCalls[0]
+	if firstQuery.RelayURL != relayURL {
+		t.Fatalf("first query relay url = %q, want %q", firstQuery.RelayURL, relayURL)
+	}
+	if len(firstQuery.Filter.Recipient) != 1 || firstQuery.Filter.Recipient[0] != recipientPubKey {
+		t.Fatalf("first query recipient filter = %#v, want [%s]", firstQuery.Filter.Recipient, recipientPubKey)
+	}
+	if firstQuery.Filter.Since != nil {
+		t.Fatalf("first query since = %#v, want nil", firstQuery.Filter.Since)
+	}
+
+	service.Now = func() time.Time { return now.Add(2 * time.Minute) }
+	secondSync, err := service.Sync(ctx, SyncOptions{Home: home})
+	if err != nil {
+		t.Fatalf("second Sync() error = %v", err)
+	}
+	if got, want := secondSync.Synced, 0; got != want {
+		t.Fatalf("second sync synced = %d, want %d", got, want)
+	}
+	if got, want := secondSync.RelayCalls, 1; got != want {
+		t.Fatalf("second sync relay calls = %d, want %d", got, want)
+	}
+	if got := len(client.queryCalls); got != 2 {
+		t.Fatalf("second sync query calls = %d, want 2", got)
+	}
+	secondQuery := client.queryCalls[1]
+	if secondQuery.Filter.Since == nil {
+		t.Fatal("second query since = nil, want cursor-derived since")
+	}
+	if got, want := *secondQuery.Filter.Since, eventCreatedAt; got != want {
+		t.Fatalf("second query since = %d, want %d", got, want)
+	}
+
+	attempts := loadRuntimeRouteAttempts(t, home)
+	recoveredCursor := requireRouteAttemptWithNonEmptyCursor(t, attempts, string(transport.RouteTypeNostr), "recovered")
+	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "acked", recoveredCursor)
+}
+
 type stubFailingMailboxBackend struct {
 	sendErr   error
 	sendCalls int
@@ -947,6 +1093,34 @@ func (b *stubFailingMailboxBackend) Pull(context.Context, string, string, string
 
 func (b *stubFailingMailboxBackend) Ack(context.Context, string, transportstoreforward.MailboxAckRequest) error {
 	return nil
+}
+
+type stubNostrRecoveryClient struct {
+	queryEvents []transportnostr.Event
+	queryErr    error
+	queryCalls  []stubNostrRecoveryQueryCall
+}
+
+type stubNostrRecoveryQueryCall struct {
+	RelayURL       string
+	SubscriptionID string
+	Filter         transportnostr.Filter
+}
+
+func (c *stubNostrRecoveryClient) Publish(context.Context, string, transportnostr.Event) (transportnostr.PublishReceipt, error) {
+	return transportnostr.PublishReceipt{}, nil
+}
+
+func (c *stubNostrRecoveryClient) Query(_ context.Context, relayURL string, subscriptionID string, filter transportnostr.Filter) ([]transportnostr.Event, error) {
+	c.queryCalls = append(c.queryCalls, stubNostrRecoveryQueryCall{
+		RelayURL:       relayURL,
+		SubscriptionID: subscriptionID,
+		Filter:         filter,
+	})
+	if c.queryErr != nil {
+		return nil, c.queryErr
+	}
+	return append([]transportnostr.Event(nil), c.queryEvents...), nil
 }
 
 type runtimeRouteAttempt struct {
