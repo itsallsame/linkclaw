@@ -46,11 +46,17 @@ func (r RouteCandidate) IsP0() bool {
 }
 
 type Envelope struct {
-	MessageID   string
-	SenderID    string
-	RecipientID string
-	Plaintext   string
-	Ciphertext  string
+	MessageID          string
+	SenderID           string
+	SenderTransportID  string
+	SenderSigningKey   string
+	RecipientID        string
+	Plaintext          string
+	EphemeralPublicKey string
+	Nonce              string
+	Ciphertext         string
+	Signature          string
+	SentAt             string
 }
 
 type SendResult struct {

@@ -316,6 +316,17 @@ func applyRelayViewToContact(contact contactRecord, relayView peerRelayPubKeyVie
 		nostrHints = appendIfMissing(nostrHints, relayURL)
 	}
 	updated.NostrRelayHints = nostrHints
+	updated.NostrPublicKeys = nil
+	for _, key := range relayView.NostrPublicKeys {
+		updated.NostrPublicKeys = appendIfMissing(updated.NostrPublicKeys, key)
+	}
+	updated.NostrPrimaryPublicKey = strings.TrimSpace(relayView.NostrPrimaryPublicKey)
+	if updated.NostrPrimaryPublicKey == "" && len(updated.NostrPublicKeys) > 0 {
+		updated.NostrPrimaryPublicKey = updated.NostrPublicKeys[0]
+	}
+	if updated.NostrPrimaryPublicKey != "" {
+		updated.NostrPublicKeys = appendIfMissing(updated.NostrPublicKeys, updated.NostrPrimaryPublicKey)
+	}
 	return updated
 }
 
@@ -365,6 +376,17 @@ func nostrTargetsFromContact(contact contactRecord) []string {
 		targets = appendIfMissing(targets, contact.RelayURL)
 	}
 	return targets
+}
+
+func nostrRecipientPublicKeysFromContact(contact contactRecord) []string {
+	keys := make([]string, 0, len(contact.NostrPublicKeys)+1)
+	if primary := strings.TrimSpace(contact.NostrPrimaryPublicKey); primary != "" {
+		keys = appendIfMissing(keys, primary)
+	}
+	for _, key := range contact.NostrPublicKeys {
+		keys = appendIfMissing(keys, key)
+	}
+	return keys
 }
 
 func firstStoreForwardRelay(values []string) string {

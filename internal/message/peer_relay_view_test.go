@@ -139,6 +139,8 @@ func TestApplyRelayViewToContactPreservesNostrRelayHints(t *testing.T) {
 			"wss://relay.primary.nostr.example",
 			"wss://relay.backup.nostr.example",
 		},
+		NostrPublicKeys:       []string{"npub_peer_1", "npub_peer_2"},
+		NostrPrimaryPublicKey: "npub_peer_2",
 	}
 
 	updated := applyRelayViewToContact(contact, view)
@@ -151,6 +153,12 @@ func TestApplyRelayViewToContactPreservesNostrRelayHints(t *testing.T) {
 	}
 	if got, want := updated.NostrRelayHints, []string{"wss://relay.primary.nostr.example", "wss://relay.backup.nostr.example"}; !slices.Equal(got, want) {
 		t.Fatalf("contact nostr_relay_hints = %#v, want %#v", got, want)
+	}
+	if got, want := updated.NostrPublicKeys, []string{"npub_peer_1", "npub_peer_2"}; !slices.Equal(got, want) {
+		t.Fatalf("contact nostr_public_keys = %#v, want %#v", got, want)
+	}
+	if got, want := updated.NostrPrimaryPublicKey, "npub_peer_2"; got != want {
+		t.Fatalf("contact nostr_primary_public_key = %q, want %q", got, want)
 	}
 }
 

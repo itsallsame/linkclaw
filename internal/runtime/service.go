@@ -65,10 +65,17 @@ func (s *Service) Send(ctx context.Context, contact routing.ContactRuntimeView, 
 		messageID = req.SenderID + "->" + req.RecipientID
 	}
 	envelope := transport.Envelope{
-		MessageID:   messageID,
-		SenderID:    req.SenderID,
-		RecipientID: req.RecipientID,
-		Plaintext:   req.Plaintext,
+		MessageID:          messageID,
+		SenderID:           req.SenderID,
+		SenderTransportID:  req.SenderTransportID,
+		SenderSigningKey:   req.SenderSigningKey,
+		RecipientID:        req.RecipientID,
+		Plaintext:          req.Plaintext,
+		EphemeralPublicKey: req.EphemeralPublicKey,
+		Nonce:              req.Nonce,
+		Ciphertext:         req.Ciphertext,
+		Signature:          req.Signature,
+		SentAt:             req.SentAt,
 	}
 
 	for idx := 0; idx < len(routes); idx++ {

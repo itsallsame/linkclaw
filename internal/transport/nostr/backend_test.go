@@ -53,11 +53,14 @@ func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
 	backend.now = func() time.Time { return time.Unix(1_711_000_100, 0).UTC() }
 
 	result, err := backend.Publish(context.Background(), transport.Envelope{
-		MessageID:   "msg_1",
-		SenderID:    "npub_sender",
-		RecipientID: "npub_recipient",
-		Plaintext:   "hello",
-		Ciphertext:  "cipher",
+		MessageID:          "msg_1",
+		SenderID:           "did:key:z6MkSender",
+		RecipientID:        "did:key:z6MkRecipient",
+		SenderSigningKey:   "sender_signing_key",
+		EphemeralPublicKey: "ephemeral",
+		Nonce:              "nonce",
+		Ciphertext:         "cipher",
+		SentAt:             "2026-03-27T01:23:45Z",
 	}, transport.RouteCandidate{
 		Type:   transport.RouteTypeNostr,
 		Target: "wss://relay.example?recipient=npub_override",
@@ -80,8 +83,19 @@ func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
 	if got, want := client.publishEvent.CreatedAt, int64(1_711_000_100); got != want {
 		t.Fatalf("event created_at = %d, want %d", got, want)
 	}
+	if got, want := client.publishEvent.PubKey, "npub_override"; got != want {
+		t.Fatalf("event pubkey = %q, want %q", got, want)
+	}
+	if got := len(client.publishEvent.Sig); got != 128 {
+		t.Fatalf("event sig len = %d, want 128", got)
+	}
 	if len(client.publishEvent.Tags) == 0 || client.publishEvent.Tags[0][0] != "p" || client.publishEvent.Tags[0][1] != "npub_override" {
 		t.Fatalf("event tags = %#v, want recipient p-tag from route query", client.publishEvent.Tags)
+	}
+	for _, tag := range client.publishEvent.Tags {
+		if len(tag) > 0 && (tag[0] == "linkclaw_sender" || tag[0] == "linkclaw_recipient") {
+			t.Fatalf("event tags = %#v, want no canonical sender/recipient tags", client.publishEvent.Tags)
+		}
 	}
 
 	var payload map[string]string
@@ -91,8 +105,20 @@ func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
 	if got, want := payload["message_id"], "msg_1"; got != want {
 		t.Fatalf("payload message_id = %q, want %q", got, want)
 	}
+	if got, want := payload["recipient_pubkey"], "npub_override"; got != want {
+		t.Fatalf("payload recipient_pubkey = %q, want %q", got, want)
+	}
 	if got, want := payload["ciphertext"], "cipher"; got != want {
 		t.Fatalf("payload ciphertext = %q, want %q", got, want)
+	}
+	if _, ok := payload["plaintext"]; ok {
+		t.Fatalf("payload plaintext should not be present: %#v", payload)
+	}
+	if _, ok := payload["sender_id"]; ok {
+		t.Fatalf("payload sender_id should not be present: %#v", payload)
+	}
+	if _, ok := payload["recipient_id"]; ok {
+		t.Fatalf("payload recipient_id should not be present: %#v", payload)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -756,6 +757,8 @@ func TestBuildSendRuntimeBoundaryIncludesNostrFallbackRoutes(t *testing.T) {
 			"wss://relay-primary.nostr.example",
 			"wss://relay-backup.nostr.example",
 		},
+		NostrPublicKeys:       []string{"npub_peer_primary"},
+		NostrPrimaryPublicKey: "npub_peer_primary",
 	}
 	selfProfile := selfMessagingProfile{
 		CanonicalID:      "did:key:z6MkSelf",
@@ -764,7 +767,8 @@ func TestBuildSendRuntimeBoundaryIncludesNostrFallbackRoutes(t *testing.T) {
 
 	view, transports, routes := buildSendRuntimeBoundary(selfProfile, contact, time.Now().UTC())
 
-	if !hasNostrRoute(routes, "wss://relay-primary.nostr.example") || !hasNostrRoute(routes, "wss://relay-backup.nostr.example") {
+	if !hasNostrRouteRecipient(routes, "wss://relay-primary.nostr.example", "npub_peer_primary") ||
+		!hasNostrRouteRecipient(routes, "wss://relay-backup.nostr.example", "npub_peer_primary") {
 		t.Fatalf("routes = %#v, want both nostr fallback routes", routes)
 	}
 	if !hasStoreForwardRoute(routes, "https://relay.storeforward.example") {
@@ -775,6 +779,35 @@ func TestBuildSendRuntimeBoundaryIncludesNostrFallbackRoutes(t *testing.T) {
 	}
 	if len(transports) == 0 {
 		t.Fatal("transports len = 0, want nostr transport")
+	}
+}
+
+func TestBuildSendRuntimeBoundarySkipsNostrRoutesWithoutRecipientPublicKeys(t *testing.T) {
+	contact := contactRecord{
+		ContactID:           "contact_nostr_no_pubkey",
+		CanonicalID:         "did:key:z6MkNoNostrPubKey",
+		DisplayName:         "No Nostr PubKey",
+		RecipientID:         "rcpt_no_pubkey",
+		SigningPublicKey:    "signing-key",
+		EncryptionPublicKey: "enc-key",
+		StoreForwardHints:   []string{"https://relay.storeforward.example"},
+		NostrRelayHints:     []string{"wss://relay-only.nostr.example"},
+	}
+	selfProfile := selfMessagingProfile{
+		CanonicalID:      "did:key:z6MkSelf",
+		SigningPublicKey: "self-signing-key",
+	}
+
+	view, _, routes := buildSendRuntimeBoundary(selfProfile, contact, time.Now().UTC())
+
+	if hasNostrRoute(routes, "wss://relay-only.nostr.example") {
+		t.Fatalf("routes = %#v, want nostr route skipped when recipient pubkey is missing", routes)
+	}
+	if slices.Contains(view.TransportCapabilities, string(transport.RouteTypeNostr)) {
+		t.Fatalf("TransportCapabilities = %#v, want nostr capability removed without recipient pubkey", view.TransportCapabilities)
+	}
+	if !hasStoreForwardRoute(routes, "https://relay.storeforward.example") {
+		t.Fatalf("routes = %#v, want store-forward fallback retained", routes)
 	}
 }
 
@@ -848,7 +881,7 @@ func TestSendMarksMessageFailedWhenAllRuntimeRoutesFail(t *testing.T) {
 		RouteType:    string(transport.RouteTypeNostr),
 		Direction:    "both",
 		Enabled:      true,
-		MetadataJSON: "{}",
+		MetadataJSON: `{"nostr_public_keys":["npub_all_fail"],"nostr_primary_public_key":"npub_all_fail"}`,
 	}); err != nil {
 		t.Fatalf("upsert runtime transport binding: %v", err)
 	}
@@ -992,6 +1025,29 @@ func hasDirectRoute(routes []transport.RouteCandidate, target string) bool {
 func hasNostrRoute(routes []transport.RouteCandidate, target string) bool {
 	for _, route := range routes {
 		if route.Type == transport.RouteTypeNostr && route.Target == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNostrRouteRecipient(routes []transport.RouteCandidate, relayURL string, recipient string) bool {
+	for _, route := range routes {
+		if route.Type != transport.RouteTypeNostr {
+			continue
+		}
+		parsed, err := url.Parse(route.Target)
+		if err != nil {
+			continue
+		}
+		query := parsed.Query()
+		gotRecipient := query.Get("recipient")
+		if gotRecipient == "" {
+			gotRecipient = query.Get("p")
+		}
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		if parsed.String() == relayURL && gotRecipient == recipient {
 			return true
 		}
 	}

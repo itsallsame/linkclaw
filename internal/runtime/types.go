@@ -8,11 +8,18 @@ import (
 )
 
 type SendRequest struct {
-	MessageID   string
-	ContactRef  string
-	SenderID    string
-	RecipientID string
-	Plaintext   string
+	MessageID          string
+	ContactRef         string
+	SenderID           string
+	SenderTransportID  string
+	SenderSigningKey   string
+	RecipientID        string
+	Plaintext          string
+	EphemeralPublicKey string
+	Nonce              string
+	Ciphertext         string
+	Signature          string
+	SentAt             string
 }
 
 type SendResult struct {

@@ -209,18 +209,20 @@ type selfMessagingProfile struct {
 }
 
 type contactRecord struct {
-	ContactID           string
-	CanonicalID         string
-	DisplayName         string
-	RecipientID         string
-	SigningPublicKey    string
-	EncryptionPublicKey string
-	RelayURL            string
-	StoreForwardHints   []string
-	NostrRelayHints     []string
-	DirectURL           string
-	DirectToken         string
-	Status              string
+	ContactID             string
+	CanonicalID           string
+	DisplayName           string
+	RecipientID           string
+	SigningPublicKey      string
+	EncryptionPublicKey   string
+	RelayURL              string
+	StoreForwardHints     []string
+	NostrRelayHints       []string
+	NostrPublicKeys       []string
+	NostrPrimaryPublicKey string
+	DirectURL             string
+	DirectToken           string
+	Status                string
 }
 
 type signedMessagePayload struct {

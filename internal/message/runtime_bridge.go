@@ -13,6 +13,7 @@ import (
 
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
+	"github.com/xiewanpeng/claw-identity/internal/messagecrypto"
 	"github.com/xiewanpeng/claw-identity/internal/routing"
 	agentruntime "github.com/xiewanpeng/claw-identity/internal/runtime"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
@@ -271,7 +272,7 @@ func runtimeContactView(contact contactRecord) routing.ContactRuntimeView {
 			storeForwardHints = appendIfMissing(storeForwardHints, target)
 		}
 	}
-	if len(nostrTargetsFromContact(contact)) > 0 {
+	if len(buildNostrRouteTargets(contact)) > 0 {
 		caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
 	}
 	return routing.ContactRuntimeView{
@@ -303,7 +304,7 @@ func directTransportEnabled() bool {
 
 func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactRecord, now time.Time) (agentdiscovery.PeerPresenceView, []transport.Transport, []transport.RouteCandidate) {
 	storeForwardTargets := storeForwardTargetsFromContact(contact)
-	nostrTargets := nostrTargetsFromContact(contact)
+	nostrTargets := buildNostrRouteTargets(contact)
 	routes := make([]transport.RouteCandidate, 0, len(storeForwardTargets)+len(nostrTargets)+2)
 	transports := make([]transport.Transport, 0, 3)
 	view := agentdiscovery.PeerPresenceView{
@@ -533,6 +534,64 @@ func parseTimestampOrFallback(raw string, fallback time.Time) time.Time {
 	return parsed
 }
 
+func buildNostrRouteTargets(contact contactRecord) []string {
+	relays := nostrTargetsFromContact(contact)
+	recipients := nostrRecipientPublicKeysFromContact(contact)
+	targets := make([]string, 0, len(relays))
+	for _, relay := range relays {
+		relay = strings.TrimSpace(relay)
+		if relay == "" {
+			continue
+		}
+		if recipient := nostrRouteRecipient(relay); recipient != "" {
+			targets = appendIfMissing(targets, relay)
+			continue
+		}
+		if len(recipients) == 0 {
+			continue
+		}
+		for _, recipient := range recipients {
+			target := withNostrRouteRecipient(relay, recipient)
+			if target == "" {
+				continue
+			}
+			targets = appendIfMissing(targets, target)
+		}
+	}
+	return targets
+}
+
+func nostrRouteRecipient(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	query := parsed.Query()
+	recipient := strings.TrimSpace(query.Get("recipient"))
+	if recipient != "" {
+		return recipient
+	}
+	return strings.TrimSpace(query.Get("p"))
+}
+
+func withNostrRouteRecipient(raw string, recipient string) string {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	query := parsed.Query()
+	if strings.TrimSpace(query.Get("recipient")) == "" && strings.TrimSpace(query.Get("p")) == "" {
+		query.Set("recipient", recipient)
+	}
+	parsed.RawQuery = query.Encode()
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 func buildDirectRouteTarget(rawURL string, token string) string {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -643,12 +702,21 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 		}),
 	)
 	runtimeSvc.Transports = append(extraTransports, runtimeSvc.Transports...)
+	encrypted, err := messagecrypto.EncryptForRecipient(contact.EncryptionPublicKey, []byte(record.Body))
+	if err != nil {
+		return agentruntime.SendResult{}, err
+	}
 	return runtimeSvc.Send(ctx, runtimeContactView(contact), agentruntime.SendRequest{
-		MessageID:   record.MessageID,
-		ContactRef:  contact.ContactID,
-		SenderID:    selfProfile.CanonicalID,
-		RecipientID: contact.RecipientID,
-		Plaintext:   record.Body,
+		MessageID:          record.MessageID,
+		ContactRef:         contact.ContactID,
+		SenderID:           selfProfile.CanonicalID,
+		SenderSigningKey:   selfProfile.SigningPublicKey,
+		RecipientID:        contact.RecipientID,
+		Plaintext:          record.Body,
+		EphemeralPublicKey: encrypted.EphemeralPublicKey,
+		Nonce:              encrypted.Nonce,
+		Ciphertext:         encrypted.Ciphertext,
+		SentAt:             record.CreatedAt,
 	})
 }
 
@@ -708,7 +776,7 @@ func syncRuntimeSendState(ctx context.Context, home string, contact contactRecor
 		caps = appendIfMissing(caps, string(transport.RouteTypeStoreForward))
 		storeForwardHints = appendIfMissing(storeForwardHints, target)
 	}
-	if len(nostrTargetsFromContact(contact)) > 0 {
+	if len(buildNostrRouteTargets(contact)) > 0 {
 		caps = appendIfMissing(caps, string(transport.RouteTypeNostr))
 	}
 	if err := store.UpsertContact(ctx, agentruntime.ContactRecord{

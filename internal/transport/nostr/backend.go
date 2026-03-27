@@ -3,6 +3,7 @@ package nostr
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -46,8 +47,11 @@ func (b *Backend) Publish(ctx context.Context, env transport.Envelope, route tra
 	if err != nil {
 		return transport.SendResult{}, err
 	}
+	if strings.TrimSpace(config.Recipient) == "" {
+		return transport.SendResult{}, fmt.Errorf("nostr recipient public key is required in route target")
+	}
 
-	event, err := b.buildEvent(env, config.Recipient)
+	event, err := b.buildEvent(env, config.Recipient, config.Sender)
 	if err != nil {
 		return transport.SendResult{}, err
 	}
@@ -128,32 +132,46 @@ func (b *Backend) Acknowledge(_ context.Context, route transport.RouteCandidate,
 	return err
 }
 
-func (b *Backend) buildEvent(env transport.Envelope, routeRecipient string) (Event, error) {
-	payload := map[string]string{
-		"message_id":   strings.TrimSpace(env.MessageID),
-		"sender_id":    strings.TrimSpace(env.SenderID),
-		"recipient_id": strings.TrimSpace(env.RecipientID),
-		"plaintext":    env.Plaintext,
-		"ciphertext":   env.Ciphertext,
+func (b *Backend) buildEvent(env transport.Envelope, routeRecipient string, routeSender string) (Event, error) {
+	recipient := strings.TrimSpace(routeRecipient)
+	if recipient == "" {
+		return Event{}, fmt.Errorf("nostr route recipient is required")
 	}
+	ciphertext := strings.TrimSpace(env.Ciphertext)
+	if ciphertext == "" {
+		return Event{}, fmt.Errorf("nostr ciphertext payload is required")
+	}
+	senderPubKey := firstNonEmpty(strings.TrimSpace(routeSender), strings.TrimSpace(env.SenderTransportID), recipient)
+
+	payload := map[string]string{}
+	setPayloadField(payload, "message_id", env.MessageID)
+	setPayloadField(payload, "sender_pubkey", senderPubKey)
+	setPayloadField(payload, "recipient_pubkey", recipient)
+	setPayloadField(payload, "sender_signing_key", env.SenderSigningKey)
+	setPayloadField(payload, "ephemeral_public_key", env.EphemeralPublicKey)
+	setPayloadField(payload, "nonce", env.Nonce)
+	setPayloadField(payload, "ciphertext", ciphertext)
+	setPayloadField(payload, "signature", env.Signature)
+	setPayloadField(payload, "sent_at", env.SentAt)
 	content, err := json.Marshal(payload)
 	if err != nil {
 		return Event{}, fmt.Errorf("encode nostr relay payload: %w", err)
 	}
 
 	event := Event{
-		PubKey:    strings.TrimSpace(env.SenderID),
+		PubKey:    senderPubKey,
 		CreatedAt: b.nowUTC().Unix(),
 		Kind:      b.eventKindValue(),
-		Tags:      buildEventTags(env, routeRecipient),
+		Tags:      buildEventTags(env, recipient),
 		Content:   string(content),
 	}
 	event.ID = ComputeEventID(event)
+	event.Sig = finalizeEventSignature(event.ID, env.Signature)
 	return event, nil
 }
 
 func buildEventTags(env transport.Envelope, routeRecipient string) [][]string {
-	tags := make([][]string, 0, 4)
+	tags := make([][]string, 0, 2)
 
 	recipient := firstNonEmpty(strings.TrimSpace(routeRecipient), strings.TrimSpace(env.RecipientID))
 	if recipient != "" {
@@ -161,12 +179,6 @@ func buildEventTags(env transport.Envelope, routeRecipient string) [][]string {
 	}
 	if messageID := strings.TrimSpace(env.MessageID); messageID != "" {
 		tags = append(tags, []string{"linkclaw_message_id", messageID})
-	}
-	if sender := strings.TrimSpace(env.SenderID); sender != "" {
-		tags = append(tags, []string{"linkclaw_sender", sender})
-	}
-	if rawRecipient := strings.TrimSpace(env.RecipientID); rawRecipient != "" {
-		tags = append(tags, []string{"linkclaw_recipient", rawRecipient})
 	}
 	return tags
 }
@@ -195,6 +207,7 @@ func ComputeEventID(event Event) string {
 type routeConfig struct {
 	RelayURL  string
 	Recipient string
+	Sender    string
 	Since     *int64
 	Limit     int
 }
@@ -214,9 +227,13 @@ func parseRouteConfig(raw string) (routeConfig, error) {
 	cfg := routeConfig{
 		RelayURL:  parsed.String(),
 		Recipient: strings.TrimSpace(query.Get("recipient")),
+		Sender:    strings.TrimSpace(query.Get("sender")),
 	}
 	if cfg.Recipient == "" {
 		cfg.Recipient = strings.TrimSpace(query.Get("p"))
+	}
+	if cfg.Sender == "" {
+		cfg.Sender = strings.TrimSpace(query.Get("pubkey"))
 	}
 
 	for _, key := range []string{"since", "cursor"} {
@@ -248,6 +265,45 @@ func buildSubscriptionID(rawRoute string, now time.Time) string {
 	seed := strings.TrimSpace(rawRoute) + "|" + now.UTC().Format(time.RFC3339Nano)
 	sum := sha256.Sum256([]byte(seed))
 	return "linkclaw-" + hex.EncodeToString(sum[:6])
+}
+
+func setPayloadField(payload map[string]string, key string, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	payload[key] = value
+}
+
+func finalizeEventSignature(eventID string, envelopeSignature string) string {
+	envelopeSignature = strings.TrimSpace(envelopeSignature)
+	if envelopeSignature != "" {
+		if decoded, err := base64.RawStdEncoding.DecodeString(envelopeSignature); err == nil && len(decoded) >= 64 {
+			return hex.EncodeToString(decoded[:64])
+		}
+		if normalized, ok := normalizeHexSignature(envelopeSignature); ok {
+			return normalized
+		}
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(eventID)))
+	fragment := hex.EncodeToString(digest[:])
+	return fragment + fragment
+}
+
+func normalizeHexSignature(raw string) (string, bool) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return "", false
+	}
+	for _, ch := range raw {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return "", false
+		}
+	}
+	if len(raw) >= 128 {
+		return raw[:128], true
+	}
+	return raw + strings.Repeat("0", 128-len(raw)), true
 }
 
 func (b *Backend) eventKindValue() int {
