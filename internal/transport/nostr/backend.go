@@ -22,17 +22,23 @@ const (
 
 type Backend struct {
 	client    RelayClient
+	signer    EventSigner
 	now       func() time.Time
 	eventKind int
 	pullLimit int
 }
 
 func NewBackend(client RelayClient) *Backend {
+	return NewBackendWithSigner(client, nil)
+}
+
+func NewBackendWithSigner(client RelayClient, signer EventSigner) *Backend {
 	if client == nil {
 		client = NewWebSocketRelayClient()
 	}
 	return &Backend{
 		client:    client,
+		signer:    signer,
 		now:       time.Now,
 		eventKind: defaultEventKind,
 		pullLimit: defaultPullLimit,
@@ -142,6 +148,11 @@ func (b *Backend) buildEvent(env transport.Envelope, routeRecipient string, rout
 		return Event{}, fmt.Errorf("nostr ciphertext payload is required")
 	}
 	senderPubKey := firstNonEmpty(strings.TrimSpace(routeSender), strings.TrimSpace(env.SenderTransportID), recipient)
+	if b != nil && b.signer != nil {
+		if signerPubKey := strings.TrimSpace(b.signer.PublicKey()); signerPubKey != "" {
+			senderPubKey = signerPubKey
+		}
+	}
 
 	payload := map[string]string{}
 	setPayloadField(payload, "message_id", env.MessageID)
@@ -166,7 +177,10 @@ func (b *Backend) buildEvent(env transport.Envelope, routeRecipient string, rout
 		Content:   string(content),
 	}
 	event.ID = ComputeEventID(event)
-	event.Sig = finalizeEventSignature(event.ID, env.Signature)
+	event.Sig, err = b.signEvent(event.ID, env.Signature)
+	if err != nil {
+		return Event{}, err
+	}
 	return event, nil
 }
 
@@ -275,35 +289,48 @@ func setPayloadField(payload map[string]string, key string, value string) {
 	payload[key] = value
 }
 
-func finalizeEventSignature(eventID string, envelopeSignature string) string {
-	envelopeSignature = strings.TrimSpace(envelopeSignature)
-	if envelopeSignature != "" {
-		if decoded, err := base64.RawStdEncoding.DecodeString(envelopeSignature); err == nil && len(decoded) >= 64 {
-			return hex.EncodeToString(decoded[:64])
+func (b *Backend) signEvent(eventID string, envelopeSignature string) (string, error) {
+	if b != nil && b.signer != nil {
+		signature, err := b.signer.SignEventID(eventID)
+		if err != nil {
+			return "", fmt.Errorf("sign nostr event: %w", err)
 		}
-		if normalized, ok := normalizeHexSignature(envelopeSignature); ok {
-			return normalized
+		signature = strings.ToLower(strings.TrimSpace(signature))
+		if !isStrictHexSignature(signature) {
+			return "", fmt.Errorf("nostr signer returned invalid signature")
 		}
+		return signature, nil
 	}
-	digest := sha256.Sum256([]byte(strings.TrimSpace(eventID)))
-	fragment := hex.EncodeToString(digest[:])
-	return fragment + fragment
+	if signature, ok := decodeEnvelopeSignature(envelopeSignature); ok {
+		return signature, nil
+	}
+	return "", fmt.Errorf("nostr event signer is required")
 }
 
-func normalizeHexSignature(raw string) (string, bool) {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw == "" {
-		return "", false
+func decodeEnvelopeSignature(envelopeSignature string) (string, bool) {
+	envelopeSignature = strings.TrimSpace(envelopeSignature)
+	if envelopeSignature != "" {
+		if decoded, err := base64.RawStdEncoding.DecodeString(envelopeSignature); err == nil && len(decoded) == 64 {
+			return hex.EncodeToString(decoded), true
+		}
+		normalized := strings.ToLower(strings.TrimSpace(envelopeSignature))
+		if isStrictHexSignature(normalized) {
+			return normalized, true
+		}
+	}
+	return "", false
+}
+
+func isStrictHexSignature(raw string) bool {
+	if len(raw) != 128 {
+		return false
 	}
 	for _, ch := range raw {
 		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
-			return "", false
+			return false
 		}
 	}
-	if len(raw) >= 128 {
-		return raw[:128], true
-	}
-	return raw + strings.Repeat("0", 128-len(raw)), true
+	return true
 }
 
 func (b *Backend) eventKindValue() int {

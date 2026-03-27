@@ -2,10 +2,12 @@ package nostr
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/xiewanpeng/claw-identity/internal/transport"
 )
 
@@ -42,6 +44,10 @@ func (c *captureRelayClient) Query(_ context.Context, relayURL string, subscript
 }
 
 func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
+	signer, err := NewSchnorrSignerFromPrivateKeyHex("74f9d3c7d2dd87c46071cb22de755f6319ebd8571c98fcef70ccf88be7fca8e7")
+	if err != nil {
+		t.Fatalf("NewSchnorrSignerFromPrivateKeyHex() error = %v", err)
+	}
 	client := &captureRelayClient{
 		publishReceipt: PublishReceipt{
 			EventID:  "evt_ack_1",
@@ -49,7 +55,7 @@ func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
 			Message:  "ok",
 		},
 	}
-	backend := NewBackend(client)
+	backend := NewBackendWithSigner(client, signer)
 	backend.now = func() time.Time { return time.Unix(1_711_000_100, 0).UTC() }
 
 	result, err := backend.Publish(context.Background(), transport.Envelope{
@@ -83,12 +89,13 @@ func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
 	if got, want := client.publishEvent.CreatedAt, int64(1_711_000_100); got != want {
 		t.Fatalf("event created_at = %d, want %d", got, want)
 	}
-	if got, want := client.publishEvent.PubKey, "npub_override"; got != want {
+	if got, want := client.publishEvent.PubKey, signer.PublicKey(); got != want {
 		t.Fatalf("event pubkey = %q, want %q", got, want)
 	}
 	if got := len(client.publishEvent.Sig); got != 128 {
 		t.Fatalf("event sig len = %d, want 128", got)
 	}
+	verifyEventSignature(t, client.publishEvent)
 	if len(client.publishEvent.Tags) == 0 || client.publishEvent.Tags[0][0] != "p" || client.publishEvent.Tags[0][1] != "npub_override" {
 		t.Fatalf("event tags = %#v, want recipient p-tag from route query", client.publishEvent.Tags)
 	}
@@ -119,6 +126,54 @@ func TestBackendPublishBuildsEventAndReturnsSendResult(t *testing.T) {
 	}
 	if _, ok := payload["recipient_id"]; ok {
 		t.Fatalf("payload recipient_id should not be present: %#v", payload)
+	}
+}
+
+func TestBackendPublishReturnsErrorWhenSignerIsMissing(t *testing.T) {
+	client := &captureRelayClient{
+		publishReceipt: PublishReceipt{
+			EventID:  "evt_ack_1",
+			Accepted: true,
+		},
+	}
+	backend := NewBackend(client)
+
+	_, err := backend.Publish(context.Background(), transport.Envelope{
+		MessageID:  "msg_1",
+		Ciphertext: "cipher",
+	}, transport.RouteCandidate{
+		Type:   transport.RouteTypeNostr,
+		Target: "wss://relay.example?recipient=npub_1",
+	})
+	if err == nil {
+		t.Fatal("Publish() error = nil, want signer missing error")
+	}
+}
+
+func verifyEventSignature(t *testing.T, event Event) {
+	t.Helper()
+	eventHash, err := hex.DecodeString(event.ID)
+	if err != nil {
+		t.Fatalf("decode event id: %v", err)
+	}
+	signatureBytes, err := hex.DecodeString(event.Sig)
+	if err != nil {
+		t.Fatalf("decode event signature: %v", err)
+	}
+	signature, err := schnorr.ParseSignature(signatureBytes)
+	if err != nil {
+		t.Fatalf("parse event signature: %v", err)
+	}
+	pubKeyBytes, err := hex.DecodeString(event.PubKey)
+	if err != nil {
+		t.Fatalf("decode event pubkey: %v", err)
+	}
+	pubKey, err := schnorr.ParsePubKey(pubKeyBytes)
+	if err != nil {
+		t.Fatalf("parse event pubkey: %v", err)
+	}
+	if !signature.Verify(eventHash, pubKey) {
+		t.Fatalf("event signature verification failed: id=%q sig=%q pubkey=%q", event.ID, event.Sig, event.PubKey)
 	}
 }
 

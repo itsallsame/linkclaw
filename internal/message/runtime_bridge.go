@@ -398,7 +398,7 @@ func buildSendRuntimeBoundary(selfProfile selfMessagingProfile, contact contactR
 	}
 
 	if len(nostrTargets) > 0 {
-		transports = append(transports, transportnostr.New(transportnostr.NewBackend(nil)))
+		transports = append(transports, transportnostr.New(transportnostr.NewBackendWithSigner(selfProfile.NostrRelayClient, selfProfile.NostrEventSigner)))
 		route := transport.RouteCandidate{
 			Type:     transport.RouteTypeNostr,
 			Label:    nostrTargets[0],
@@ -964,6 +964,7 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 		return agentruntime.SendResult{}, err
 	}
 	defer store.Close()
+	selfProfile.NostrRelayClient = s.nostrRelayClient()
 
 	view, extraTransports, routes := buildSendRuntimeBoundary(selfProfile, contact, now)
 	if view.CanonicalID != "" {
@@ -996,6 +997,7 @@ func (s *Service) sendThroughRuntime(ctx context.Context, home string, selfProfi
 		MessageID:          record.MessageID,
 		ContactRef:         contact.ContactID,
 		SenderID:           selfProfile.CanonicalID,
+		SenderTransportID:  selfProfile.NostrSigningPublicKey,
 		SenderSigningKey:   selfProfile.SigningPublicKey,
 		RecipientID:        contact.RecipientID,
 		Plaintext:          record.Body,

@@ -208,6 +208,10 @@ type selfMessagingProfile struct {
 	SigningPublicKey         string
 	SigningPrivateKeyPath    string
 	EncryptionPrivateKeyPath string
+	NostrSigningPublicKey    string
+	NostrSigningPrivatePath  string
+	NostrEventSigner         transportnostr.EventSigner
+	NostrRelayClient         transportnostr.RelayClient
 }
 
 type contactRecord struct {
@@ -2008,6 +2012,20 @@ func loadSelfMessagingProfile(ctx context.Context, db *sql.DB, home string) (sel
 	if !filepath.IsAbs(profile.EncryptionPrivateKeyPath) {
 		profile.EncryptionPrivateKeyPath = filepath.Join(paths.KeysDir, profile.EncryptionPrivateKeyPath)
 	}
+	nostrKey, err := ensureSelfNostrSigningKey(ctx, db, home, profile.SelfID, time.Now().UTC())
+	if err != nil {
+		return selfMessagingProfile{}, err
+	}
+	profile.NostrSigningPublicKey = nostrKey.PublicKey
+	profile.NostrSigningPrivatePath = nostrKey.PrivateKeyPath
+	profile.NostrEventSigner, err = transportnostr.NewSchnorrSignerFromPrivateKeyFile(profile.NostrSigningPrivatePath)
+	if err != nil {
+		return selfMessagingProfile{}, fmt.Errorf("load self nostr signer: %w", err)
+	}
+	if strings.ToLower(strings.TrimSpace(profile.NostrEventSigner.PublicKey())) != strings.ToLower(strings.TrimSpace(profile.NostrSigningPublicKey)) {
+		return selfMessagingProfile{}, fmt.Errorf("self nostr key mismatch between metadata and private key")
+	}
+	profile.NostrSigningPublicKey = profile.NostrEventSigner.PublicKey()
 	return profile, nil
 }
 

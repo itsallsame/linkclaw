@@ -3,11 +3,15 @@ module github.com/xiewanpeng/claw-identity
 go 1.25.7
 
 require (
+	github.com/btcsuite/btcd/btcec/v2 v2.3.4
 	github.com/gorilla/websocket v1.5.3
 	modernc.org/sqlite v1.46.1
 )
 
 require (
+	github.com/btcsuite/btcd/chaincfg/chainhash v1.0.1 // indirect
+	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

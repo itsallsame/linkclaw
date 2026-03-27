@@ -3,6 +3,7 @@ package message
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/url"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/xiewanpeng/claw-identity/internal/card"
 	agentdiscovery "github.com/xiewanpeng/claw-identity/internal/discovery"
 	discoverylibp2p "github.com/xiewanpeng/claw-identity/internal/discovery/libp2p"
@@ -914,6 +916,122 @@ func TestSendMarksMessageFailedWhenAllRuntimeRoutesFail(t *testing.T) {
 	requireRouteAttempt(t, attempts, string(transport.RouteTypeStoreForward), "failed", "")
 }
 
+func TestSendPublishesNostrEventWithRealSignature(t *testing.T) {
+	t.Setenv(discoverylibp2p.EnvExperimentalDirect, "0")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	initService := initflow.NewService()
+	cardService := card.NewService()
+
+	aliceHome := filepath.Join(t.TempDir(), "alice-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        aliceHome,
+		CanonicalID: "did:key:z6MkAliceSignedNostr",
+		DisplayName: "Alice Signed Nostr",
+	}); err != nil {
+		t.Fatalf("init alice home: %v", err)
+	}
+	aliceCard, err := cardService.Export(ctx, card.Options{Home: aliceHome})
+	if err != nil {
+		t.Fatalf("export alice card: %v", err)
+	}
+	aliceCardJSON, err := json.Marshal(aliceCard.Card)
+	if err != nil {
+		t.Fatalf("marshal alice card: %v", err)
+	}
+
+	bobHome := filepath.Join(t.TempDir(), "bob-home")
+	if _, err := initService.Init(ctx, initflow.Options{
+		Home:        bobHome,
+		CanonicalID: "did:key:z6MkBobSignedNostr",
+		DisplayName: "Bob Signed Nostr",
+	}); err != nil {
+		t.Fatalf("init bob home: %v", err)
+	}
+	imported, err := cardService.Import(ctx, card.ImportOptions{
+		Home:  bobHome,
+		Input: string(aliceCardJSON),
+	})
+	if err != nil {
+		t.Fatalf("import alice card into bob home: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(bobHome, "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(ctx, `UPDATE contacts SET relay_url = ? WHERE contact_id = ?`, "https://relay.storeforward.invalid", imported.ContactID); err != nil {
+		t.Fatalf("set contact relay_url: %v", err)
+	}
+	var canonicalID string
+	if err := db.QueryRowContext(ctx, `SELECT canonical_id FROM contacts WHERE contact_id = ?`, imported.ContactID).Scan(&canonicalID); err != nil {
+		t.Fatalf("query contact canonical_id: %v", err)
+	}
+	selfProfile, err := loadSelfMessagingProfile(ctx, db, bobHome)
+	if err != nil {
+		t.Fatalf("load self messaging profile: %v", err)
+	}
+
+	runtimeStore := agentruntime.NewStoreWithDB(db, now)
+	if err := runtimeStore.UpsertTransportBinding(ctx, agentruntime.TransportBindingRecord{
+		BindingID:    "binding_nostr_signed_send",
+		SelfID:       selfProfile.SelfID,
+		CanonicalID:  canonicalID,
+		Transport:    string(transport.RouteTypeNostr),
+		RelayURL:     "wss://relay.sign.nostr.example",
+		RouteLabel:   "relay-sign",
+		RouteType:    string(transport.RouteTypeNostr),
+		Direction:    "both",
+		Enabled:      true,
+		MetadataJSON: `{"nostr_public_keys":["npub_peer_sign"],"nostr_primary_public_key":"npub_peer_sign"}`,
+	}); err != nil {
+		t.Fatalf("upsert runtime transport binding: %v", err)
+	}
+
+	nostrClient := &stubNostrRecoveryClient{
+		publishReceipt: transportnostr.PublishReceipt{
+			EventID:  "evt_ack_signed",
+			Accepted: true,
+			Message:  "ok",
+		},
+	}
+	service := NewService()
+	service.StoreForwardBackend = &stubFailingMailboxBackend{sendErr: context.DeadlineExceeded}
+	service.NostrRelayClient = nostrClient
+
+	sent, err := service.Send(ctx, SendOptions{
+		Home:       bobHome,
+		ContactRef: imported.ContactID,
+		Body:       "hello signed nostr",
+	})
+	if err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+	if got, want := sent.Message.Status, StatusQueued; got != want {
+		t.Fatalf("message status = %q, want %q", got, want)
+	}
+	if got, want := sent.Message.SelectedRoute.Type, transport.RouteTypeNostr; got != want {
+		t.Fatalf("selected route type = %q, want %q", got, want)
+	}
+	if got, want := len(nostrClient.publishCalls), 1; got != want {
+		t.Fatalf("nostr publish calls = %d, want %d", got, want)
+	}
+	published := nostrClient.publishCalls[0]
+	if got, want := published.RelayURL, "wss://relay.sign.nostr.example"; got != want {
+		t.Fatalf("publish relay url = %q, want %q", got, want)
+	}
+	if got, want := published.Event.PubKey, selfProfile.NostrSigningPublicKey; got != want {
+		t.Fatalf("event pubkey = %q, want self nostr key %q", got, want)
+	}
+	verifyNostrEventSignature(t, published.Event)
+
+	attempts := loadRuntimeRouteAttempts(t, bobHome)
+	requireRouteAttempt(t, attempts, string(transport.RouteTypeNostr), "queued", "")
+}
+
 func TestDeriveTransportStatusSupportsRecoverableAsyncStatuses(t *testing.T) {
 	if got, want := deriveTransportStatus(DirectionOutgoing, StatusRecovering, transport.RouteCandidate{}), TransportStatusDeferred; got != want {
 		t.Fatalf("deriveTransportStatus(outgoing,recovering) = %q, want %q", got, want)
@@ -1096,9 +1214,18 @@ func (b *stubFailingMailboxBackend) Ack(context.Context, string, transportstoref
 }
 
 type stubNostrRecoveryClient struct {
+	publishReceipt transportnostr.PublishReceipt
+	publishErr     error
+	publishCalls   []stubNostrRecoveryPublishCall
+
 	queryEvents []transportnostr.Event
 	queryErr    error
 	queryCalls  []stubNostrRecoveryQueryCall
+}
+
+type stubNostrRecoveryPublishCall struct {
+	RelayURL string
+	Event    transportnostr.Event
 }
 
 type stubNostrRecoveryQueryCall struct {
@@ -1107,8 +1234,19 @@ type stubNostrRecoveryQueryCall struct {
 	Filter         transportnostr.Filter
 }
 
-func (c *stubNostrRecoveryClient) Publish(context.Context, string, transportnostr.Event) (transportnostr.PublishReceipt, error) {
-	return transportnostr.PublishReceipt{}, nil
+func (c *stubNostrRecoveryClient) Publish(_ context.Context, relayURL string, event transportnostr.Event) (transportnostr.PublishReceipt, error) {
+	c.publishCalls = append(c.publishCalls, stubNostrRecoveryPublishCall{
+		RelayURL: relayURL,
+		Event:    event,
+	})
+	if c.publishErr != nil {
+		return transportnostr.PublishReceipt{}, c.publishErr
+	}
+	receipt := c.publishReceipt
+	if receipt.EventID == "" {
+		receipt.EventID = event.ID
+	}
+	return receipt, nil
 }
 
 func (c *stubNostrRecoveryClient) Query(_ context.Context, relayURL string, subscriptionID string, filter transportnostr.Filter) ([]transportnostr.Event, error) {
@@ -1226,4 +1364,31 @@ func hasNostrRouteRecipient(routes []transport.RouteCandidate, relayURL string, 
 		}
 	}
 	return false
+}
+
+func verifyNostrEventSignature(t *testing.T, event transportnostr.Event) {
+	t.Helper()
+	eventHash, err := hex.DecodeString(event.ID)
+	if err != nil {
+		t.Fatalf("decode event id: %v", err)
+	}
+	signatureBytes, err := hex.DecodeString(event.Sig)
+	if err != nil {
+		t.Fatalf("decode event signature: %v", err)
+	}
+	signature, err := schnorr.ParseSignature(signatureBytes)
+	if err != nil {
+		t.Fatalf("parse event signature: %v", err)
+	}
+	pubKeyBytes, err := hex.DecodeString(event.PubKey)
+	if err != nil {
+		t.Fatalf("decode event pubkey: %v", err)
+	}
+	pubKey, err := schnorr.ParsePubKey(pubKeyBytes)
+	if err != nil {
+		t.Fatalf("parse event pubkey: %v", err)
+	}
+	if !signature.Verify(eventHash, pubKey) {
+		t.Fatalf("event signature verification failed: id=%q sig=%q pubkey=%q", event.ID, event.Sig, event.PubKey)
+	}
 }
