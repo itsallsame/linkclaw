@@ -13,7 +13,6 @@ It also includes a local-direct-messaging stack for OpenClaw users:
 
 - `linkclaw card export` and `linkclaw card import` exchange signed identity cards
 - `linkclaw message send`, `sync`, `inbox`, and `outbox` cover one-to-one runtime-backed messaging
-- legacy HTTP store-and-forward compatibility is now internal to the runtime transition and is no longer exposed as a standalone CLI entrypoint
 
 ## 30-Second Flow
 
@@ -89,7 +88,7 @@ The loop is:
 3. Share that card with the other user over any existing channel.
 4. The recipient runs `linkclaw card import <path-or-json>` to save you as a contact.
 5. Messages are sent with `linkclaw message send <contact> --body "..."`
-6. Offline recovery runs through the runtime-backed message path; legacy HTTP relay fallback is compatibility-only and no longer the recommended primary route
+6. Deferred recovery runs through the runtime-backed message path
 
 Minimal local example:
 
@@ -145,11 +144,10 @@ openclaw plugins install ./linkclaw-0.1.0.tgz
 
 Current milestone validation for the OpenClaw natural-language messaging MVP is tracked in git as `milestone-v0-openclaw-dm`.
 
-- [Quickstart](docs/quickstart.md)
-- [Cloudflare Pages Deployment](docs/deploy-cloudflare.md)
+- [Quickstart](docs/arch/quickstart.md)
+- [Cloudflare Pages Deployment](docs/arch/deploy-cloudflare.md)
 - [OpenClaw User Manual (ZH)](docs/OPENCLAW_USER_MANUAL_ZH.md)
-- [OpenClaw Minimal Acceptance (ZH)](docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
-- [OpenClaw Minimal Plugin Config](docs/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json)
-- [OpenClaw Plugin Release Checklist](docs/OPENCLAW_PLUGIN_RELEASE_CHECKLIST.md)
-- [V0 Messaging Plan](docs/v0-messaging-plan.md)
-- [Agent-Social Runtime Design Index](docs/agent-social-runtime-index.md)
+- [OpenClaw Minimal Acceptance (ZH)](docs/arch/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
+- [OpenClaw Minimal Plugin Config](docs/arch/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json)
+- [OpenClaw Plugin Release Checklist](docs/arch/OPENCLAW_PLUGIN_RELEASE_CHECKLIST.md)
+- [Agent-Social Runtime Roadmap](docs/arch/agent-social-runtime-api-and-roadmap.md)

@@ -156,7 +156,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 ### 1. `/linkclaw-onboarding`
 
-用途：作为首用入口，默认会先检查插件是否安装正确、binary 是否可执行，以及 publish origin 是否已配置。
+用途：作为首用入口，默认会先检查插件是否安装正确、binary 是否可执行，以及公开分享入口是否已配置。
 
 ### 2. `/linkclaw-onboarding --display-name <name>`
 

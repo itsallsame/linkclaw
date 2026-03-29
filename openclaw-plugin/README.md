@@ -3,7 +3,7 @@
 如果你是普通用户，先看中文手册：
 
 - [OpenClaw 用户安装与使用手册（中文）](../docs/OPENCLAW_USER_MANUAL_ZH.md)
-- [OpenClaw 最小验收步骤（中文）](../docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
+- [OpenClaw 最小验收步骤（中文）](../docs/arch/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
 
 这个插件的目标是把 OpenClaw 保持在 LinkClaw 边界之外：
 
@@ -28,8 +28,8 @@
 优先阅读：
 
 - [OpenClaw User Manual (ZH)](../docs/OPENCLAW_USER_MANUAL_ZH.md)
-- [OpenClaw Minimal Acceptance (ZH)](../docs/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
-- [OpenClaw Minimal Plugin Config](../docs/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json)
+- [OpenClaw Minimal Acceptance (ZH)](../docs/arch/OPENCLAW_MINIMAL_ACCEPTANCE_ZH.md)
+- [OpenClaw Minimal Plugin Config](../docs/arch/OPENCLAW_MINIMAL_PLUGIN_CONFIG.json)
 
 ### Zero-config baseline
 
@@ -53,7 +53,6 @@ Defaults:
 - `binaryPath`: optional when the packaged plugin already includes a bundled `linkclaw` runtime, or when `linkclaw` is discoverable via `LINKCLAW_BINARY`, repo-local candidates, or `PATH`
 - `home`: defaults to `~/.linkclaw`
 - `directUrl` / `directToken`: optional direct host-to-host online delivery endpoint and shared secret
-- `relayUrl`: optional compatibility-only legacy HTTP fallback; use it only if you still want the old store-and-forward path
 
 For most local installs, the fastest path is:
 
@@ -61,7 +60,6 @@ For most local installs, the fastest path is:
 2. run `/linkclaw-onboarding`
 3. only configure `binaryPath` if you want to override the packaged runtime
 4. configure `directUrl` + `directToken` on both hosts if you want online host-to-host delivery
-5. only configure `relayUrl` if you explicitly want legacy HTTP fallback compatibility
 
 ### Development checkout
 
@@ -112,7 +110,6 @@ openclaw plugins enable linkclaw
 Expected signals:
 
 - `binary: ok (...)`
-- `relay: ...`
 - `publish origin: ...`
 
 If the host is not initialized yet, `state: not initialized` is expected at this point.
@@ -213,7 +210,6 @@ Config notes:
 - `home`: default `LINKCLAW_HOME` for `init`, `publish`, `import`, and `known_*`.
 - `directUrl`: optional direct receive endpoint advertised in exported identity cards.
 - `directToken`: optional shared secret required by the direct receive endpoint.
-- `relayUrl`: optional compatibility-only legacy HTTP fallback. If omitted, the plugin does not inject a relay URL at all. `LINKCLAW_RELAY_URL` still works as an environment override when you intentionally want that fallback path.
 - `publishOrigin`: default public origin for `/linkclaw-share` and `/linkclaw-publish`.
 - `publishOutput`: default publish directory; falls back to `<home>/publish`.
 - `publishTier`: default publish tier for the publish skill.
@@ -229,9 +225,7 @@ Before trying A/B messaging, verify these host-level conditions:
 
 - OpenClaw can execute the configured `binaryPath`
 - `home` points to a writable directory
-- if you still use legacy HTTP fallback, `relayUrl` is reachable from this machine
 - if you want public share links, `publishOrigin` resolves to a published LinkClaw bundle
-- if you still use legacy HTTP fallback, that relay is reachable from both peers, not only from localhost on one side
 - `plugins.allow` includes `linkclaw` if you want a clean trusted-host config
 
 ## Surfaces
@@ -275,13 +269,13 @@ Before trying A/B messaging, verify these host-level conditions:
 - Command: `/linkclaw-inbox`
   - lists local conversations, flags unknown senders, and can filter by contact or preview text
 - Command: `/linkclaw-sync`
-  - syncs runtime-backed messages into the local inbox, and can still use legacy HTTP fallback when configured
+  - syncs runtime-backed messages into the local inbox
 - Service: background sync
-  - polls the runtime message path in the background; legacy HTTP fallback sync only activates when `relayUrl` is configured
+  - polls the runtime message path in the background
 - Hook: `message:preprocessed`
   - watches inbound messages for explicit `did.json` or `agent-card.json` URLs, runs `linkclaw inspect`, and prompts for import unless the identity is already known
 
-If your OpenClaw runtime exposes lifecycle events, the plugin also runs background sync on session start and inbound message receive. It also registers a lightweight polling service for periodic relay sync. When new relay messages arrive from an unknown sender, the plugin adds a prompt telling the user to open `/linkclaw-inbox` and request an identity card before saving the sender as a contact.
+If your OpenClaw runtime exposes lifecycle events, the plugin also runs background sync on session start and inbound message receive. It also registers a lightweight polling service for periodic sync. When new messages arrive from an unknown sender, the plugin adds a prompt telling the user to open `/linkclaw-inbox` and request an identity card before saving the sender as a contact.
 
 ## First Use
 
@@ -291,13 +285,12 @@ Shortest path:
 2. Run `/linkclaw-onboarding`.
 3. Run `/linkclaw-onboarding --display-name <name>`.
 4. Run `/linkclaw-share --card`.
-5. Only configure `relayUrl` or `LINKCLAW_RELAY_URL` if you intentionally want legacy HTTP fallback compatibility.
 
 Extended path:
 
 1. Make sure `linkclaw` is either on `PATH` or configured via `binaryPath`.
 2. Run `/linkclaw-setup --display-name <name>`.
-   It now reports lightweight setup checks for the resolved binary path, relay reachability, and publish-origin readiness.
+   It now reports lightweight setup checks for the resolved binary path and publish-origin readiness.
    If you only want to validate the environment first, run `/linkclaw-setup --check-only`.
    You can also run `/linkclaw-status` at any time to review readiness, contacts, and inbox state in one place.
 3. Run `/linkclaw-share` after you have published a bundle, or `/linkclaw-share --card` if you want to exchange a raw signed identity card directly.
@@ -308,7 +301,6 @@ Extended path:
 7. Start messaging with `/linkclaw-message <contact> <text>`.
 8. Review one conversation with `/linkclaw-thread <contact>`.
 9. Reply in-place with `/linkclaw-reply <contact> <text>`.
-10. Only configure `relayUrl` if you explicitly need legacy HTTP fallback.
 
 ## Verification Checklist
 
@@ -318,12 +310,11 @@ After installation, this is the fastest way to verify the plugin is wired correc
 2. Run `/linkclaw-status`.
 3. Confirm `state:` is either `ready` or `not initialized`, depending on the home.
 4. Confirm `binary: ok (...)` appears.
-5. Confirm `relay:` is either `ok (...)` or intentionally `not configured`.
-6. If you use public share links, confirm `publish origin:` is `ok ...`.
-7. Initialize the home with `/linkclaw-setup --canonical-id ... --display-name ...`.
-8. Run `/linkclaw-share --card` and verify the plugin prints `card compact:`.
-9. Import that card on another host with `/linkclaw-connect '<card-json>'`.
-10. Send a test message with `/linkclaw-message ...`.
+5. If you use public share links, confirm `publish origin:` is `ok ...`.
+6. Initialize the home with `/linkclaw-setup --canonical-id ... --display-name ...`.
+7. Run `/linkclaw-share --card` and verify the plugin prints `card compact:`.
+8. Import that card on another host with `/linkclaw-connect '<card-json>'`.
+9. Send a test message with `/linkclaw-message ...`.
 
 ## Minimal Acceptance
 
@@ -336,7 +327,6 @@ For a host-level go/no-go check, this is the shortest acceptance sequence:
 5. Confirm:
    - `state:` is reported
    - `binary: ok (...)` appears
-   - `relay:` is either `ok (...)` or intentionally `not configured`
    - no `linkclaw`-specific plugin load warnings appear in `openclaw plugins list --json`
 6. Run `/linkclaw-share --card`.
 7. Import that card from another host with `/linkclaw-connect '<card-json>'`.
@@ -425,7 +415,6 @@ That makes it easier for an OpenClaw host to add copy buttons or extract those s
 6. Use `/linkclaw-sync` or let the lifecycle hook sync automatically.
 7. Review conversations with `/linkclaw-inbox` or filter with `/linkclaw-inbox <query>`.
 8. Open one conversation with `/linkclaw-thread <contact>` and answer with `/linkclaw-reply <contact> <text>`.
-9. Only configure `relayUrl` when you intentionally want legacy HTTP fallback compatibility.
 
 ## A/B Walkthrough
 
@@ -435,7 +424,7 @@ This is the shortest end-to-end path for two OpenClaw users who want to exchange
 
 - A and B both installed the plugin
 - both sides can resolve `linkclaw` either from config or `PATH`
-- both sides use the default runtime-backed path unless they intentionally enable legacy HTTP fallback
+- both sides use the current runtime-backed path
 
 ### A side
 
@@ -506,8 +495,6 @@ Because `/linkclaw-thread Bob` sets reply context, the last command can omit the
 
 ### Troubleshooting
 
-- If `/linkclaw-setup` shows `relay: not configured`, that is normal unless you intentionally enabled legacy HTTP fallback.
-- If `/linkclaw-setup` shows `relay: unreachable (...)`, fix network reachability before testing messaging.
 - If `/linkclaw-setup` shows `publish origin: configured but bundle missing ...`, publish the bundle first or use `/linkclaw-share --card`.
 - If `/linkclaw-connect` fails on pasted chat content, try the compact one-line JSON from `/linkclaw-share --card`.
 - If `/linkclaw-message Alice ...` is ambiguous, the plugin will print copy-ready commands using canonical ids.

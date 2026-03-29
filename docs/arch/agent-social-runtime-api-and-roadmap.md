@@ -2,17 +2,13 @@
 
 ## Status
 
-This document completes the communication-layer design set by defining:
+This document is the surviving historical summary for the communication-layer refactor. It defines:
 
 - the runtime API contract
 - CLI/plugin-to-runtime mapping
 - staged development TODO lists
 
-It should be read after:
-
-- [agent-social-runtime-design.md](/home/ubuntu/fork_lk/linkclaw/docs/agent-social-runtime-design.md)
-- [agent-social-runtime-implementation-plan.md](/home/ubuntu/fork_lk/linkclaw/docs/agent-social-runtime-implementation-plan.md)
-- [agent-social-runtime-clean-slate-plan.md](/home/ubuntu/fork_lk/linkclaw/docs/agent-social-runtime-clean-slate-plan.md)
+The earlier design-set documents have been retired after implementation landed; this file remains as the compact record of the final runtime/API direction and milestone status.
 
 ## Runtime API Contract
 
@@ -63,12 +59,6 @@ Suggested result shape:
 - `unread_count`
 - `last_sync_at`
 - `presence_summary`
-
-Readiness contract:
-
-- `identity_ready`: self identity exists in runtime state (`self_id` is available).
-- `transport_ready`: identity is ready and runtime transport capabilities are registered.
-- `discovery_ready`: runtime has peer discovery/presence facts (peer presence cache entries), not just transport feature toggles.
 
 ### 3. ExportCard
 
@@ -425,9 +415,8 @@ Current status:
 
 - complete
 - runtime-backed `message status` now exists in core service/CLI
-- runtime status now surfaces `transport_ready` readiness and normalized message transport states (`direct` / `deferred` / `recovered`) with recent route outcome summaries
 - OpenClaw `/linkclaw-status` now consumes runtime-backed status instead of reconstructing state from `known ls` and `message inbox`
-- plugin status copy now prefers product language such as messaging/offline recovery/direct transport instead of exposing raw store-forward counters directly
+- plugin status copy now prefers product language such as messaging/direct transport instead of exposing raw store-forward counters directly
 - onboarding/share/connect/message/inbox user flows continue to pass through the rebinding layer
 
 TODO:
@@ -449,7 +438,6 @@ Current status:
 - complete
 - onboarding on clean homes is covered by runtime/plugin tests
 - two-host card exchange and message flow are covered by plugin command tests
-- offline recovery now has explicit status-surface validation after sync
 - direct delivery now has a real cross-host plugin HTTP endpoint path guarded by `directUrl` / `directToken`
 
 TODO:
@@ -457,7 +445,6 @@ TODO:
 - [x] validate onboarding on a clean host
 - [x] validate card exchange on two hosts
 - [x] validate direct delivery when both hosts are online
-- [x] validate offline recovery after recipient reopens OpenClaw
 - [x] validate plugin natural-language flows still work
 
 ### Phase 8: Optional Future Work
@@ -485,31 +472,28 @@ TODO:
 - [x] evaluate optional advanced background-runtime mode
 - [x] add hooks for future reputation/payment/penalty layers
 
-### Phase 9: Remove Legacy HTTP Relay
+### Phase 9: Remove Legacy HTTP Transport
 
 Goal:
 
-- replace `linkclaw-relay` with runtime-owned store-and-forward transport and remove relay-centric product paths
+- replace the standalone legacy transport entrypoint with runtime-owned store-and-forward transport and remove relay-centric product paths
 
 Current status:
 
-- in progress
-- a dedicated `internal/transport/storeforward` adapter now exists and has replaced the inline legacy callback transport in runtime orchestration
-- runtime bridge no longer embeds relay fallback behavior directly; it now delegates through a runtime-owned store-forward transport boundary
-- `message.Service` now depends on a `StoreForwardBackend` contract instead of owning `relayclient.Client` directly; the old HTTP relay path is now only one backend implementation
-- plugin schema, bridge defaults, and end-user docs now treat `relayUrl` as a compatibility-only legacy HTTP fallback instead of the recommended primary path
-- relayclient request/response types have been pulled out of the message main path; `message.Service` and runtime bridge now talk through runtime-owned store-forward request/response types, leaving the HTTP relay shape isolated inside the legacy backend implementation
-- the legacy HTTP fallback implementation itself now lives under `internal/transport/storeforward`, so the `internal/message` package no longer imports `internal/relayclient` directly
-- the standalone `internal/relayclient` package has been deleted; `internal/relayserver` tests and legacy HTTP mailbox logic now both use `internal/transport/storeforward`
-- the standalone `cmd/linkclaw-relay` entrypoint has been removed; relay compatibility is now test-only through `internal/relayserver` and the OpenClaw test shim
+- complete
+- the standalone legacy transport entrypoint has been removed
+- plugin schema, bridge defaults, and end-user docs no longer expose the legacy relay config key
+- legacy OpenClaw relay tests and relay-specific status copy have been removed from the current product surface
+- remaining transport code under `internal/transport/storeforward` is now internal cleanup debt rather than an exposed compatibility path
 
 TODO:
 
 - [x] introduce a runtime-owned `storeforward` transport package
 - [x] move `message send/sync/ack` relay operations behind a transport/backend contract instead of direct `relayclient` ownership in `message.Service`
-- [x] rebind plugin/docs/default config away from `relayUrl` as the primary path
+- [x] remove the legacy relay config key from plugin/docs/default config
 - [x] remove `internal/relayclient`
-- [x] remove `cmd/linkclaw-relay`
+- [x] remove the standalone legacy transport entrypoint
+- [x] remove legacy OpenClaw relay tests
 
 ## Recommended Immediate Build Sequence
 

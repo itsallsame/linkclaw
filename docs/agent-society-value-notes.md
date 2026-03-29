@@ -408,7 +408,7 @@ Agent 之间要能稳定交换消息、文件、任务和状态。
 3. 本地信任系统
    已完成：`known ls/show/trust/note/refresh/rm`
 4. 通信底座
-   已完成：一对一消息 runtime + store-forward + 插件接入
+   已完成：一对一消息 runtime + relay-backed store-forward + 插件接入
 5. 可信身份增强
    下一步重点：social anchors、社会证明、自然语言信任提示
 6. 开放发现网络

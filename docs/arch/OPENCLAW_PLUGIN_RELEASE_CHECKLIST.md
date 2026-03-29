@@ -71,7 +71,6 @@ Recommended minimum host config:
 Assumptions:
 
 - packaged installs include a bundled `linkclaw` runtime for the current platform
-- no legacy HTTP fallback is required for the normal runtime-backed path
 
 ## 5. First-run acceptance
 
@@ -86,8 +85,6 @@ After host restart:
 Expected result:
 
 - onboarding reports binary health
-- relay may be `not configured` unless you intentionally enable legacy HTTP fallback
-- identity card includes `relay_url` only when that legacy fallback is explicitly configured
 - messages queue or deliver successfully through the current runtime-backed path
 - the second host can sync and read the message
 
@@ -96,7 +93,7 @@ Expected result:
 Before publishing or handing the package to another team:
 
 - update `openclaw-plugin/README.md` if install steps changed
-- update `docs/OPENCLAW_USER_MANUAL_ZH.md` if first-run flow changed
+- update `docs/arch/OPENCLAW_USER_MANUAL_ZH.md` if first-run flow changed
 - confirm the package version in `openclaw-plugin/package.json`
 
 ## 7. Release strategy
@@ -124,7 +121,5 @@ Do not document `pnpm add ...` as the primary OpenClaw install flow. OpenClaw pl
 
 Do not include local runtime artifacts such as:
 
-- `linkclaw-relay.db`
 - local `~/.linkclaw` state
 - temporary exported cards
-- test relay databases or relay shim outputs

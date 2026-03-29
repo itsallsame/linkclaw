@@ -17,7 +17,6 @@ This document defines the canonical post-connect local promotion rules for `mess
 - If missing, create a minimal contact (display name fallback to canonical id).
 - If present, only backfill missing fields and refresh `last_seen_at`:
   - `recipient_id` (from peer presence when available)
-  - `relay_url` (from store-forward hints/routes when available)
 
 ### 2) Trust promotion
 

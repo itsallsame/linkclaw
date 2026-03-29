@@ -8,7 +8,6 @@
 
 - OpenClaw 宿主已经可运行
 - `linkclaw` 已经在 `PATH` 中，或已经设置 `LINKCLAW_BINARY`
-- 如果你还要兼容旧的 HTTP store-and-forward fallback，再额外准备一个 relay
 
 最小配置模板见：
 
@@ -61,8 +60,6 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 - 能返回结果
 - 能看到 `binary: ok (...)`
-- 能看到 `relay: ...`
-- 如果没有显式配置旧 fallback，看到 `relay: not configured` 也是正常的
 - 第一次运行时看到 `state: not initialized` 是正常的
 
 ### 4. 初始化身份
@@ -90,8 +87,7 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 通过标准：
 
 - 返回一张 identity card
-- 如果没有显式配置旧 fallback，card 中可以不包含 `relay_url`
-- 如果你显式配置了 `relayUrl`，card 中应包含 `relay_url`
+- card 中包含可用于连接的当前 identity 信息
 
 ### 6. 另一台宿主导入并发消息
 
@@ -106,7 +102,6 @@ openclaw plugins install /path/to/linkclaw-0.1.0.tgz
 
 - 联系人导入成功
 - 消息发送状态不是卡在本地未路由
-- 如果你在验旧 HTTP fallback 兼容路径，再确认双方都显式配置了同一个 `relayUrl`
 
 ### 7. 第一台宿主同步并收消息
 
